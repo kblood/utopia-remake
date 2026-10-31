@@ -1,0 +1,13 @@
+{
+  "name": "utopia-remake",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Clean-room browser recreation of Utopia, based on behavioural analysis",
+  "scripts": {
+    "build": "tsc",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\""
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,25 @@
+# Build output and dependencies
+node_modules/
+dist/
+
+# Original game data. Never commit copyrighted disks, archives or extracted files.
+original/
+*.adf
+*.ipf
+*.dms
+*.hdf
+*.lha
+*.zip
+*.uae
+*.Slave
+*.info
+*.rom
+*.exe
+*.dll
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
