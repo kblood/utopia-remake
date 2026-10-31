@@ -19,6 +19,20 @@ Observationer fra filerne i `original/utopia-whdload/`. Mappen er gitignored. De
 
 **Konsekvens:** Tekstdata kan udtrækkes direkte, når tekstkodningen er forstået. Det er en god første decoder at skrive.
 
+### Disk.2 – regioner (målt, ingen tekst gengivet)
+
+- 476–480 KiB: almindelig ASCII-tekst (ca. 95 % udskrivbare tegn, ingen høje bit).
+- 724–792 KiB: almindelig ASCII-tekst, afbrudt af 0x00-bytes som linjeskift/separator.
+- 816–960 KiB: gentaget fyldmønster, ingen tekst.
+- Øvrige områder: binært indhold, ikke undersøgt.
+
+Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.txt` (gitignored).
+
+## Utopia.Slave
+
+- Indeholder strenge for `Utopia`, `1991 Gremlin` og WHDLoad-versionen `1.2`.
+- Refererer til filnavnet `Disk.4`, så spillet indlæser disk.4 som en fil.
+
 ## disk.4 (656 bytes)
 
 - Begynder med `XPKF`. Pakket med XPK-biblioteket, sub-bibliotek `MASH`.
