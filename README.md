@@ -4,7 +4,9 @@
 
 Dekompilere Amiga-spillet **Utopia** (*Utopia: The Creation of a Nation*) og bruge det til at genskabe spillet i en ny implementering. Første platform er endnu ikke valgt. Udgangspunktet er en webbrowser, fordi tidligere projekter er bygget dér.
 
-Projektet er til personligt og undervisningsmæssigt brug. Genskabelsen skal bygge på egen kode og egne assets. Originale diskbilleder, grafik, musik eller kode må ikke distribueres med resultatet.
+Projektet er en ScummVM-lignende motor. Motoren er egen kode og indeholder ingen spildata. Spillet bruger de originale assets fra brugerens egen kopi, og de læses lokalt fra `original/`. Originale diskbilleder, grafik, musik eller kode må ikke committes eller distribueres med resultatet.
+
+Arkitekturen er beskrevet i [notes/ARCHITECTURE.md](notes/ARCHITECTURE.md).
 
 ## Status
 

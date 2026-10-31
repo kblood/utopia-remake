@@ -2,6 +2,8 @@
 
 Denne mappe indeholder analyse af Utopia-spillet. Den bruges til clean-room-specifikationer, ikke til kopieret kode eller assets.
 
+Arkitektur og dataformat-arbejdsgang står i [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Regler for denne mappe
 
 - Skriv hvad spillet gør (adfærd, formler, tilstande), ikke hvordan originalkoden er skrevet.
