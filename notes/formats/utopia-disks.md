@@ -28,6 +28,18 @@ Observationer fra filerne i `original/utopia-whdload/`. Mappen er gitignored. De
 
 Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.txt` (gitignored).
 
+### Disk.2 – entropikort (målt, pr. 8 000-byte blok)
+
+Blokken er valgt, fordi en bitplan i Utopias billedformat fylder 8 000 bytes. Kortet er en klassificering og ikke en dekodning.
+
+- Store områder er "sparse", med over 50 % nul-bytes. Det passer til komprimerede eller spredte billeddata.
+- Nogle områder er "mixed" med høj entropi (5–6 bit pr. byte). Det kan være komprimerede data.
+- Der er to områder med ren tekst, ved ca. `0x0B5A40`–`0x0C3500` og `0x0C3500`–`0x0C5440`.
+- Fra ca. `0x0CD140` og frem er der områder med præcis 2 bit pr. byte og ingen nul-bytes. Det passer til et mønster af to byteværdier.
+- Hverken komprimeringsformatet eller billedformatet er identificeret. Der er ingen gyldig MASH-header i Disk.2.
+
+**Konsekvens:** Disk.2 er ikke et simpelt billedlager. Billederne er enten komprimerede eller ligger i et format, der kræver at vi følger loaderen.
+
 ## HD-installationer (sjekket)
 
 - `AmigaHardDisks\CaldorsHD`, `ClassicWBHD` og `Extra\CaldorHDBackup` indeholder kun `igame.iff` (20 574 bytes) i `Games\U\Utopia`. Det er ikke spildata, så der er ingen udpakket Disk.1 eller disk.4 at hente der.
