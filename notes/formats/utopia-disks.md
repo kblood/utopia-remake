@@ -76,7 +76,10 @@ Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er
 - Verificeret: CRC-16/ARC (polynomium $8005, reflekteret, start 0) af de 0x7800 bytes i Disk.1 fra offset `$3000` giver `$D9C1`, som er den første værdi slaven tjekker imod. Bufferen er altså en lineær kopi af filen fra byte-offset `$3000`, uden sektorhoveder i det område.
 - Bufferen starter med en hopinstruktion til `$078550`. Derfra dekodes mindst 400 instruktioner i træk uden fejl. Startsekvensen sætter stakken op og kalder underrutiner. Det er spillets egen kode, ikke data.
 - Rutinen ved `$078DE4` opsætter skærmen. Den sætter 5 bitplaner i lowres (BPLCON0 `$5200`), DIW-start `$2C83` og stop `$2CBF`, DDF-start `$30` og stop `$D0`, og nulstiller BPLCON1/2. Det er et standard 320×256 PAL-billede.
-- Rutinen ved `$078EBE` peger copperen på en kopilist (COP1LC) og venter på en strobe. Titelskærmens data ligger derfor i en copper-liste, som endnu ikke er fundet.
+- Rutinen ved `$078EBE` peger copperen på en kopilist (COP1LC). Kopilisten ligger ved `$079232` og er et kort program uden waits: 19 MOVE-instruktioner. Den sætter BPLCON0 `$5200` og fem bitplane-pointere, BPL1–5 ved `$068158`, `$06A098`, `$06BFD8`, `$06DF18` og `$06FE58`. Planerne ligger 8 000 bytes fra hinanden (40 bytes × 200 linjer), altså 5 planer × 8 000 bytes.
+- Rutinen ved `$078CAA` fylder 40 000 bytes fra `$068158` med et 40-bytes mønster hentet fra `$0791D2`. Det er en tom baggrund før billedet tegnes.
+- Rutinen ved `$078E4C` installerer et VBLANK-interrupt på `$078F40` (vektor `$6C`) og aktiverer interruptet. Den er spillets frame-loop.
+- Billedets pixeldata kommer ikke fra Disk.1's kodeområde. Den skal indlæses fra en anden disk-læsning, og den er endnu ikke fundet statisk.
 - Rutinen ved `$077F32` er den, som slaven patcher til `rts`, så den er ikke en del af spillets skærmvisning.
 - Hele bufferen er blandet: ca. 7 000 bytes dekoder som gyldig kode, og resten er tabeller eller data. Den nøjagtige grænse er ikke kortlagt.
 - Destinationen `$077F18` er den samme som boot-kodens kald til `$077F18` i Disk.1. Slaven og boot-koden indlæser altså samme kode.
