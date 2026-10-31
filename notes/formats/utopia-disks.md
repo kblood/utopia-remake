@@ -35,12 +35,21 @@ Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.t
 
 **Konsekvens:** Der findes ingen udpakket kopi af disk.4 eller Disk.1 på disken. Udpakning skal derfor ske via emulator eller ved en decoder.
 
+## Disk.1 boot-kode (disassembleret, kun strukturen)
+
+- Koden starter ved offset 12 i boot-blokken. Offset 0 indeholder `DOS\0` og er ikke kode.
+- Første 1 024 bytes giver 267 instruktioner. De består mest af `move.w`, `bsr.w`, `lea` og `rts`.
+- Kalder absolutte adresser `$058000` og `$077F18`. Den sidste ligger lige under `0x078000`, hvor disk.4-dataregionen starter.
+- Skriver `$4489` til `$7e(a6)`. Hvis a6 peger på `$DFF000`, er det DSKSYNC-registeret. Spillet læser altså spor rå via diskettecontrolleren med standard MFM-sync, og ikke via AmigaDOS.
+
+**Konsekvens:** Læsningen af spor er et eget loader-system. Hele layoutet kan ikke rekonstrueres uden at følge loaderen. Det er en stærk kandidat til et manuelt hukommelsesdump i WinUAE.
+
 ## Spor-hypotese (målt, ikke bekræftet)
 
 - Disk.1 er 158 spor × 6 144 bytes, og Disk.2 er 160 spor × 6 144 bytes. Begge er præcis delelige.
 - 6 144 bytes = 12 sektorer à 512 bytes pr. spor. Det er ikke standard Amiga-DD (11 sektorer), så spillet bruger sandsynligvis et eget spor-layout.
 - Disk.1 har ét helt nul-spor. Disk.2 har ingen. Der er 28 nul-sektorer i Disk.1 og 3 i Disk.2.
-- Hypotesen skal bekræftes, fx ved at se om sporene har en fælles header eller en sync-struktur.
+- Hypotesen skal bekræftes. Spor-starterne har ingen fælles header (147 forskellige 4-byte-starter i Disk.1 af 158 spor), og der er ingen 0x4489-markører pr. spor. Layoutet er altså ikke et simpelt sektor-format.
 
 ## Utopia.Slave
 
