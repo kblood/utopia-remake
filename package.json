@@ -2,6 +2,7 @@
   "name": "utopia-remake",
   "version": "0.0.1",
   "private": true,
+  "type": "module",
   "description": "Clean-room browser recreation of Utopia, based on behavioural analysis",
   "scripts": {
     "build": "tsc",

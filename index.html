@@ -44,7 +44,12 @@
   <body>
     <main>
       <canvas id="screen" width="320" height="256"></canvas>
-      <p>Foreløbig skærm. Ingen spildata er indlæst.</p>
+      <p>
+        Vælg mappen med din egen kopi af spillet (WHDLoad-mappen med Disk.1, Disk.2, disk.4 og Utopia.Slave).
+        Filerne læses kun lokalt og uploades ikke.
+      </p>
+      <input id="folder" type="file" webkitdirectory />
+      <p id="status">Ingen mappe valgt.</p>
     </main>
     <script type="module" src="./dist/main.js"></script>
   </body>
