@@ -42,6 +42,8 @@ Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.t
 - Kalder absolutte adresser `$058000` og `$077F18`. Den sidste ligger lige under `0x078000`, hvor disk.4-dataregionen starter.
 - Skriver `$4489` til `$7e(a6)`. Hvis a6 peger på `$DFF000`, er det DSKSYNC-registeret. Spillet læser altså spor rå via diskettecontrolleren med standard MFM-sync, og ikke via AmigaDOS.
 
+- Længere inde i koden (under 0x800) sættes DSKPTH (`$20`), DSKLEN (`$24`), DSKSYNC (`$7e`), ADKCON (`$9e`) og INTREQ (`$9c`). DSKLEN-værdien `$980c` angiver en rå læsning på 0x180C ord (6 156 ord, ca. 12,3 KB). Det er tæt på en standard Amiga-spor-læsning, men ikke identisk.
+
 **Konsekvens:** Læsningen af spor er et eget loader-system. Hele layoutet kan ikke rekonstrueres uden at følge loaderen. Det er en stærk kandidat til et manuelt hukommelsesdump i WinUAE.
 
 ## Spor-hypotese (målt, ikke bekræftet)
