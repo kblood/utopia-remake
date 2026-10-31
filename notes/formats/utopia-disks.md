@@ -46,7 +46,13 @@ Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.t
 - Længdefeltet i headeren angiver 648 bytes pakket data. Den udpakkede størrelse er ikke verificeret.
 - Kan udpakkes med `xpkmaster.library` og `MASH`-sub-biblioteket. Der findes en kopi af `xpkmaster.library` og `xfdmaster.library` i `E:\Games\Emulator\Amiga\AmigaHardDisks\...\Libs\`. De er Amiga-biblioteker og kører ikke direkte på Windows.
 
-**Konsekvens:** Udpakning kræver enten en Amiga-kørsel i WinUAE eller en Python-implementering af MASH-formatet. Det er ikke gjort endnu.
+**Udpakket (verificeret):** `tools/xpk_mash.py` er en Python-port af MASH-dekoderen i temisu/ancient (BSD-2-Clause, se `tools/LICENSE-ancient.txt`). Den udpakker disk.4 til præcis 983 040 bytes, som matcher headerens rå størrelse. Output ligger lokalt i `original/extracted/disk4.bin` (gitignored).
+
+- 982 836 af de 983 040 bytes er 0x00.
+- Der er én sammenhængende region med data på 1 004 bytes ved offset 0x078000 (480 KiB). Den er ikke analyseret endnu.
+- Samme startadresse som tekstregionen i Disk.2, men det er et andet data-sæt.
+
+**Konsekvens:** disk.4 er en sparsom buffer med én datablok. Næste skridt er at bestemme, hvad den 1 004 bytes store region er (tabel, kode eller grafik).
 
 ## Andre filer
 
