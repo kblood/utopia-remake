@@ -63,14 +63,17 @@ Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.t
 
 Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er `jsr d16(a6)`.
 
-- Offset `$28` er disk-læsning. Den tager destination i `a0`, startoffset i `d0`, længde i `d1` og disknummer i `d2`. Hovedkaldet læser offset `$3000`, længde `$7800`, disk 1, til destination `$077F18`.
-- Offset `$30` er checksum. Den kaldes på bufferen ved `$077F18` med længden `$7800`. Resultatet sammenlignes med to kendte værdier, og en forkert værdi fører til en afslutningssti.
-- Offset `$34`, `$38` og `$20` bruges også. Funktionerne er ikke identificeret endnu.
+- Offset `$28` er `resload_DiskLoad` (identificeret ved at sammenligne med WHDLoad-autodoc: d0 offset, d1 størrelse, d2 disknummer, a0 destination). Den tager destination i `a0`, startoffset i `d0`, længde i `d1` og disknummer i `d2`. Hovedkaldet læser offset `$3000`, længde `$7800`, disk 1, til destination `$077F18`.
+- Offset `$30` er `resload_CRC16` (d0 længde, a0 adresse, jf. WHDLoad-autodoc). Den kaldes på bufferen ved `$077F18` med længden `$7800`. Resultatet sammenlignes med to kendte værdier, og en forkert værdi fører til en afslutningssti.
+- Offset `$34` er ikke identificeret. Ét kald ligger i et område, som den lineære dekodning læser forkert, så det er upålideligt. Det andet kald tager en pointer til en stakstruktur i `a0`.
+- Offset `$38` er sandsynligvis `resload_LoadFileOffset` (navn i `a0`, destination i `a1`, offset og størrelse i `d0`/`d1`). Navnet peger på strengen `Disk.4` ved kodeoffset `$4C4`. Hypotesen er ikke verificeret.
+- Offset `$20` er ikke identificeret.
 - En wrapper kaldes med et interval af byte-offsets og skifter dem med 7 bit (divideres med 128) før kaldet. Den kan vælge disk 1–3 via et flag. Det er flere disk-læsninger end hovedkaldet.
 
 ### Konsekvens for layoutet (målt, ikke bekræftet)
 
 - Offset `$3000` er 12 288 bytes = 2 × 6 144, og længden `$7800` er 30 720 bytes = 5 × 6 144. Det passer til sporhypotesen om 6 144 bytes pr. spor, hvor spillet læser spor 2–6 af Disk.1.
+- Verificeret: CRC-16/ARC (polynomium $8005, reflekteret, start 0) af de 0x7800 bytes i Disk.1 fra offset `$3000` giver `$D9C1`, som er den første værdi slaven tjekker imod. Bufferen er altså en lineær kopi af filen fra byte-offset `$3000`, uden sektorhoveder i det område.
 - Destinationen `$077F18` er den samme som boot-kodens kald til `$077F18` i Disk.1. Slaven og boot-koden indlæser altså samme kode.
 - Efter indlæsningen skriver slaven patches (16- og 32-bit) til adresser i og omkring det indlæste område og til lavt RAM. Det er rettelser af kode og ikke data.
 
@@ -83,7 +86,8 @@ Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er
 **Udpakket (verificeret):** `tools/xpk_mash.py` er en Python-port af MASH-dekoderen i temisu/ancient (BSD-2-Clause, se `tools/LICENSE-ancient.txt`). Den udpakker disk.4 til præcis 983 040 bytes, som matcher headerens rå størrelse. Output ligger lokalt i `original/extracted/disk4.bin` (gitignored).
 
 - 982 836 af de 983 040 bytes er 0x00.
-- Der er én sammenhængende region med data på 1 004 bytes ved offset 0x078000 (480 KiB). Den er ikke analyseret endnu.
+- Der er ét område med data ved offset 0x078000 (480 KiB). Det spænder over 1 004 bytes, men kun 204 af dem er ikke-nul. Der er altså huller inde i området.
+- De første bytes er ASCII-tekst, og resten er blandet. Teksten gengives ikke her. Der er ikke fundet en formatbeskrivelse endnu.
 - Samme startadresse som tekstregionen i Disk.2, men det er et andet data-sæt.
 
 **Konsekvens:** disk.4 er en sparsom buffer med én datablok. Næste skridt er at bestemme, hvad den 1 004 bytes store region er (tabel, kode eller grafik).
