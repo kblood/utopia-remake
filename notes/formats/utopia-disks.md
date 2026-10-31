@@ -35,6 +35,13 @@ Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.t
 
 **Konsekvens:** Der findes ingen udpakket kopi af disk.4 eller Disk.1 på disken. Udpakning skal derfor ske via emulator eller ved en decoder.
 
+## Spor-hypotese (målt, ikke bekræftet)
+
+- Disk.1 er 158 spor × 6 144 bytes, og Disk.2 er 160 spor × 6 144 bytes. Begge er præcis delelige.
+- 6 144 bytes = 12 sektorer à 512 bytes pr. spor. Det er ikke standard Amiga-DD (11 sektorer), så spillet bruger sandsynligvis et eget spor-layout.
+- Disk.1 har ét helt nul-spor. Disk.2 har ingen. Der er 28 nul-sektorer i Disk.1 og 3 i Disk.2.
+- Hypotesen skal bekræftes, fx ved at se om sporene har en fælles header eller en sync-struktur.
+
 ## Utopia.Slave
 
 - Indeholder strenge for `Utopia`, `1991 Gremlin` og WHDLoad-versionen `1.2`.
