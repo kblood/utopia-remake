@@ -74,6 +74,8 @@ Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er
 
 - Offset `$3000` er 12 288 bytes = 2 × 6 144, og længden `$7800` er 30 720 bytes = 5 × 6 144. Det passer til sporhypotesen om 6 144 bytes pr. spor, hvor spillet læser spor 2–6 af Disk.1.
 - Verificeret: CRC-16/ARC (polynomium $8005, reflekteret, start 0) af de 0x7800 bytes i Disk.1 fra offset `$3000` giver `$D9C1`, som er den første værdi slaven tjekker imod. Bufferen er altså en lineær kopi af filen fra byte-offset `$3000`, uden sektorhoveder i det område.
+- Bufferen starter med en hopinstruktion til `$078550`. Derfra dekodes mindst 400 instruktioner i træk uden fejl. Startsekvensen sætter stakken op og kalder underrutiner. Det er spillets egen kode, ikke data.
+- Hele bufferen er blandet: ca. 7 000 bytes dekoder som gyldig kode, og resten er tabeller eller data. Den nøjagtige grænse er ikke kortlagt.
 - Destinationen `$077F18` er den samme som boot-kodens kald til `$077F18` i Disk.1. Slaven og boot-koden indlæser altså samme kode.
 - Efter indlæsningen skriver slaven patches (16- og 32-bit) til adresser i og omkring det indlæste område og til lavt RAM. Det er rettelser af kode og ikke data.
 
