@@ -55,8 +55,24 @@ Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.t
 
 ## Utopia.Slave
 
+- Er en HUNK-fil med én kodesektion på 1 228 bytes. Det er en WHDLoad-slave med standardheaderen `WHDLOADS` ved kodeoffset 4. Kodeoffset 0 er den sædvanlige kontrol `moveq #-1,d0` / `rts`, og den er ikke spilkode.
 - Indeholder strenge for `Utopia`, `1991 Gremlin` og WHDLoad-versionen `1.2`.
 - Refererer til filnavnet `Disk.4`, så spillet indlæser disk.4 som en fil.
+
+### Kald til WHDLoad (målt)
+
+Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er `jsr d16(a6)`.
+
+- Offset `$28` er disk-læsning. Den tager destination i `a0`, startoffset i `d0`, længde i `d1` og disknummer i `d2`. Hovedkaldet læser offset `$3000`, længde `$7800`, disk 1, til destination `$077F18`.
+- Offset `$30` er checksum. Den kaldes på bufferen ved `$077F18` med længden `$7800`. Resultatet sammenlignes med to kendte værdier, og en forkert værdi fører til en afslutningssti.
+- Offset `$34`, `$38` og `$20` bruges også. Funktionerne er ikke identificeret endnu.
+- En wrapper kaldes med et interval af byte-offsets og skifter dem med 7 bit (divideres med 128) før kaldet. Den kan vælge disk 1–3 via et flag. Det er flere disk-læsninger end hovedkaldet.
+
+### Konsekvens for layoutet (målt, ikke bekræftet)
+
+- Offset `$3000` er 12 288 bytes = 2 × 6 144, og længden `$7800` er 30 720 bytes = 5 × 6 144. Det passer til sporhypotesen om 6 144 bytes pr. spor, hvor spillet læser spor 2–6 af Disk.1.
+- Destinationen `$077F18` er den samme som boot-kodens kald til `$077F18` i Disk.1. Slaven og boot-koden indlæser altså samme kode.
+- Efter indlæsningen skriver slaven patches (16- og 32-bit) til adresser i og omkring det indlæste område og til lavt RAM. Det er rettelser af kode og ikke data.
 
 ## disk.4 (656 bytes)
 
