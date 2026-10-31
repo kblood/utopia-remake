@@ -28,6 +28,13 @@ Observationer fra filerne i `original/utopia-whdload/`. Mappen er gitignored. De
 
 Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.txt` (gitignored).
 
+## HD-installationer (sjekket)
+
+- `AmigaHardDisks\CaldorsHD`, `ClassicWBHD` og `Extra\CaldorHDBackup` indeholder kun `igame.iff` (20 574 bytes) i `Games\U\Utopia`. Det er ikke spildata, så der er ingen udpakket Disk.1 eller disk.4 at hente der.
+- `WHDLoad v0001\Games_WHDLoad\Utopia` er samme sæt som `original/utopia-whdload/`. Filstørrelserne matcher.
+
+**Konsekvens:** Der findes ingen udpakket kopi af disk.4 eller Disk.1 på disken. Udpakning skal derfor ske via emulator eller ved en decoder.
+
 ## Utopia.Slave
 
 - Indeholder strenge for `Utopia`, `1991 Gremlin` og WHDLoad-versionen `1.2`.
