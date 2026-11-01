@@ -37,3 +37,10 @@ All offsets are image offsets in `Disk.1`. The boot stage (image `$3000`-`$87FF`
 ## Not yet checked
 
 The roll timing comes from reading the code and matches the reference run's pace only roughly. The fade between screens is not implemented.
+
+## Language screen and what follows (boot stage, verified by disassembly and TypeScript test)
+
+- Click ends the credit roll. The boot stage saves the current palette, fades out (15 steps, 3 frames each, one 4-bit level per channel), decodes Disk.1 sectors `$5A`-`$5F` and fades in the same way. A TypeScript test of `LanguageScene` gives 45 + 45 frames and a pixel-identical picture.
+- Left button (CIA-A port A bit 6) is polled; the pointer row (screen coordinates) selects 0 (English) below 44, 1 (French) below 91, 2 (German) below 137, otherwise 3 (Italian). The choice is stored as a long at chip `$900`, and a pointer to the language's string table is stored at `$7922E` for the French/German/Italian tables.
+- Afterwards the boot stage fades out again, decodes sectors `$60`-`$DC`, then runs a number-entry screen (digits typed into a field and compared against a value derived from a counter) with three tries before it locks up on a red screen. This is the copy-protection screen; the WHDLoad slave bypasses the compare. It is not part of the remake.
+- The pointer sprite is not decoded yet; `src/main.ts` draws a placeholder arrow.
