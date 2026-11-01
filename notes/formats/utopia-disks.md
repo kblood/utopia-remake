@@ -137,3 +137,7 @@ A WinUAE 6.0.3 run reaches the game's title screen with the user's own WHDLoad d
 - After the WHDLoad nag window, the title picture appears with the version and copyright lines.
 - Other HD setups in the user's collection keep WHDLoad in `C:`, the game folder beside its `.slave`, and use the system `SYS:Libs` as `LIBS:`.
 - With WHDLoad 20.1 and the owner's `S:WHDLoad.key` in the boot volume, the nag window no longer appears and the title screen is up about 25 s after Start. Older 18.x binaries without the key show the "not registered" window first.
+
+## Rettelse: resload `$38`
+
+Spillets egentlige program (se `game-proper.md`) skriver sin gemte tilstand til `Disk.4`, og Ghidra-tabellen placerer `SaveFileOffset` på `$38`. Derfor er `$38` `resload_SaveFileOffset` (skrivning), ikke en indlæsning. Afsnittet ovenfor, der kalder den `LoadFileOffset`, er forkert.
