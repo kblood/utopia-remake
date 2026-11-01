@@ -16,11 +16,13 @@ Observed sector ranges on `Disk.1` (inclusive):
 
 | Sectors | Unpacked size | Notes |
 |---|---|---|
-| `$70A`-`$728` | 40,064 | Title picture. Verified. |
-| `$729`-`$733` | 40,064 | Another full-screen picture. Not yet identified. |
-| `$05A`-`$05F` | 40,064 | Another full-screen picture. Not yet identified. |
-| `$060`-`$0DC` | 89,600 | Unidentified. |
-| `$3C3`-`$4AC` | 160,028 | Unidentified. |
+| `$70A`-`$728` | 40,064 | Title picture. Verified against emulator RAM. |
+| `$729`-`$733` | 40,064 | Full-screen picture shown before the title (publisher logo with a short caption). |
+| `$05A`-`$05F` | 40,064 | Language selection picture with four flags. |
+| `$060`-`$0DC` | 89,600 | Loaded and unpacked after the language choice, drawn with the blit routine at `$790BE`. Not identified. |
+| `$0DD`-`$14B` | 95,590 | Unpacked to the same buffer later. Not identified. |
+| `$3C3`-`$4AC` | 160,028 | Starts with a 16-byte text name field; loaded once and a routine at `$7C8EC` is called with it (likely music data). Not identified. |
+| `$14C`-`$208` | 96,768 (stored raw) | Loaded to chip `$1000` unpacked, the game proper. |
 
 ## Unpacked picture layout
 
