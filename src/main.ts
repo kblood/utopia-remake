@@ -3,6 +3,7 @@
 // Game data is read from the user's folder at runtime and is never bundled.
 
 import { detectProfile } from "./data/detect.js";
+import { decodePicture, TITLE_SECTORS } from "./data/picture.js";
 
 const WIDTH = 320;
 const HEIGHT = 256;
@@ -40,7 +41,17 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D): void {
   ctx.putImageData(frame, 0, 0);
 }
 
-function setupPicker(status: HTMLElement): void {
+async function showTitle(ctx: CanvasRenderingContext2D, files: File[]): Promise<void> {
+  const disk1 = files.find((f) => f.name.toLowerCase() === "disk.1");
+  if (!disk1) return;
+  const disk = new Uint8Array(await disk1.arrayBuffer());
+  const picture = decodePicture(disk, TITLE_SECTORS.first, TITLE_SECTORS.last);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  ctx.putImageData(new ImageData(picture.rgba, picture.width, picture.height), 0, 0);
+}
+
+function setupPicker(status: HTMLElement, ctx: CanvasRenderingContext2D): void {
   const input = getElement("folder", HTMLInputElement);
 
   input.addEventListener("change", () => {
@@ -50,6 +61,9 @@ function setupPicker(status: HTMLElement): void {
 
     if (result.profile) {
       status.textContent = `Fundet: ${result.profile.label}`;
+      showTitle(ctx, picked).catch((err) => {
+        status.textContent = `Fejl ved titelbillede: ${err instanceof Error ? err.message : String(err)}`;
+      });
     } else {
       status.textContent = `Mangler eller forkerte filer: ${result.missing.join(", ")}`;
     }
@@ -57,5 +71,6 @@ function setupPicker(status: HTMLElement): void {
 }
 
 const canvas = getElement("screen", HTMLCanvasElement);
-drawPlaceholder(getContext(canvas));
-setupPicker(getElement("status", HTMLParagraphElement));
+const ctx = getContext(canvas);
+drawPlaceholder(ctx);
+setupPicker(getElement("status", HTMLParagraphElement), ctx);
