@@ -6,6 +6,7 @@ import { detectProfile } from "./data/detect.js";
 import { IntroScene, type Input } from "./game/intro.js";
 import { LanguageScene } from "./game/language.js";
 import { MapScene } from "./game/map.js";
+import { GameState } from "./game/state.js";
 import { loadMap, loadTileSet, readScenarioRecords } from "./data/scenario.js";
 import type { Screen } from "./gfx/screen.js";
 
@@ -104,7 +105,12 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
         if (intro.update(input) === "clicked") language = new LanguageScene(disk, intro.screen);
       } else if (language.update(input).state === "chosen") {
         const record = readScenarioRecords(scenarioDisk)[0];
-        map = new MapScene(disk, loadTileSet(disk, scenarioDisk, record).tiles, loadMap(scenarioDisk, record));
+        map = new MapScene(
+          disk,
+          loadTileSet(disk, scenarioDisk, record).tiles,
+          loadMap(scenarioDisk, record),
+          new GameState(scenarioDisk, record.block),
+        );
       }
     }
     const active: Screen = map ? map.screen : intro.screen;

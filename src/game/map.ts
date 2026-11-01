@@ -2,10 +2,12 @@
 // Projection, tile blit and scroll rules: notes/formats/map-rendering.md. Objects, text and
 // the animation of cells are not implemented yet.
 
+import { COLOR, drawGameText, patchNumber, readTemplate, TEMPLATES } from "../data/gamefont.js";
 import { decodePicture, PICTURES } from "../data/picture.js";
 import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK, TILE_WIDTH, type Tile } from "../data/scenario.js";
 import { Screen, SCREEN_WIDTH } from "../gfx/screen.js";
 import type { Input } from "./intro.js";
+import { A, GameState } from "./state.js";
 
 export const VIEW_CELLS = 8;
 const MAX_SCROLL_X = MAP_WIDTH - VIEW_CELLS;
@@ -51,17 +53,17 @@ export class MapScene {
   private readonly cells: Uint16Array;
   scrollX = START_X;
   scrollY = START_Y;
-  private dirty = true;
   private repeat = 0;
   private frame = 0;
 
   constructor(
-    disk1: Uint8Array,
+    private readonly disk: Uint8Array,
     private readonly tiles: Tile[],
     cells: Uint16Array,
+    private readonly state: GameState,
   ) {
     this.cells = cells.slice();
-    decodePicture(disk1, PICTURES.main, this.screen);
+    decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }
 
@@ -71,7 +73,6 @@ export class MapScene {
     if (x !== this.scrollX || y !== this.scrollY) {
       this.scrollX = x;
       this.scrollY = y;
-      this.dirty = true;
     }
   }
 
@@ -89,7 +90,8 @@ export class MapScene {
       this.repeat = 0;
     }
     if (++this.frame % ANIMATION_FRAMES === 0) this.animateCells();
-    if (this.dirty) this.draw();
+    this.state.tickFrame();
+    this.draw();
   }
 
   // Animated cells (flag bit 10) cycle through fixed id loops: 1-3 and the building loops 6-9, 10-13.
@@ -109,14 +111,17 @@ export class MapScene {
           continue;
         }
         this.cells[at] = (cell & ~TILE_ID_MASK) | id;
-        this.dirty = true;
       }
     }
   }
 
   private draw(): void {
-    this.dirty = false;
     this.screen.pixels.set(this.background);
+    this.drawTiles();
+    this.drawTopBar();
+  }
+
+  private drawTiles(): void {
     // Painter order: diagonals by vx + vy, then vx ascending.
     for (let s = 0; s <= 2 * (VIEW_CELLS - 1); s++) {
       for (let vx = Math.max(0, s - (VIEW_CELLS - 1)); vx <= Math.min(VIEW_CELLS - 1, s); vx++) {
@@ -126,6 +131,21 @@ export class MapScene {
         if (tile) this.drawTile(tile, anchorX(vx, vy), anchorY(vx, vy));
       }
     }
+  }
+
+  // Top bar, redrawn every frame: date, money, and quality of life (notes/formats/game-text.md, section 8).
+  private drawTopBar(): void {
+    const disk = this.disk;
+    const y = 2;
+    drawGameText(disk, this.screen, Array.from(this.state.dateText(), (c) => c.charCodeAt(0)), 8, y, COLOR.highlight);
+    const money = patchNumber(readTemplate(disk, TEMPLATES.money), this.state.displayMoney(), 0, 7);
+    drawGameText(disk, this.screen, money, 110, y, COLOR.highlight);
+    const quality = this.state.word(A.qualityOfLife + 2);
+    if (quality >= 90 && (this.frame & 32) !== 0) {
+      drawGameText(disk, this.screen, readTemplate(disk, TEMPLATES.title), 182, y, COLOR.highlight);
+    }
+    const label = patchNumber(readTemplate(disk, TEMPLATES.qualityOfLife), quality, 4, 3);
+    drawGameText(disk, this.screen, label, 224, y, COLOR.highlight);
   }
 
   // Images are stored bottom row first, 5 colour planes then a mask plane, 32 pixels wide.
