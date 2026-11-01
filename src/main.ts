@@ -3,7 +3,8 @@
 // Game data is read from the user's folder at runtime and is never bundled.
 
 import { detectProfile } from "./data/detect.js";
-import { IntroScene } from "./game/intro.js";
+import { IntroScene, type Input } from "./game/intro.js";
+import { LanguageScene } from "./game/language.js";
 
 const WIDTH = 320;
 const HEIGHT = 256;
@@ -43,17 +44,41 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D): void {
 
 const FRAME_MS = 20; // 50 Hz, like the original PAL display
 
-async function runIntro(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, files: File[]): Promise<void> {
+// Placeholder pointer (arrow outline); the original sprite format is not decoded yet.
+const POINTER_SHAPE = ["X", "XX", "XXX", "XXXX", "XXXXX", "XXXXXX", "XXXXXXX", "XXXXXXXX", "XXXXX", "XX XX", "X  XX", "    XX"];
+
+function drawPointer(rgba: Uint8ClampedArray, x: number, y: number): void {
+  POINTER_SHAPE.forEach((row, dy) => {
+    for (let dx = 0; dx < row.length; dx++) {
+      const px = x + dx;
+      const py = y + dy;
+      if (row[dx] !== "X" || px < 0 || py < 0 || px >= 320 || py >= 200) continue;
+      const i = (py * 320 + px) * 4;
+      const edge = dx === 0 || dx === row.length - 1 || dy === 0 || dy === POINTER_SHAPE.length - 1;
+      const v = edge ? 0 : 255;
+      rgba[i] = rgba[i + 1] = rgba[i + 2] = v;
+    }
+  });
+}
+
+async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, files: File[]): Promise<void> {
   const disk1 = files.find((f) => f.name.toLowerCase() === "disk.1");
   if (!disk1) return;
-  const scene = new IntroScene(new Uint8Array(await disk1.arrayBuffer()));
+  const disk = new Uint8Array(await disk1.arrayBuffer());
+  const intro = new IntroScene(disk);
+  let language: LanguageScene | null = null;
 
-  let leftButton = false;
+  const input: Input = { leftButton: false, pointerX: 0, pointerY: 0 };
   canvas.addEventListener("mousedown", (e) => {
-    if (e.button === 0) leftButton = true;
+    if (e.button === 0) input.leftButton = true;
   });
   canvas.addEventListener("mouseup", (e) => {
-    if (e.button === 0) leftButton = false;
+    if (e.button === 0) input.leftButton = false;
+  });
+  canvas.addEventListener("mousemove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    input.pointerX = Math.max(0, Math.min(319, Math.floor(((e.clientX - rect.left) * WIDTH) / rect.width)));
+    input.pointerY = Math.max(0, Math.min(199, Math.floor(((e.clientY - rect.top) * HEIGHT) / rect.height)));
   });
 
   let last = performance.now();
@@ -63,11 +88,17 @@ async function runIntro(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement
     last = now;
     while (owed >= FRAME_MS) {
       owed -= FRAME_MS;
-      if (scene.update({ leftButton }) === "clicked") return;
+      if (language === null) {
+        if (intro.update(input) === "clicked") language = new LanguageScene(disk, intro.screen);
+      } else if (language.update(input).state === "chosen") {
+        return; // the game proper is not implemented yet
+      }
     }
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
-    ctx.putImageData(new ImageData(scene.screen.toRgba(), 320, 200), 0, 0);
+    const rgba = intro.screen.toRgba();
+    if (language?.pointerVisible) drawPointer(rgba, input.pointerX, input.pointerY);
+    ctx.putImageData(new ImageData(rgba, 320, 200), 0, 0);
     requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
@@ -83,7 +114,7 @@ function setupPicker(status: HTMLElement, ctx: CanvasRenderingContext2D, canvas:
 
     if (result.profile) {
       status.textContent = `Fundet: ${result.profile.label}`;
-      runIntro(ctx, canvas, picked).catch((err) => {
+      runGame(ctx, canvas, picked).catch((err) => {
         status.textContent = `Fejl ved titelbillede: ${err instanceof Error ? err.message : String(err)}`;
       });
     } else {

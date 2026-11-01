@@ -17,6 +17,8 @@ const HOLD_FRAMES = 0x79;
 
 export interface Input {
   leftButton: boolean;
+  pointerX: number; // screen pixels, 0-319
+  pointerY: number; // screen rows, 0-199
 }
 
 export type IntroResult = "running" | "clicked";
