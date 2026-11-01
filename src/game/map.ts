@@ -13,6 +13,9 @@ const MAX_SCROLL_Y = MAP_HEIGHT - VIEW_CELLS;
 const START_X = 47;
 const START_Y = 33;
 const REPEAT_FRAMES = 4;
+const ANIMATED_FLAG = 0x400;
+// The original steps animated cells once per main-loop pass; its real rate is unknown, so this is a guess.
+const ANIMATION_FRAMES = 6;
 
 // Window clip: the map occupies x 0..255 of the screen.
 const CLIP_RIGHT = 256;
@@ -45,16 +48,19 @@ export function anchorY(vx: number, vy: number): number {
 export class MapScene {
   readonly screen = new Screen();
   private readonly background: Uint8Array;
+  private readonly cells: Uint16Array;
   scrollX = START_X;
   scrollY = START_Y;
   private dirty = true;
   private repeat = 0;
+  private frame = 0;
 
   constructor(
     disk1: Uint8Array,
     private readonly tiles: Tile[],
-    private readonly cells: Uint16Array,
+    cells: Uint16Array,
   ) {
+    this.cells = cells.slice();
     decodePicture(disk1, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }
@@ -82,7 +88,30 @@ export class MapScene {
     } else {
       this.repeat = 0;
     }
+    if (++this.frame % ANIMATION_FRAMES === 0) this.animateCells();
     if (this.dirty) this.draw();
+  }
+
+  // Animated cells (flag bit 10) cycle through fixed id loops: 1-3 and the building loops 6-9, 10-13.
+  private animateCells(): void {
+    for (let vy = 0; vy < VIEW_CELLS; vy++) {
+      for (let vx = 0; vx < VIEW_CELLS; vx++) {
+        const at = (this.scrollY + vy) * MAP_WIDTH + this.scrollX + vx;
+        const cell = this.cells[at];
+        if (!(cell & ANIMATED_FLAG)) continue;
+        let id = cell & TILE_ID_MASK;
+        if (id >= 1 && id <= 3) {
+          id = id === 3 ? 1 : id + 1;
+        } else if (id >= 6 && id <= 13) {
+          id++;
+          if (id === 10 || id > 13) id -= 4;
+        } else {
+          continue;
+        }
+        this.cells[at] = (cell & ~TILE_ID_MASK) | id;
+        this.dirty = true;
+      }
+    }
   }
 
   private draw(): void {
