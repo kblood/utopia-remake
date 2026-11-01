@@ -1,0 +1,429 @@
+# Utopia game state and simulation (static analysis of the game image)
+
+Scope: the variable block, the scenario block, the periodic simulation, the object tables, the F-key
+screens and the save format. Map drawing and blitting are out of scope (other notes).
+Source: Disk.1 game image (sectors $14C..$208 at $1000, entry $156B6); image offset = addr - $1000.
+Disassembly done with tools/game_dis.py style tooling (capstone, m68k). Scenario data via
+`tools/state_dump.py` (numbers only).
+
+Tags: **[V]** verified directly from code or data; **[H]** hypothesis (inferred from usage, names unknown).
+All names below are my own functional labels. No game text is quoted; strings are identified by index only
+(table at $188C2: 408 big-endian u16 offsets, index*2 -> offset from $188C2; message display = `$5A8C`, d0 = index).
+
+Conventions: all values big-endian, `$` = hex, "word" = u16, "long" = u32. `T[i]` = object-type entry i.
+
+---
+
+## 1. Memory map of the state
+
+| range | content |
+|---|---|
+| $13034-$14233 | scenario block, loaded from Disk.2 (9 sectors, 4608 bytes) [V] |
+| $14234-$14633 | runtime variable block, zeroed + defaulted by `$866E` [V] |
+| $14634-$14640 | message / misc timers [V] |
+| $156A8-$156B3 | system flag bytes (see 3.9) [V] |
+| $39D42-$3B466 | entity lists (3.8) [V] |
+| $3B466-$3D3A6 | 1000 object records x 8 bytes [V] |
+| $3D3A6-$3F188 | per-cell flag bytes, 75 rows x $66 (102) [V] |
+| $3F256-$42D8A | map cells, 75 rows x $CC bytes (102 words) [V] |
+
+`$866E` is entered with d0 = mode; mode 1 jumps to `$875C` (load path, skips defaults). Otherwise it zeroes
+$14234-$144CB (664 bytes) and applies the defaults of section 3.10. [V]
+
+---
+
+## 2. Scenario block ($13034..$14233, from Disk.2)
+
+Disk.2 scenario header = sector $3C0; 10 records of $40 bytes at +10; record words from +$10; the pair at +$20/+$22
+(first/last sector) is the block (always 9 sectors). Scenario i block start sectors: 122, 286, 440, 1142, 546, 712, 806,
+1262, 942, 1402. [V]
+
+### 2.1 Layout
+
+| addr | size | meaning | tag |
+|---|---|---|---|
+| $13034-$130FF | $CC | six graphics descriptors ($22 each) plus scenario-specific words; differs per scenario | V (layout), H (content) |
+| $13100 | w | air plant A: monthly production per building (400) | V (use $9CDA) |
+| $13102 | w | air plant B: monthly production per building (150) | V |
+| $13104 | w | air plant A: storage per building (1200) | V |
+| $13106 | w | air plant B: storage per building (800) | V |
+| $13108 | w | food produced per worker, farm group A (10) | V ($9E98) |
+| $1310A | w | food produced per worker, farm group B (15) | V |
+| $1310C | w | power storage per Flux-Pod-type building (200) | V ($A0D4) |
+| $1310E / $13112 | w | `$99C4` periodic helper args (d7 values), 0 / 0 | H |
+| $13110 | w | 5 | H |
+| $13114 | w | 10 | H |
+| $13116 | w | 3840 ($0F00); read by $11ECA (event) | H |
+| $13118-$1312B | 20 bytes | daily event chance bytes, index k = event number (see 5.6) | V |
+| $13136 | long | free colonists (unassigned) | V |
+| $1313A | long | employed total (sum of job pools) | V |
+| $1313E | long | medics (job pool 6) | V |
+| $13142 | long | scientists (job pool 7) | V |
+| $13146 | long | security (job pool 8) | V |
+| $1314A | long | total population | V |
+| $1314E,$13156 | long | trade: tradable units / related, used by market code | H |
+| $13152 | 6 longs | goods stock array, index 0..5 (index 5 unused by weights) | V |
+| $13166 | long | total stored goods weight | V |
+| $1316A-$131E1 | 12 x 10 bytes | market table (see 6.9) | V |
+| $131E2-$13445 | 34 x 18 | object-type table (section 7.1) | V |
+| $13446-$13457 | $FF fill | | V |
+| $13458-$13469 | 18 bytes | scenario-specific text field (not documented) | - |
+| $1346A.. | various | scenario-specific numeric records; $13456 (alien record, 5.8), $13467 (read by $48EC and $E642), $1346A (read by meteor $11676) | H |
+| $134B6-$13562 | | per-scenario tables (differ between scenarios) | - |
+| $135B6 | long | spent last month (shown on finance screen) | V |
+| $135BA | long | money (Gr); clamped to 9,999,999 for display | V |
+| $135BE | long | research grant remaining (decrements by 100 monthly, message 101 when it hits 0) | V |
+| $135C2 | | related to marker/view state ($87DC/$8B02/$7E52) | H |
+| $135C4/$135C5 | bytes | x,y of a map position (read by $3EDC, $C5BE) | H |
+| $13658.. $13E63 | | 9 repeating $5A-stride tables that differ per scenario (graphics/animation) | H |
+| $13EE6 | byte | flag read by $C5BE/$DA94/$E530 (written by $E530) | H |
+| $13F10, $13F8E, $14108, $1400C, $14036 | | alien-intel probability tables, indexed by intel level-1 ($AF12/$B018) | V (use), H (meaning) |
+| $141B0-$141B2 | bytes | alien activity / countdown ($E642, $B018) | H |
+
+Parameter words $13100-$13138 and the event chance bytes are IDENTICAL in all 10 scenarios [V] (`state_dump.py diff`
+prints nothing). The scenarios differ in the graphics descriptors ($1303A-$130FF), the alien/scenario records from
+$13456, the later tables and the map/object data (loaded elsewhere).
+
+---
+
+## 3. Variable block ($14234-$14640)
+
+### 3.1 Trade and stock
+| addr | meaning | tag |
+|---|---|---|
+| $14234 [6 longs] | tradable units per good = stock*(100-retain%)/100 ($A784) | V |
+| $144CC [6 longs] | retain percent per good, default 100 each | V |
+| $1443A [6], $14452 [6] | supply / demand values for trade screen | H |
+| $14432 | goods weight capacity (+$13880 = 80000 per warehouse-type building tile $44) | V |
+| $14436, $143AA-$143BA | monthly production outputs (see 6.4) | V |
+| $14342 | fuel stored in tanks (sum of T[16]+T[17] +$E) | V |
+| $14376/$1437A/$1437E/$14392/$14396/$1439A/$1439E/$143A2/$143A6 | monthly/yearly flow statistics (see 3.7) | H |
+
+### 3.2 Population and jobs
+| addr | meaning | tag |
+|---|---|---|
+| $1432A | construction workers (taken from free colonists when a building is placed, returned on completion) | V |
+| $1432E / $14332 | births / deaths last month (shown on F1) | V |
+| $14336 | | H |
+| $143BE / $143C2 | workers in farm-type buildings T[18] (tile $41) / T[19] (tile $42), 10 per building | V |
+| $143C6[9] | required staff per job pool | V |
+| $143EA[9] | assigned staff per pool | V |
+| $1440E[9] | shortage per pool | V |
+| $14500[9] | per-pool assignment cap | H |
+| $142C2 | number of used object records | V |
+| $142C4 | number of construction sites (tile $32) | V |
+
+Job pool order = table at $B0C4 (T pointers): pool 0 = T[14] ($132DE), 1 = T[15] ($132F0), 2 = T[26] mines ($133B6),
+3 = T[27] ship yard ($133C8), 4 = T[22] tank yard ($1336E), 5 = T[23] workshop ($13380), 6 = T[4] ($1322A, medics),
+7 = T[1] ($131F4, scientists), 8 = T[20] ($1334A, security). [V]
+Required staff = count(+$C) * 10; pool 6 uses *20. [V]
+
+### 3.3 Economy and status
+| addr | meaning | tag |
+|---|---|---|
+| $142C6 | quality of life % (clamped 10..98) | V |
+| $142CA | construction spend this month (copied to $135B6 monthly) | V |
+| $142CE | crime level (signed), written by $10BC8 | V |
+| $144EC | morale, signed long, units 1/100 %, range +-10000, default 5000 | V |
+| $144F0 | pollution counter (default 50), reduced by research | V |
+| $144F4 | per-capita tax per month (default 10) | V |
+| $144F8 | tax chosen for next year (default 10); applied at year change | V |
+| $144FC | copy of tax for display ($A010) | V |
+| $142F2 | grant copy; $142F6, $142FA | income pieces: $142FA = pop*tax | V |
+| $142E2/$142EE/$14302/$14312/$14316/$1431A/$14326 | statistics: this month ($142E2..), cumulative year ($14316..), previous year ($14302..) | V (copy flow) |
+| $1433A | air stock before the month's update (sum of stored in two air plants) | V |
+| $1434E | air produced this month | V |
+| $14362 | population snapshot for air | V |
+| $1433E/$14352/$14366 | food: stock before / production / consumption | V |
+| $14346 | power-related counter, cleared when power state recomputed | H |
+| $1434A | cumulative income stat (adds goods sold value) | H |
+| $1435A, $1436E, $14356, $1435E | monthly stat registers | H |
+
+### 3.4 Research and technology
+| addr | meaning | tag |
+|---|---|---|
+| $14592 | tech level 1..10 | V |
+| $145A3 | research progress counter, indexes table at $12D56 | H |
+| $142D2/$142D6 | research funds (two kinds) | V (use) |
+| $142DA | research accumulator (150 units -> pollution counter -1) | V |
+| $142DE | research funds | H |
+| $14472 (long) | invention bits (bit 16 = morale bonus; others unlock buildings) | V |
+| $14476 | invention bits set by $AB0C from table $B214 | V |
+| $1447A | selected research item | H |
+| thresholds $B154 | 500,1000,2000,4000,6500,9000,11500,14000,16500 (tech level steps) | V |
+
+### 3.5 Power and environment
+| addr | meaning | tag |
+|---|---|---|
+| $144C8 | power shortage level = number of building types that cannot be powered, computed in $A0D4 | V |
+| $144BB | eclipse flag (solar output 0) | V |
+| $144B4 | starvation level (0..20) | V |
+| $144B5 | air shortage flag (=10) | V |
+| $144C4 | overcrowding flag | V |
+| $144B7 / $144B8 / $144B9 | virus effects | V (use), H |
+| $144BA | trade computer failure flag | V |
+| $144B1 | bits: warnings (cleared when $144C8<2) | H |
+| $144B2 | weekly counter | H |
+
+### 3.6 Time
+| addr | meaning | tag |
+|---|---|---|
+| $14590 | frame countdown, reload 90 ($5A) | V |
+| $14591 | speed/step byte (1) | H |
+| $14594 | ASCII date string "dd/mm/yyyy", initial "28/06/2090" | V |
+| $1459F | day of month 1..28 (wraps at $1D to 1), default $1C | V |
+| $145A0 | month 0..11, default 5 | V |
+| $145A1 | weekday 0..6 | V |
+| $142A6 | year (long) | V |
+| $145A2 | difficulty 0 / $14 / $1E (default $1E) | V |
+| $144C1 | pending periodic bits: 0 daily, 1 weekly, 2 monthly, 3 yearly, 4 special | V |
+| $144C9 | frame sub-tick 0..8 | V |
+
+### 3.7 Statistics flow (VERIFIED copy mechanics, meaning H)
+`$A010` monthly: $142F2..$142FA -> $142E2.. (this month); accumulate into $14316..; `$A096` yearly: $14316.. ->
+$14302.. and zero $1431A/$14326; `$99C4` copies $14376->$1436A etc. before monthly work ($14392 -> $1437E at year).
+
+### 3.8 Entity lists
+| list | first record | record size | max | count var | tag |
+|---|---|---|---|---|---|
+| own spaceships | $3A75E (header $3A746) | $18 | 40 | $1429E | V |
+| own tanks | $3AB1E | $18 | 99 | $1429C | V |
+| enemy ground | $3A146 (hdr $3A12C) | $1A | 60 | $142A2 | V |
+| enemy air | $39E3A (hdr $39E20) | $1A | 30 | $142A4 | V |
+| temporary effects | $39D4A (hdr $39D42) | 8 | 30 | $156AE | V |
+| alien sprite | $144A8 | | 1 | | V |
+| meteor | $1449C | | 1 | | V |
+
+Unit record fields (own units, from $333A/$38E2/$11AE6): +0 type, +1 x, +2 y, +3/+4 sub-cell offsets, +5 direction 0..7,
++6/+7 velocity, +8 hit points, +9 mode, +A tech level, +B/+C target x,y, +D/+E fuel/counter, +$10..$12 recent directions,
++$14/$16 pointer to the cell flag byte. [V for positions and use, H for fine names.]
+Ship modes (+9): 0 landed, 1 hovering, 2 flying-to-land, 3 flying-to-hover, 4 constructing launchpad, 5 launching,
+6 landing, 7 flying to enemy (order from the mode string table, my paraphrase). Fuel (+$E word) falls by 1 per day in mode
+1 and by 2 in modes 2/3; at 0 the ship is destroyed ($ACE2). [V]
+
+Per-cell flag bytes ($3D3A6 + y*$66 + x): bit0 enemy ground unit, bit1 own unit, bit6 marker, bits 2/3 other. [H on bits 2/3]
+Map cell word: low 10 bits tile id, $0400 animated, $0800 and $8000 resource flags (counted by the builder, 7.3),
+$7F = special marker tile (7.3). [V]
+
+### 3.9 System flag bytes
+$156A8: bit0 day tick pending, bit2 screen-busy, bit3, bit5; $156A9: bit2 pause (skips $99C4), bit4, bit5, bit6 enemy
+ground moves, bit7 own units move; $156AA: bit2 (suppress unit bonus in QoL), bit3 game over, bit4/bit5 QoL >=80/>=90
+announced, bit7 strike. $156AB: draw-mode byte ($15 while drawing text, then 1). [V]
+
+### 3.10 Defaults set by $866E [V]
+$144CC: 6 longs of 100; $144E4/$144E8 = $2F, $144E6/$144EA = $21 (view origin); $144EC = 5000; $144F0 = 50;
+$144F4 = $144F8 = 10; eight 10-byte marker slots at $14540 with byte +2 = $FF; $14590 = 90, $14591 = 1, $14592 = 1;
+date "28/06/2090" (day $1C, month 5, weekday 0, difficulty $1E); $14634/$14636 = $FFFF; $15698 = $FF;
+$156A8 = $94, $156A9 = 2, $156AA = 1, $156AB = 1.
+
+---
+
+## 4. Time chain
+
+- VBL decrements $14590 (90 frames, about 1.8 s PAL); at 0 it sets bit7 of $156A8 (the original code tests the byte;
+  see game-proper.md) and `$4D1C` calls `$564A`. [V]
+- `$564A`: day++ (wrap to 1 at $1D); weekday++ mod 7; sets $144C1 bit0 (daily); weekday wrap sets bit1 (weekly); day wrap sets
+  bit2 (monthly) and month++ mod 12; month wrap sets bit3 (yearly) and year++ ($142A6). Date string updated with
+  digit-increment helper `$571E`. [V] Days per month = 28, months = 12, so year = 336 days.
+- `$99C4` (main loop, skipped when $156A9 bit2 set) performs the work in 5.1. [V]
+
+---
+
+## 5. Periodic simulation
+
+### 5.1 Order inside $99C4 [V]
+1. bit4: `$11D34` (a0=$13248, d1=$1F, d7=$1310E).
+2. Daily: if day==1 `$A8E8`; `$11D34` (a0=$1325A, d1=$F, d7=$13112); `$ACE2` ship fuel; `$B086` game over; $144BD countdown;
+   $15698 message timers; `$10E1E` event scheduler; `$AF12` alien intelligence.
+3. Weekly: `$7000` construction countdown; `$4798`; `$10FCA` eclipse; `$12510`; `$127A0`; $144B2--.
+4. Monthly: `$9B20` = `$A86A` (trade income), `$A802` (market walk), `$9E3A`, `$9E98` (food), `$9DBA` (housing), `$9CDA` (air/finance),
+   `$9BAE` (births, calls `$9C80` deaths and `$A246`), `$A010` (statistics/tax/grant), `$A0D4` (power);
+   then the Command Centre re-open check (5.9), `$9F36` (job allocation), `$A270` (morale), `$10BC8` (crime), `$A360` (production), `$AB0C` (research).
+5. Yearly: `$A096`.
+
+### 5.2 Births and deaths
+`$9BAE`: modifier m selected by difficulty $145A2: 0 -> 0, $14 -> $14, $1E -> $1E, plus a random 0/$1E/$3C.
+births = ((pop*10+500)/1000 * (rate+rand) + 5)/10 into $1432E, added to pop and free colonists. Crime/overcrowding reduce
+it. `$9C80`: death percent d2 removes d2% of free colonists and from each job pool (random rounding). [V structure, H exact constants]
+
+### 5.3 Air and finance (`$9CDA`) [V]
+```
+stock   = T[30].E + T[24].E            ; two storage-type buildings, +E = stored air
+prod    = T[30].C*$13100 + T[24].C*$13102   (0 if $144C8 >= 20)
+net     = stock + prod - population
+net < 0 : $144B5 = 10, both .E = 0, morale += (-net*100/pop) * -20 (through $A246)
+else    : capacity = T[30].C*$13104 ; surplus beyond capacity capped to $13106 and stored in T[24].E
+```
+Stored amounts are written back into the two buildings' +E words. [V]
+
+### 5.4 Food (`$9E98`) [V]
+```
+have  = all of stock good[0] (removed)
+prod  = $143BE*$13108 + $143C2*$1310A    (0 if $144C8 >= 18)
+net   = have + prod - population
+net >= 0 : put net back (capped by capacity; message 109 on overflow)
+net <  0 : shortage = (-net)*20/pop -> table $B23C -> $144B4 ; morale += (shortage+1) * -100
+```
+### 5.5 Housing (`$9DBA`): capacity = T[7].C ($1326C) * 50. Over capacity sets $144C4, penalty, message 99. [V]
+
+### 5.6 Events (`$10E1E`, daily) [V structure]
+One event per day cycling k=0..19 ($144BF). Chance bytes at $13118+k (4,40,100,100,1,0,1,3,1,100,3,3,1,100,1,100,20,1,3,100);
+roll `$2DCA` in [0,100) against it. Jump table $10E58 (6 bytes per entry): 0 Earth offers colonists (pop/4 at 100 Gr each);
+1 alien object appears; 2 invention announcement; 3 `$12A16`; 4 mine collapse; 5 none; 6 power storage accident;
+7 trading computer failure; 8 meteor; 9 `$11724`; 10 Earth requisitions scientists (fine = funds/rand(2..9));
+11 Earth requisitions tanks; 12 ship explosion; 13 intelligence step (`$ADA6`); 14 eclipse; 15 fuel beaming to ships;
+16 strike; 17 tank out of control; 18 virus; 19 crime messages. [handler purposes V, details H]
+
+### 5.7 Production (`$A360`, monthly) [V mechanics, H good names]
+- pool 5 (T[23]) staff (if $144C8 < 3): +staff units of good 4.
+- pool 0 (T[14]) staff (if $144C8 < 8): consumes up to that many units of good 1, produces the consumed amount of good 3.
+- pool 2 (mines), if $144C8 < 12: each worker has 1% chance (RNG==0) to yield one unit of good 2 (weight 1); then ore =
+  `$A4A8(workers=$143F2, tile=$60, count=$133C2)` into good 1.
+- pool 1 (T[15] refinery type), if $144C8 < 11: `$A4A8(tile=$3E)` = fuel, stored by `$A51A` into the two tank types
+  (T[16] capacity 800 each, T[17] capacity 1200 each; message 110 if full).
+- `$A4A8`: reads byte +6 of each building of that tile, sorts descending, each building covers 10 workers, sums per-worker
+  value, returns sum/2. [V]
+- then `$A620` (tank yard progress) and `$AC04` (ship yard progress).
+Good weights in kg ($B0EC): idx0 100, idx1 200, idx2 1, idx3 2000, idx4 1000. [V]
+`$A2DE(d0 units, d1 good)` adds to stock capped by capacity; `$A32C` removes (capped by stock). [V]
+
+### 5.8 Alien intelligence (`$AF12`, daily; every 10th call) [V mechanics]
+Record at $13456: word +$14 incremented; level +$11 = min(5, age/100+1); on level change strength +$18 moves by
++$1B/-$1C within [+$10, +$1E]. If $144CA (intel level) nonzero, a roll against table[$144CA-1] triggers a message (157) and an
+intel event. `$B018`: countdown $141B2 with two probability tables. `$127A0` weekly: enemy/funds code touching $1446A (H).
+
+### 5.9 Power (`$A0D4`) [V]
+Output = T[11].C*T[11].E + T[12].C*T[12].E (20, 40) (0 when $144BB eclipse) + T[31].C*T[31].E (500).
+Use = sum over the 21 pointers at $B100 of (type +5 byte)*(+$C count). Types that cannot be powered counted into $144C8.
+Storage clamped to T[0].C*$1310C. At $144C8 >= 14 the Command Centre record (tile $4C) byte +3 is cleared (offline, drawn as
+tile $50, message 300, `$A1B0`); when $144C8 < 14, +$C==0 and +$A != 0, `$9B52` sets it back to $FF and sets T[29].C = 1. [V]
+
+### 5.10 Statistics, tax, grants (`$A010`, `$A096`) [V]
+Monthly: income = pop * $144F4; plus grant $135BE if nonzero, then $135BE -= 100 (message 101 at 0); money += income;
+spend counter -> $135B6. Yearly: tax $144F4 = $144F8; if the new rate exceeded the old, `$A246((new-old)*300)` is applied.
+NOTE: the sign looks inverted for a tax rise (morale rises); possibly an original quirk. [V code, H intent]
+
+### 5.11 Morale (`$A246`, `$A270`) [V]
+`$A246(d0)`: m = $144EC; d2 = 100 - |m|/100; m += d2*d0/100.
+`$A270` monthly: sports T[32].C: min(count,5)*100; grant/10 if $135BE != 0; -500 if Command Centre count 0; tax table $B178[rate]
+(rate 0..20: +500 step -50, 0 at 10 and 11, then -50..-450); virus $144B7 * -100; if m < 0, m += 1.
+
+### 5.12 Quality of life (`$A8E8`) [V]
+```
+d6 = 0
+crime: if crime<0 d6+=200 else d6 -= min(6, crime*100/8)
+d6 += min(pop,10000)/5
+units = tanks + ships + counts at $13248,$1325A,$1327E,$13290 (T[5]/T[6]/T[8]/T[9] +$C) ; d6 += 10*units (or +2000 if $156AA bit2)
+d6 += table $B1A2[$144F4] (1000 .. -450)
++300 if invention bit 16 ; -300 if $144B8 ; -350 if Command Centre count 0 ; + min(sports,5)*100
+-400 each: $144C4, $144B4, $144B5 ; (the $144C8 case adds to a6, an original bug) 
+pollution weight sum d5 = min(50, mines + 3*T[15].C + 3*T[31].C + 2*T[30].C + 2*T[23].C + T[14].C + 2*T[22].C + 2*T[27].C)
+d6 -= d5 * $144F0
+QoL = (d6 / 100) + 55, max 98, -30 if strike, min 10
+```
+Every 150 of $142DA reduces $144F0 by 1 (messages at 49, 40, 30, 20). First time QoL >= 80 (bit4) or >= 90 (bit5): message via `$E770`.
+
+### 5.13 Research (`$AB0C`) [H]
+Tech level $14592 from $145A3 via table $12D56; thresholds $B154; invention bits $14476 from table $B214; message 239 if no
+Command Centre.
+
+### 5.14 Crime (`$10BC8`) writes $142CE and $144C6. [V target, H formula]
+### 5.15 Game over (`$B086`, daily) [V]
+Lose if $142C2 == 0, or (T[7].C==0 and pop < 60), or (T[7].C != 0 and pop < 30). Sets $156AA bit3.
+
+### 5.16 Market (`$A802`) [V layout, H semantics]
+12 entries of 10 bytes at $1316A: words {value, min, max, step, countdown}. First 6 prices, next 6 supply/demand; random walk
+with min/max; supply/demand capacity (pop/100+1)*value capped at $270F.
+
+---
+
+## 6. Per-frame routines (no simulation unless stated)
+`$6936` tile animation in the viewport (ids 1-3 cycle, 6-13 cycle); `$6540` animation blit; `$4D48` money display;
+`$4D1C` date + day-tick; `$4D96` QoL display (blink bit5 of $1581); `$5D30` four blinking UI items ($15628, 16-byte stride);
+`$3310` eight markers ($14540, 10 bytes); `$16012` bitmap prep; `$333A` unit loop (sub-tick $144C9 0..8, own units move
+every 9th frame at count 8, enemy ground at count 4), sprite list at $2954A. [V]
+
+---
+
+## 7. Objects
+
+### 7.1 Type table T[i] at $131E2 + 18*i (34 entries, i = 0..33) [V]
+Bytes: +0 =0 (1 on the five special entries), +1 = 1 (4 on specials), +2 build time in weeks (2..10), +3 = $FF (0 for CC),
++4 colonists needed to build, +5 power use per building, +6 word build cost Gr, +8 word tile id, +$A word count built-active,
++$C word count total, +$E word output / stored value, +$10 word name string index.
+
+| i | tile | cost | build wk | +4 | +5 | note |
+|---|---|---|---|---|---|---|
+| 0 | 1 | 3000 | 4 | 20 | 0 | power storage ($1310C each) |
+| 1 | 4 | 5000 | 8 | 20 | 10 | job pool 7, scientists |
+| 2,3 | 6,10 | 2500 | 4 | 20 | 8 | sensor-type |
+| 4 | 14 | 8500 | 8 | 30 | 20 | job pool 6, medics |
+| 5,6 | 31,15 | 5000 | 4 | 15 | 50 | tiles $1F/$0F with variants; +6 random |
+| 7 | 47 | 2000 | 6 | 20 | 5 | housing, 50 people |
+| 8,9 | 48,49 | 3000 | 6 | 20 | 0 | |
+| 10 | 50 | 0 | | | | construction-site placeholder (tile $32) |
+| 11,12 | 51,52 | 800 | 2 | 10 | 0 | solar, +E 20/40 |
+| 13 | 53 | 8000 | 8 | 30 | 25 | |
+| 14 | 61 | 6000 | 6 | 20 | 10 | job pool 0 |
+| 15 | 62 | 8200 | 8 | 20 | 15 | fuel production (tile $3E), pool 1 |
+| 16,17 | 63,64 | 3000 | 4 | 20 | 2,3 | fuel tanks 800/1200 |
+| 18,19 | 65,66 | 2500 | 4 | 20 | 5 | farms (10 workers each) |
+| 20 | 67 | 4000 | 4 | 20 | 5 | job pool 8 |
+| 21 | 68 | 2000 | 4 | 20 | 2 | warehouse, +80000 capacity |
+| 22 | 69 | 6000 | 6 | 20 | 10 | tank yard, pool 4 |
+| 23 | 70 | 2800 | 6 | 20 | 10 | workshop, pool 5 |
+| 24 | 60 | 3000 | 6 | 30 | 15 | air plant B |
+| 25 | 71 | 6200 | 8 | 30 | 8 | |
+| 26 | 96 | 5000 | 6 | 20 | 15 | mine, pool 2 |
+| 27 | 54 | 6000 | 8 | 30 | 10 | ship yard, pool 3 |
+| 28 | 72 | 3000 | 4 | 0 | 0 | launchpad (placed via `$771E`) |
+| 29 | 76 | 9000 | 6 | 40 | 25 | command centre ($4C on, $50 off) |
+| 30 | 84 | 7000 | 8 | 30 | 20 | air plant A |
+| 31 | 88 | 10000 | 10 | 40 | 0 | power station, +E 500 |
+| 32 | 92 | 6000 | 8 | 40 | 12 | sports complex |
+| 33 | 97 | 1500 | | | | terminator |
+
+### 7.2 Object records ($3B466, 8 bytes, 1000 slots) [V]
++0 word tile id (0 = free slot); +2 byte copy of T +1 (or target-tile low part during construction); +3 byte
+active flag ($FF active, 0 offline, from T +3); +4 x; +5 y; +6 byte state counter; +7 byte.
+Construction site: word $32, word +2 = target tile, +4/+5 = x,y, +6 = weeks remaining (from T +2), decremented by `$7000` weekly;
+at 0 `$703A` converts to the real building, returns the construction colonists, increments T +$A and +$C.
+Mine (tile $60) +6 = count of the 3x3 neighbouring cells with flag $8000 (richness 0..9); fuel type (tile $3E) +6 = count of
+cells with flag $0800; tiles $0F/$1F: +6 = $FF or the x coordinate (random phase).
+Placing: check funds, take T+4 colonists from free (`$6BF4`, `$6C92`), subtract cost T+6 from money, add to $142CA.
+Demolish (`$7372`): construction sites removable; ground clearing tiles $61, $94-$9B, $38 ($9E result); others msg 88;
+stored-type buildings reduce +E proportionally; farm tiles $41/$42 return 10 workers; warehouse tile $44 reduces stocks and
+capacity.
+
+### 7.3 Tile id to type (`$6D78` builder, `$6BE0` lookup, `$77C8` multi-tile table)
+Lookup `$6BE0`: search T by +8 == tile. Map pass: for each cell (low 10 bits): `$7F` = marker (stored at $14524 up to 10);
+tiles $48-$5F: table $77C8 (4 bytes per tile {base tile, offset flag}); origin cell only (offset 0) creates a record,
+other cells of the 2x2 group are skipped; tiles $0..$3 -> type tile 1, 4-5 -> 4, 6-9 -> 6, 10-13 -> 10, 14 -> 14,
+$0F-$1E -> 15, $1F-$2E -> 31, $2F.. -> as is up to $61 (excluding $38, >= $62 ignored); $60 and $61 handled directly.
+Each created record increments T+$A, T+$C and $142C2; CC tile gets +3=$FF; warehouse tile adds $13880 to capacity.
+
+---
+
+## 8. F-key screens (summary)
+- F1 `$B81C`: colony administrator: births/deaths, density = pop*100/(housing*50), seven category counts, morale text from
+  $144EC (sign and |m|/100 vs 50), crime text from $142CE (<0, <=20, <=50, else). [V]
+- F2 `$BA1E`: finance report: $1433A, $1434E, $14362, $1437E columns. [V data, H labels]
+- F3 `$BD9E`: budget: tax $144FC, $142E2, $135B6, $14302, $14312, grant $135BE, $142EE. [H]
+- F4 `$C516`: unit/tank status (tank count $1429C, tech level, `$C5BE`). [H]
+- F5 `$D6BA`: research (scientists $13142, funds $142D2/$142D6/$142DE, invention bits $14472, selected item $1447A). [H]
+- F6 `$E1AA`: defence/intel (arrays $14254, $14274, $14294; $144CA; transfer of money to $1446A). [H]
+Icon routines at `$6BA2, $F176, $15ECA, $30FE, $CC8E/$D0D8 (trade, writes $144F8, retain %), $15CFE, $BAAE, $E2D2, $7E52/$15EF0`
+are UI handlers on the same state; only `$CC8E`/`$D0D8` (trade) and `$6BA2` (build selection into $142B2/$142B6) were traced. [H]
+
+---
+
+## 9. Save format (Disk.4)
+Record +$10 = area A, 73 sectors (37376 bytes) at $39E3A: entity lists, object records, flag map, map cells
+(covers through $42D8A, with slack to $4303A). Record +$14 = area B, 11 sectors ($1600 bytes) = $13034..$14633, i.e. the
+scenario block followed by the variable block verbatim. [V extents, H slack]
+
+---
+
+## 10. Unknowns
+Exact meaning of many $1423x/$143xx statistic slots, the F3-F6 detailed fields, crime formula, research thresholds use,
+market exact algorithm, scenario-specific tables ($13456+, $13658+), $127A0, and fine unit-AI behaviour ($333A callees).
