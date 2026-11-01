@@ -19,6 +19,7 @@ export const PICTURES = {
   presents: { first: 0x729, last: 0x733 },
   language: { first: 0x5a, last: 0x5f },
   title: { first: 0x70a, last: 0x728 },
+  main: { first: 0x282, last: 0x2a0 },
 } satisfies Record<string, SectorRange>;
 
 export function decodePicture(disk: Uint8Array, range: SectorRange, target: Screen = new Screen()): Screen {
