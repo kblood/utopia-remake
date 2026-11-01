@@ -124,3 +124,15 @@ Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er
 1. Decodér tekstdata i Disk.2 og verificér mod en WinUAE-kørsel.
 2. Find sporlayoutet i Disk.1 med RawDIC, eller udtræk sporene i WinUAE.
 3. Pak disk.4 ud i WinUAE ved at køre spillet og tage et hukommelsesdump, eller skriv en MASH-decoder.
+
+## Reference run: WHDLoad boot tree (verified)
+
+A WinUAE 6.0.3 run reaches the game's title screen with the user's own WHDLoad data.
+
+- Boot volume layout (host folder mounted read-only as a bootable volume): `C/WHDLoad`, `C/Assign`, `Libs/xpkmaster.library`, `S/Startup-Sequence`, and the game folder holding `Utopia.Slave`, `Disk.1`, `Disk.2`, `disk.4`.
+- Startup-Sequence: `Assign LIBS: <vol>:Libs ADD`, then `CD <vol>:Utopia`, then `<vol>:C/WHDLoad Utopia.Slave`.
+- WHDLoad reads `Disk.N` relative to the current directory. Starting it from the volume root gave DOS error #205 on `Disk.1`. Changing into the game folder first fixed it.
+- `disk.4` is XPK-packed, so `xpkmaster.library` v4 must be reachable through `LIBS:`.
+- Kickstart 3.1 (A1200), 2 MB chip + 4 MB fast. With 1 MB chip and no fast RAM WHDLoad stops with DOS error #103.
+- After the WHDLoad nag window, the title picture appears with the version and copyright lines.
+- Other HD setups in the user's collection keep WHDLoad in `C:`, the game folder beside its `.slave`, and use the system `SYS:Libs` as `LIBS:`.
