@@ -12,6 +12,7 @@ import type { Sfx } from "../audio/sfx.js";
 import { OfferScene } from "./offer.js";
 import { createScreen, type ScreenKind, type ScreenScene } from "./screens/index.js";
 import { createBuildingScreen } from "./screens/buildings.js";
+import { createOrderScreen } from "./screens/orders.js";
 import type { ScreenContext } from "./screens/types.js";
 import { IntroScene, type Input } from "./intro.js";
 import { LanguageScene, type Language } from "./language.js";
@@ -83,6 +84,15 @@ export class Game {
     if (scene) this.showWindow(scene);
   }
 
+  // A right click on the map in select mode ($3EDC): the tank window or the ship window.
+  private pickUnit(px: number, py: number): void {
+    const map = this.map!;
+    if (this.stage !== "map" || map.sim.gameOver) return;
+    const pick = map.pickObject(px, py);
+    const scene = pick ? createOrderScreen(this.screenContext(map), pick) : null;
+    if (scene) this.showWindow(scene);
+  }
+
   private showWindow(window: ScreenScene): void {
     const map = this.map!;
     this.frozen = map.screen.pixels.slice();
@@ -98,7 +108,7 @@ export class Game {
       loadTileSet(this.disk1, this.disk2, record).tiles,
       new World(new GameState(this.disk2, record.block), loadMap(this.disk2, record)),
       this.strings!,
-      { onDiskMenu: () => this.openDiskMenu(), onScreen: (kind) => this.openScreen(kind), onSelect: (x, y) => this.selectCell(x, y), sfx: (id, volume) => this.sfx?.play(id, volume), sprites: loadSprites(this.disk1, this.disk2, record) },
+      { onDiskMenu: () => this.openDiskMenu(), onScreen: (kind) => this.openScreen(kind), onSelect: (x, y) => this.selectCell(x, y), onPick: (px, py) => this.pickUnit(px, py), sfx: (id, volume) => this.sfx?.play(id, volume), sprites: loadSprites(this.disk1, this.disk2, record) },
     );
     this.menu = null;
     this.stage = "map";

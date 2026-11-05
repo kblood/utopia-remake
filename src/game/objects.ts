@@ -35,6 +35,7 @@ export interface Drawable {
   frame?: number;
   lift?: number; // pixels the sprite is drawn higher (airborne objects)
   anim?: number; // extra animation counter of type $18
+  ref?: object; // the record behind the sprite (what a right click picks, see orders.ts)
 }
 
 export interface Marker {
@@ -184,6 +185,29 @@ export class ObjectLayer {
         this.blit(screen, e.type, e.frame, 0, vx, vy, 0, 0, e.lift);
       }
     }
+  }
+
+  // The draw list of $3EDC ($2954A): everything drawn in the window in painter order with its screen position (left edge
+  // x, bottom row y) and its record. Effects and pins are not listed.
+  pickables(scrollX: number, scrollY: number): { x: number; y: number; ref: object }[] {
+    const out: { x: number; y: number; ref: object }[] = [];
+    const extras = this.enemies?.drawables() ?? [];
+    for (let s = 0; s <= 2 * (VIEW - 1); s++) {
+      for (let vx = Math.max(0, s - (VIEW - 1)); vx <= Math.min(VIEW - 1, s); vx++) {
+        const vy = s - vx;
+        const cx = scrollX + vx;
+        const cy = scrollY + vy;
+        for (const u of this.units.units) {
+          if (u.x !== cx || u.y !== cy || !ObjectLayer.shown(u.type, vx, vy, u.dx, u.dy, u.dir)) continue;
+          out.push({ x: anchorX(vx, vy) + u.dx, y: anchorY(vx, vy) - 1 + u.dy, ref: u });
+        }
+        for (const d of extras) {
+          if (!d.ref || d.x !== cx || d.y !== cy || !ObjectLayer.shown(d.type, vx, vy, d.dx ?? 0, d.dy ?? 0, d.frame ?? 0)) continue;
+          out.push({ x: anchorX(vx, vy) + (d.dx ?? 0), y: anchorY(vx, vy) - 1 + (d.dy ?? 0) - (d.lift ?? 0), ref: d.ref });
+        }
+      }
+    }
+    return out.filter((e) => e.x >= 0 && e.x < CLIP_RIGHT);
   }
 
   // The flat tiles in front of a moving unit are drawn before it so it appears on top of them; each is

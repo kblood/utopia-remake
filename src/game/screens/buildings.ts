@@ -243,7 +243,7 @@ class Access {
   }
 }
 
-function blitIcon(screen: Screen, sprites: SpriteSet, type: number, x: number, bottomY: number): void {
+export function blitIcon(screen: Screen, sprites: SpriteSet, type: number, x: number, bottomY: number): void {
   const frame = sprites.frame(type, 0);
   if (!frame) return;
   const rows = Math.min(frame.rows, ICON_ROWS);

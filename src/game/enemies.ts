@@ -48,6 +48,9 @@ export const MAX_GROUND = 60;
 export const MAX_AIR = 30;
 export const FRONT_X = 0x135c4; // $135C4/$135C5: the front, a cell off the map
 export const FRONT_Y = 0x135c5;
+// Ship orders of the ship window ($F173, dispatched at $3F9E): what a flying or landed ship is told to do.
+export const SHIP_ORDER = { land: 0, hover: 1, goLand: 2, goHover: 3, buildPad: 4, front: 9 } as const;
+export const MSG_NO_FUEL = 0xed; // $3F94: a ship without fuel cannot be ordered
 
 const AIR_LAYER = 0x2000; // map word bit 13
 const ACTIVE = 0x0400; // map word bit 10: animated / active building
@@ -138,6 +141,8 @@ export interface EnemyHooks {
   sound?: (id: number) => void;
   // Height in pixels of the building on a cell: a kamikaze dives down to height - 10 (table $1612E +3).
   buildingHeight?: (x: number, y: number) => number;
+  // $771E: a hovering ship starts a launchpad on the 2x2 cells at (x, y); false = refused (the builder says why).
+  buildPad?: (x: number, y: number) => boolean;
 }
 
 export class EnemySystem {
@@ -610,33 +615,98 @@ export class EnemySystem {
     return ex;
   }
 
-  // Order a ship to fly to a cell (`land`: come down there, otherwise hover). A landed ship takes off first
-  // (mode 7: it climbs 2 per pass to $22 while it turns towards the target).
-  orderShip(ship: Ship, tx: number, ty: number, land: boolean): void {
+  // ---- orders ($3F9E dispatch, $41A8, $4204, $4260/$427C, takeoff $4152) ----
+  //
+  // +$11 (`next`) is the mode the ship takes when its current movement ends; +$B/+$C is the target cell.
+
+  // $4152: a landed ship lifts off: its marks move from the ground layer to the air layer, it faces direction 2, loses 8
+  // fuel (not when the word is negative = unlimited; never below 0) and climbs in mode 7 turning towards +$12.
+  private takeoff(ship: Ship, ex: ShipExtra): void {
+    const want = dirToward(ship.x, ship.y, ship.targetX, ship.targetY);
+    ex.turn = ex.next === 1 ? 2 : want < 0 ? 6 : want; // $44DE gives 6 when the ship is on the target
+    const i = ship.y * MAP_WIDTH + ship.x;
+    this.cells[i] = (this.cells[i] & ~OCCUPIED) | AIR_LAYER;
+    this.flags[i] = (this.flags[i] & ~FLAG_OWN) | FLAG_SHIP;
+    ex.rx = ship.x;
+    ex.ry = ship.y;
+    ship.dir = 2;
+    if (ship.fuel < 0x8000) ship.fuel = Math.max(0, ship.fuel - 8);
+    ship.mode = 7;
+    this.dirty = true;
+  }
+
+  // $41A8 with order 1 (hover) or 4 (build a launchpad): +$11 = order. Landed: take off; flying to a cell (2, 3, 5):
+  // stop (mode 6) and then continue in +$11; coming down: climb again (mode 7).
+  private holdOrder(ship: Ship, order: number): void {
     const ex = this.extra(ship);
+    ex.next = order;
+    if (ship.mode === 0) this.takeoff(ship, ex);
+    else if (ship.mode === 2 || ship.mode === 3 || ship.mode === 5) ship.mode = 6;
+    else if (ship.mode === 8) ship.mode = 7;
+  }
+
+  // $4204 (order 0): land where the ship is. Hovering or climbing: descend at once (hover again on a blocked cell);
+  // flying: stop and descend (mode 5). Other modes (4, 5, 8) ignore it, but +$11 is set.
+  private landOrder(ship: Ship): void {
+    const ex = this.extra(ship);
+    ex.turn = 2;
+    ex.next = 0;
+    if (ship.mode === 1 || ship.mode === 7) {
+      ship.mode = 8;
+      if (this.cells[ship.y * MAP_WIDTH + ship.x] & LAND_CELL_BLOCK) ship.mode = 1;
+      ship.dx = ship.dy = 0;
+      ex.vx = ex.vy = 0;
+    } else if (ship.mode === 2 || ship.mode === 3 || ship.mode === 6) {
+      ship.mode = 5;
+    }
+  }
+
+  // $427C (order 2 = go and land, 3 = go and hover; the target is already in +$B/+$C).
+  private goOrder(ship: Ship, order: number): void {
+    const ex = this.extra(ship);
+    ex.next = order;
+    if (ship.mode === 0) this.takeoff(ship, ex);
+    else if (ship.mode === 8) ship.mode = 7;
+    else if (ship.mode < 5 && ship.mode !== order) ship.mode = order;
+  }
+
+  // +$11 = 4: the ship is on its way to build a launchpad or is building it; the ship window refuses it ($DA9E).
+  padPending(ship: Ship): boolean {
+    return this.extra(ship).next === SHIP_ORDER.buildPad;
+  }
+
+  // The dispatch of $3F9E after the ship window: `order` is one of SHIP_ORDER, `target` the cell of the chosen pin
+  // (orders 2 and 3). Returns the string index of a refusal message ($ED, no fuel), 0 when the order was given.
+  commandShip(ship: Ship, order: number, target: { x: number; y: number } | null): number {
+    if (ship.fuel === 0) return MSG_NO_FUEL;
+    if (order === SHIP_ORDER.hover || order === SHIP_ORDER.buildPad) this.holdOrder(ship, order);
+    else if (order === SHIP_ORDER.land) this.landOrder(ship);
+    else if (order === SHIP_ORDER.front) this.sendShipToFront(ship);
+    else if (order === SHIP_ORDER.goLand || order === SHIP_ORDER.goHover) {
+      // $4260: without a pin the original reads a stale table row; the port leaves the ship alone.
+      if (!target) return 0;
+      ship.targetX = target.x;
+      ship.targetY = target.y;
+      this.goOrder(ship, order);
+    }
+    this.dirty = true;
+    return 0;
+  }
+
+  // Order a ship to fly to a cell (`land`: come down there, otherwise hover).
+  orderShip(ship: Ship, tx: number, ty: number, land: boolean): void {
     ship.targetX = tx;
     ship.targetY = ty;
-    ex.next = land ? 2 : 3;
-    const want = dirToward(ship.x, ship.y, tx, ty);
-    ex.turn = want < 0 ? 2 : want;
-    if (ship.mode === 0) {
-      // from the ground layer to the air layer
-      const i = ship.y * MAP_WIDTH + ship.x;
-      this.cells[i] = (this.cells[i] & ~OCCUPIED) | AIR_LAYER;
-      this.flags[i] = (this.flags[i] & ~FLAG_OWN) | FLAG_SHIP;
-      ex.rx = ship.x;
-      ex.ry = ship.y;
-      if (ship.dir > 7) ship.dir = ex.turn;
-      ship.lift = 0;
-      ship.mode = 7;
-    } else if (ship.mode === 1 || ship.mode === 2 || ship.mode === 3) {
-      ship.mode = ex.next;
-    }
+    this.goOrder(ship, land ? SHIP_ORDER.goLand : SHIP_ORDER.goHover);
+    this.dirty = true;
   }
 
   // A ship goes to the front ($135C4/$135C5, off the map): it leaves and joins the front fleet ($1427C).
   sendShipToFront(ship: Ship): void {
-    this.orderShip(ship, this.s.byte(FRONT_X), this.s.byte(FRONT_Y), false);
+    ship.targetX = this.s.byte(FRONT_X);
+    ship.targetY = this.s.byte(FRONT_Y);
+    this.goOrder(ship, SHIP_ORDER.goLand); // $3FD2: order 2 to the front cell
+    this.dirty = true;
   }
 
   // $4526: like the aircraft step; also -1 between cells, 0 when holding (modes 5, 6) or on the target cell.
@@ -707,9 +777,10 @@ export class EnemySystem {
   }
 
   // $4346: the climb or the stop is over: continue in the stored next mode.
+  // Mode 4 starts the launchpad ($771E); a refusal makes the ship land again.
   private nextMode(ship: Ship, ex: ShipExtra): void {
     ship.mode = ex.next;
-    if (ship.mode === 4 && (this.cells[ship.y * MAP_WIDTH + ship.x] & TILE_ID_MASK) === TILE_PAD) this.startLanding(ship, ex);
+    if (ship.mode === 4 && !(this.hooks.buildPad?.(ship.x, ship.y) ?? false)) this.startLanding(ship, ex);
   }
 
   private land(ship: Ship, ex: ShipExtra): void {
@@ -798,6 +869,7 @@ export class EnemySystem {
     ex.ry = from.y;
     this.flags[index] |= FLAG_SHIP;
     this.dirty = true;
+    this.hooks.sound?.(SFX.LAUNCH); // $E1A2
     return true;
   }
 
@@ -951,9 +1023,9 @@ export class EnemySystem {
   drawables(): Drawable[] {
     if (!this.dirty) return this.cache;
     const out: Drawable[] = [];
-    for (const g of this.ground) out.push({ type: g.type, x: g.x, y: g.y, dx: g.dx, dy: g.dy, frame: g.dir, anim: g.anim });
-    for (const a of this.air) out.push({ type: a.type, x: a.x, y: a.y, dx: a.dx, dy: a.dy, frame: a.dir, lift: Math.max(0, a.lift) });
-    for (const p of this.sim.fleet.ships) out.push({ type: p.type, x: p.x, y: p.y, dx: p.dx, dy: p.dy, frame: p.dir, lift: Math.max(0, p.lift) });
+    for (const g of this.ground) out.push({ type: g.type, x: g.x, y: g.y, dx: g.dx, dy: g.dy, frame: g.dir, anim: g.anim, ref: g });
+    for (const a of this.air) out.push({ type: a.type, x: a.x, y: a.y, dx: a.dx, dy: a.dy, frame: a.dir, lift: Math.max(0, a.lift), ref: a });
+    for (const p of this.sim.fleet.ships) out.push({ type: p.type, x: p.x, y: p.y, dx: p.dx, dy: p.dy, frame: p.dir, lift: Math.max(0, p.lift), ref: p });
     this.cache = out;
     this.dirty = false;
     return out;

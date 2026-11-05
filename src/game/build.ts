@@ -41,7 +41,11 @@ export const MSG = {
   warnPowerOff: 0x5e,
   warnStrike: 0x11b,
   noGroundForVent: 0x123,
+  padRefused: 0xe9, // $771E: not on the buildable area, blocked, or no free object slot
+  padNoMoney: 0xea,
 } as const;
+const TYPE_LAUNCHPAD = 28; // table entry at $133DA
+const TILE_LAUNCHPAD = 0x48;
 
 // Weights per stock slot ($B0EC), used when a warehouse is demolished (5 entries as longs).
 const WAREHOUSE_WEIGHTS_SLOTS = 5;
@@ -214,6 +218,44 @@ export class Builder {
     s.setWord(V.objects, s.word(V.objects) + 1);
     s.setWord(V.sites, s.word(V.sites) + 1);
     this.markCells(SITE_TILE, x, y, size);
+    return true;
+  }
+
+  // $771E: an Explorer hovering over (x, y) builds a launchpad on the 2x2 cells starting there. It pays the price of
+  // the type at $133DA at once, needs no workers and no connection to the base, and leaves a construction site that
+  // turns into tile $48 when its weeks run out. False (message $E9, or $EA without money) when it cannot.
+  placeLaunchpad(x: number, y: number): boolean {
+    const s = this.s;
+    if (!this.inRange(x, y) || this.occupancy(TILE_LAUNCHPAD, x, y, 4) < 0) {
+      this.say(MSG.padRefused);
+      return false;
+    }
+    const slot = this.freeSlot();
+    if (slot < 0) {
+      this.say(MSG.padRefused);
+      return false;
+    }
+    const t = this.world.typeAddress(TYPE_LAUNCHPAD);
+    const cost = s.word(t + T.buildCost);
+    const money = s.signedLong(V.money) - cost;
+    if (money < 0) {
+      this.say(MSG.padNoMoney);
+      return false;
+    }
+    s.setLong(V.money, money >>> 0);
+    s.setLong(V.spent, s.long(V.spent) + cost);
+    const o = this.world.objects;
+    o[slot] = 0;
+    o[slot + 1] = SITE_TILE;
+    o[slot + 2] = 0;
+    o[slot + 3] = TILE_LAUNCHPAD;
+    o[slot + 4] = x;
+    o[slot + 5] = y;
+    o[slot + 6] = s.byte(t + 2);
+    o[slot + 7] = 0;
+    s.setWord(V.objects, s.word(V.objects) + 1);
+    s.setWord(V.sites, s.word(V.sites) + 1);
+    this.markCells(SITE_TILE, x, y, 4);
     return true;
   }
 

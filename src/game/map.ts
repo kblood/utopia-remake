@@ -15,6 +15,7 @@ import { Messages } from "./messages.js";
 import { loadCombatTables } from "../data/combat.js";
 import { EnemySystem } from "./enemies.js";
 import { EFFECT_EXPLOSION, EFFECT_EXPLOSION_HIGH, ObjectLayer } from "./objects.js";
+import { pickObject, type Pick } from "./orders.js";
 import type { SpriteSet } from "../data/sprites.js";
 import { SFX } from "../audio/sfx.js";
 import { MarkerMode, markerMessageText } from "./screens/markers.js";
@@ -35,6 +36,9 @@ const ANIMATED_FLAG = 0x400;
 const A_POWER_LEVEL = 0x144c8;
 // The original steps animated cells once per main-loop pass; its real rate is unknown, so this is a guess.
 const ANIMATION_FRAMES = 6;
+// A finished ship is announced by four button clicks, 11 frames apart ($4128-$414C).
+const LAUNCH_CLICKS = 4;
+const CLICK_FRAMES = 11;
 
 // Window clip: the map occupies x 0..255 of the screen.
 const CLIP_RIGHT = 256;
@@ -92,6 +96,10 @@ export class MapScene {
   private repeat = 0;
   private frame = 0;
   private lightWasDown = false;
+  private rightWasDown = false;
+  private clicksLeft = 0; // button clicks still to play for a finished ship
+  private clickWait = 0;
+  private onPick: (px: number, py: number) => void = () => {};
   private readonly lightIcons: Uint8Array[];
 
   constructor(
@@ -99,7 +107,7 @@ export class MapScene {
     private readonly tiles: Tile[],
     world: World,
     strings: GameStrings,
-    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel" | "overview" | "council") => void; onSelect?: (x: number, y: number) => void; sfx?: (id: number, volume?: number) => void; sprites?: SpriteSet } = {},
+    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel" | "overview" | "council") => void; onSelect?: (x: number, y: number) => void; onPick?: (px: number, py: number) => void; sfx?: (id: number, volume?: number) => void; sprites?: SpriteSet } = {},
   ) {
     this.messages = new Messages(disk, strings);
     this.world = world;
@@ -132,6 +140,7 @@ export class MapScene {
       ? new EnemySystem(this.sim, this.objects.units, loadCombatTables(disk), {
           explode: (x, y, lift, high) => this.enemyExplosion(x, y, lift, high),
           sound: (id) => this.playSfx(id),
+          buildPad: (x, y) => builder.placeLaunchpad(x, y),
           buildingHeight: (x, y) => tiles[(this.cells[y * MAP_WIDTH + x] & TILE_ID_MASK) - 1]?.rows ?? 0,
         })
       : null;
@@ -139,6 +148,7 @@ export class MapScene {
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     if (options.onScreen) this.controls.onScreen = options.onScreen;
     if (options.onSelect) this.controls.onSelect = options.onSelect;
+    if (options.onPick) this.onPick = options.onPick;
     this.playSfx = options.sfx ?? (() => {});
     this.controls.onMarkerButton = () => this.messages.push(this.markerMode.arm());
     this.controls.cellHook = (x, y) => {
@@ -183,7 +193,7 @@ export class MapScene {
     if (kind === "explosion" || kind === "meteorImpact") {
       this.explosionAt(x, y);
       this.objects?.spawnEffect(EFFECT_EXPLOSION, x, y);
-    } else if (kind === "launch") this.playSfx(SFX.LAUNCH);
+    } else if (kind === "launch") this.clicksLeft = LAUNCH_CLICKS; // the ship is complete ($4128): four clicks, not the launch sound
     else if (kind === "alienAppear") this.playSfx(SFX.ALERT);
     // "focus" ($11432): Sim.alerts stores the view bookmark and lights the second warning light.
   }
@@ -209,6 +219,28 @@ export class MapScene {
     }
   }
 
+  // What a right click on the map in select mode picks ($3EDC): an own tank or a ship, null for anything else.
+  pickObject(px: number, py: number): Pick | null {
+    if (!this.objects) return null;
+    return pickObject(this.objects, this.sim.fleet.ships, this.scrollX, this.scrollY, px, py, this.controls.pickCell(px, py));
+  }
+
+  // The four clicks of a finished ship, one every 11 frames.
+  private playClicks(): void {
+    if (this.clicksLeft <= 0 || --this.clickWait > 0) return;
+    this.playSfx(SFX.CLICK);
+    this.clicksLeft--;
+    this.clickWait = CLICK_FRAMES;
+  }
+
+  private arrowAt(px: number, py: number): Arrow | undefined {
+    return ARROWS.find((a) => px >= a.x0 && px <= a.x1 && py >= a.y0 && py <= a.y1);
+  }
+
+  private onArrow(px: number, py: number): boolean {
+    return this.arrowAt(px, py) !== undefined;
+  }
+
   private scroll(dx: number, dy: number, step: number): void {
     const x = Math.max(0, Math.min(MAX_SCROLL_X, this.scrollX + dx * step));
     const y = Math.max(0, Math.min(MAX_SCROLL_Y, this.scrollY + dy * step));
@@ -229,10 +261,13 @@ export class MapScene {
       this.scrollY = Math.max(0, Math.min(MAX_SCROLL_Y, target.y));
     }
     this.lightWasDown = input.leftButton;
+    // $15F44: a right click in select mode on something that is not a scroll arrow picks a tank or a ship.
+    if (!used && input.rightButton && !this.rightWasDown && this.controls.mode === "select" && !this.onArrow(input.pointerX, input.pointerY)) {
+      this.onPick(input.pointerX, input.pointerY);
+    }
+    this.rightWasDown = input.rightButton;
     if (!used && (input.leftButton || input.rightButton)) {
-      const arrow = ARROWS.find(
-        (a) => input.pointerX >= a.x0 && input.pointerX <= a.x1 && input.pointerY >= a.y0 && input.pointerY <= a.y1,
-      );
+      const arrow = this.arrowAt(input.pointerX, input.pointerY);
       if (arrow && this.repeat-- <= 0) {
         this.scroll(arrow.dx, arrow.dy, step);
         this.repeat = REPEAT_FRAMES;
@@ -252,6 +287,7 @@ export class MapScene {
       this.messages.push(index);
       if (ALERT_MESSAGES.has(index)) this.playSfx(SFX.ALERT);
     }
+    this.playClicks();
     this.messages.update();
     this.draw();
   }

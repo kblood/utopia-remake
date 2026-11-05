@@ -87,5 +87,5 @@ of the same type [H: its damage is the tank's own `$145A3`].
 `game.ts` (`otherUnits` for the overview, `findTarget` / `launchMissile` for the missile launcher window). Sprite sets differ per scenario (the crusher, type 24, exists
 in scenarios 3, 5 and 7 only; 27 in 3, 5, 6). Test: `test/enemies.mjs`.
 
-Open: the real pass rate; exact kamikaze dive altitude (`buildingHeight`); who calls `orderShip` (the ship order screens are not ported - only the movement machine is);
+Open: the real pass rate; exact kamikaze dive altitude (`buildingHeight`); the ship order screens are ported, see ship-control.md (`commandShip` is the entry point; `orderShip`/`sendShipToFront` remain as helpers);
 the exact explosion altitude for ships; whether a defected tank keeps shooting own units only.
