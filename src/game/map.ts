@@ -110,6 +110,7 @@ export class MapScene {
       },
       destroyUnit: () => this.destroyFirstUnit(),
       onWeek: () => builder.weekly(),
+      effect: (kind, x, y) => this.simEffect(kind, x, y),
       spawnUnit: (x, y, advanced) => (this.objects ? this.objects.units.spawnAtYard(x, y, advanced) !== null : true),
     });
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
@@ -144,6 +145,17 @@ export class MapScene {
   private explosionAt(x: number, y: number): void {
     const inside = x >= this.scrollX && x < this.scrollX + VIEW_CELLS && y >= this.scrollY && y < this.scrollY + VIEW_CELLS;
     this.playSfx(SFX.EXPLOSION_LOW, inside ? 64 : 32);
+  }
+
+  // Graphics and sound the sim asks for (explosions, scroll-to-cell, launches, meteors, aliens).
+  private simEffect(kind: string, x: number, y: number): void {
+    if (kind === "explosion" || kind === "meteorImpact") this.explosionAt(x, y);
+    else if (kind === "launch") this.playSfx(SFX.LAUNCH);
+    else if (kind === "alienAppear") this.playSfx(SFX.ALERT);
+    else if (kind === "focus") {
+      this.scrollX = Math.max(0, Math.min(MAX_SCROLL_X, x - VIEW_CELLS / 2));
+      this.scrollY = Math.max(0, Math.min(MAX_SCROLL_Y, y - VIEW_CELLS / 2));
+    }
   }
 
   // Shows a string-table message on the message line / log.
@@ -193,6 +205,7 @@ export class MapScene {
     }
     if (++this.frame % ANIMATION_FRAMES === 0) this.animateCells();
     this.sim.tick();
+    if (this.frame % 2 === 0) this.sim.pass();
     if (this.objects) {
       this.objects.paused = this.sim.paused;
       this.objects.update();
