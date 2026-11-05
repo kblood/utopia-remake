@@ -92,7 +92,7 @@ export class MapScene {
     private readonly tiles: Tile[],
     world: World,
     strings: GameStrings,
-    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel" | "overview" | "council") => void; sfx?: (id: number, volume?: number) => void; sprites?: SpriteSet } = {},
+    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel" | "overview" | "council") => void; onSelect?: (x: number, y: number) => void; sfx?: (id: number, volume?: number) => void; sprites?: SpriteSet } = {},
   ) {
     this.messages = new Messages(disk, strings);
     this.world = world;
@@ -114,6 +114,7 @@ export class MapScene {
     });
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     if (options.onScreen) this.controls.onScreen = options.onScreen;
+    if (options.onSelect) this.controls.onSelect = options.onSelect;
     this.playSfx = options.sfx ?? (() => {});
     this.controls.onMarkerButton = () => this.messages.push(this.markerMode.arm());
     this.controls.cellHook = (x, y) => {

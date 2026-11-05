@@ -11,6 +11,8 @@ import { AnnounceScene } from "./announce.js";
 import type { Sfx } from "../audio/sfx.js";
 import { OfferScene } from "./offer.js";
 import { createScreen, type ScreenKind, type ScreenScene } from "./screens/index.js";
+import { createBuildingScreen } from "./screens/buildings.js";
+import type { ScreenContext } from "./screens/types.js";
 import { IntroScene, type Input } from "./intro.js";
 import { LanguageScene, type Language } from "./language.js";
 import { MapScene } from "./map.js";
@@ -63,7 +65,23 @@ export class Game {
   private openScreen(kind: ScreenKind): void {
     const map = this.map!;
     if (this.stage !== "map" || map.sim.gameOver) return;
-    const window = createScreen(kind, { disk: this.disk1, world: map.world, sim: map.sim, strings: this.strings!, say: (n) => map.say(n), scroll: map.scrollRef, objects: map.objects ?? undefined });
+    this.showWindow(createScreen(kind, this.screenContext(map)));
+  }
+
+  private screenContext(map: MapScene): ScreenContext {
+    return { disk: this.disk1, world: map.world, sim: map.sim, strings: this.strings!, say: (n) => map.say(n), scroll: map.scrollRef, objects: map.objects ?? undefined };
+  }
+
+  // A click on a map cell in select mode ($7140): a building window, or an immediate effect.
+  private selectCell(x: number, y: number): void {
+    const map = this.map!;
+    if (this.stage !== "map" || map.sim.gameOver) return;
+    const scene = createBuildingScreen(this.screenContext(map), x, y);
+    if (scene) this.showWindow(scene);
+  }
+
+  private showWindow(window: ScreenScene): void {
+    const map = this.map!;
     this.frozen = map.screen.pixels.slice();
     this.window = window;
     this.stage = "screen";
@@ -77,7 +95,7 @@ export class Game {
       loadTileSet(this.disk1, this.disk2, record).tiles,
       new World(new GameState(this.disk2, record.block), loadMap(this.disk2, record)),
       this.strings!,
-      { onDiskMenu: () => this.openDiskMenu(), onScreen: (kind) => this.openScreen(kind), sfx: (id, volume) => this.sfx?.play(id, volume), sprites: loadSprites(this.disk1, this.disk2, record) },
+      { onDiskMenu: () => this.openDiskMenu(), onScreen: (kind) => this.openScreen(kind), onSelect: (x, y) => this.selectCell(x, y), sfx: (id, volume) => this.sfx?.play(id, volume), sprites: loadSprites(this.disk1, this.disk2, record) },
     );
     this.menu = null;
     this.stage = "map";

@@ -67,6 +67,8 @@ export class Controls {
   // Button 3 arms marker mode; the hook gets the next map cell click first and returns true when it used it.
   onMarkerButton: () => void = () => {};
   cellHook: (x: number, y: number) => boolean = () => false;
+  // Select mode: a click on a map cell (the building click dispatch, $7140).
+  onSelect: (x: number, y: number) => void = () => {};
 
   constructor(
     private readonly disk: Uint8Array,
@@ -149,6 +151,7 @@ export class Controls {
     if (this.cellHook(cell.x, cell.y)) return true;
     if (this.mode === "build" && this.selection) this.builder.place(this.selection, cell.x, cell.y);
     else if (this.mode === "demolish") this.builder.demolish(cell.x, cell.y);
+    else if (this.mode === "select") this.onSelect(cell.x, cell.y);
     return true;
   }
 
