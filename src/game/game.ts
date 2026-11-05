@@ -8,6 +8,7 @@ import { loadMap, loadTileSet, readScenarioRecords, type ScenarioRecord } from "
 import type { Screen } from "../gfx/screen.js";
 import { loadSprites } from "../data/sprites.js";
 import { AnnounceScene } from "./announce.js";
+import type { Sfx } from "../audio/sfx.js";
 import { OfferScene } from "./offer.js";
 import { createScreen, type ScreenKind, type ScreenScene } from "./screens/index.js";
 import { IntroScene, type Input } from "./intro.js";
@@ -39,6 +40,7 @@ export class Game {
     private readonly disk1: Uint8Array,
     private readonly disk2: Uint8Array,
     private readonly music: Music | null = null,
+    private readonly sfx: Sfx | null = null,
   ) {
     this.intro = new IntroScene(disk1);
     this.records = readScenarioRecords(disk2);
@@ -75,7 +77,7 @@ export class Game {
       loadTileSet(this.disk1, this.disk2, record).tiles,
       new World(new GameState(this.disk2, record.block), loadMap(this.disk2, record)),
       this.strings!,
-      { onDiskMenu: () => this.openDiskMenu(), onScreen: (kind) => this.openScreen(kind), sprites: loadSprites(this.disk1, this.disk2, record) },
+      { onDiskMenu: () => this.openDiskMenu(), onScreen: (kind) => this.openScreen(kind), sfx: (id, volume) => this.sfx?.play(id, volume), sprites: loadSprites(this.disk1, this.disk2, record) },
     );
     this.menu = null;
     this.stage = "map";

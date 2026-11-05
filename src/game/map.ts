@@ -14,11 +14,14 @@ import { Controls } from "./controls.js";
 import { Messages } from "./messages.js";
 import { ObjectLayer } from "./objects.js";
 import type { SpriteSet } from "../data/sprites.js";
+import { SFX } from "../audio/sfx.js";
 import { A } from "./state.js";
 import { Sim } from "./sim.js";
 import type { World } from "./world.js";
 
 export const VIEW_CELLS = 8;
+// News and spy-report messages that come with the alert tone ($11B4 callers).
+const ALERT_MESSAGES = new Set([0x157, 0x8d, 0x186]);
 const MAX_SCROLL_X = MAP_WIDTH - VIEW_CELLS;
 const MAX_SCROLL_Y = MAP_HEIGHT - VIEW_CELLS;
 const START_X = 47;
@@ -68,6 +71,7 @@ export class MapScene {
   readonly objects: ObjectLayer | null; // units, marker pins and effects; null without the sprite sheets
   scrollX = START_X;
   scrollY = START_Y;
+  private readonly playSfx: (id: number, volume?: number) => void;
   private repeat = 0;
   private frame = 0;
 
@@ -76,7 +80,7 @@ export class MapScene {
     private readonly tiles: Tile[],
     world: World,
     strings: GameStrings,
-    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel") => void; sprites?: SpriteSet } = {},
+    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel") => void; sfx?: (id: number, volume?: number) => void; sprites?: SpriteSet } = {},
   ) {
     this.messages = new Messages(disk, strings);
     this.world = world;
@@ -88,13 +92,18 @@ export class MapScene {
     const builder = new Builder(world, readFlagTable(disk), readWeights(disk), (n) => this.messages.push(n));
     this.sim = new Sim(world, {
       interactive: true,
-      demolishAt: (x, y) => builder.demolish(x, y),
+      demolishAt: (x, y) => {
+        builder.demolish(x, y);
+        this.explosionAt(x, y);
+      },
       destroyUnit: () => this.destroyFirstUnit(),
       onWeek: () => builder.weekly(),
       spawnUnit: (x, y, advanced) => (this.objects ? this.objects.units.spawnAtYard(x, y, advanced) !== null : true),
     });
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     if (options.onScreen) this.controls.onScreen = options.onScreen;
+    this.playSfx = options.sfx ?? (() => {});
+    this.controls.onClick = () => this.playSfx(SFX.CLICK);
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }
@@ -107,6 +116,12 @@ export class MapScene {
     if (!unit) return null;
     layer.destroyUnit(unit);
     return unit.type;
+  }
+
+  // $1237C: full volume when the blast is inside the visible 8x8 window, half outside.
+  private explosionAt(x: number, y: number): void {
+    const inside = x >= this.scrollX && x < this.scrollX + VIEW_CELLS && y >= this.scrollY && y < this.scrollY + VIEW_CELLS;
+    this.playSfx(SFX.EXPLOSION_LOW, inside ? 64 : 32);
   }
 
   // Shows a string-table message on the message line / log.
@@ -160,7 +175,10 @@ export class MapScene {
       this.objects.paused = this.sim.paused;
       this.objects.update();
     }
-    for (const index of this.sim.messages.splice(0)) this.messages.push(index);
+    for (const index of this.sim.messages.splice(0)) {
+      this.messages.push(index);
+      if (ALERT_MESSAGES.has(index)) this.playSfx(SFX.ALERT);
+    }
     this.messages.update();
     this.draw();
   }

@@ -62,6 +62,7 @@ export class Controls {
   private wasDown = false;
   private wasRight = false;
   // Opens a window screen for icon buttons 4 (trade), 6 (staffing) and 7 (intelligence).
+  onClick: () => void = () => {};
   onScreen: (kind: "trade" | "staff" | "intel") => void = () => {};
 
   constructor(
@@ -136,6 +137,7 @@ export class Controls {
 
     const button = this.buttonAt(input.pointerX, input.pointerY);
     if (button >= 0) {
+      this.onClick();
       this.press(button);
       return true;
     }

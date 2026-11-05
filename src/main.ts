@@ -4,6 +4,7 @@
 
 import { detectProfile } from "./data/detect.js";
 import { createMusic } from "./audio/music.js";
+import { createSfx } from "./audio/sfx.js";
 import { Game } from "./game/game.js";
 import type { Input } from "./game/intro.js";
 import type { Screen } from "./gfx/screen.js";
@@ -56,10 +57,14 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
   const scenarioDisk = new Uint8Array(await disk2.arrayBuffer());
   const pointer = readPointer(disk, POINTER_ARROW);
   const music = createMusic(disk, scenarioDisk);
-  const wake = (): void => music.resume();
+  const sfx = createSfx(disk, scenarioDisk, { music });
+  const wake = (): void => {
+    music.resume();
+    sfx.resume();
+  };
   canvas.addEventListener("mousedown", wake);
   window.addEventListener("keydown", wake);
-  const game = new Game(disk, scenarioDisk, music);
+  const game = new Game(disk, scenarioDisk, music, sfx);
 
   const input: Input = { leftButton: false, rightButton: false, pointerX: 0, pointerY: 0, keys: [] };
   window.addEventListener("keydown", (e) => {
