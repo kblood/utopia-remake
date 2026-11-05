@@ -28,6 +28,7 @@ export const TILE_PLANES = 6;
 export interface ScenarioRecord {
   index: number;
   name: string;
+  sprites: SectorRange; // raw sprite sheet for the scenario's object types 22-27
   tiles: SectorRange; // raw tile images
   descriptors: SectorRange; // 8-byte {rows-1, offset} entries for the tile images
   map: SectorRange;
@@ -70,6 +71,7 @@ export function readScenarioRecords(disk2: Uint8Array): ScenarioRecord[] {
     records.push({
       index,
       name: String.fromCharCode(...header.subarray(at, at + NAME_LENGTH)).replace(/[\0 ]+$/, ""),
+      sprites: pair(0),
       tiles: pair(1),
       descriptors: pair(2),
       map: pair(3),

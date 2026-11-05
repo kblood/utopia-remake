@@ -12,6 +12,8 @@ import { readFlagTable, readWeights } from "../data/gameimage.js";
 import { Builder } from "./build.js";
 import { Controls } from "./controls.js";
 import { Messages } from "./messages.js";
+import { ObjectLayer } from "./objects.js";
+import type { SpriteSet } from "../data/sprites.js";
 import { A } from "./state.js";
 import { Sim } from "./sim.js";
 import type { World } from "./world.js";
@@ -62,6 +64,7 @@ export class MapScene {
   readonly sim: Sim;
   private readonly messages: Messages;
   readonly controls: Controls;
+  readonly objects: ObjectLayer | null; // units, marker pins and effects; null without the sprite sheets
   scrollX = START_X;
   scrollY = START_Y;
   private repeat = 0;
@@ -72,11 +75,14 @@ export class MapScene {
     private readonly tiles: Tile[],
     world: World,
     strings: GameStrings,
-    options: { onDiskMenu?: () => void } = {},
+    options: { onDiskMenu?: () => void; sprites?: SpriteSet } = {},
   ) {
     this.messages = new Messages(disk, strings);
     this.cells = world.cells;
     this.state = world.state;
+    this.objects = options.sprites
+      ? new ObjectLayer(options.sprites, tiles, this.cells, (t, x, y) => this.drawTile(t, x, y), () => world.state.byte(A.techLevel))
+      : null;
     const builder = new Builder(world, readFlagTable(disk), readWeights(disk), (n) => this.messages.push(n));
     this.sim = new Sim(world, { onWeek: () => builder.weekly() });
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
@@ -115,6 +121,10 @@ export class MapScene {
     }
     if (++this.frame % ANIMATION_FRAMES === 0) this.animateCells();
     this.sim.tick();
+    if (this.objects) {
+      this.objects.paused = this.sim.paused;
+      this.objects.update();
+    }
     for (const index of this.sim.messages.splice(0)) this.messages.push(index);
     this.messages.update();
     this.draw();
@@ -156,9 +166,11 @@ export class MapScene {
         const vy = s - vx;
         const cell = this.cells[(this.scrollY + vy) * MAP_WIDTH + this.scrollX + vx];
         const tile = this.tiles[(cell & TILE_ID_MASK) - 1]; // ids are 1-based
-        if (tile) this.drawTile(tile, anchorX(vx, vy), anchorY(vx, vy));
+        if (tile && !this.objects?.claimed(vx, vy)) this.drawTile(tile, anchorX(vx, vy), anchorY(vx, vy));
+        this.objects?.drawAfterCell(this.screen, this.scrollX, this.scrollY, vx, vy);
       }
     }
+    this.objects?.drawMarkers(this.screen, this.scrollX, this.scrollY);
   }
 
   // Top bar, redrawn every frame: date, money, and quality of life (notes/formats/game-text.md, section 8).
