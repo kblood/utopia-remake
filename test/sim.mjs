@@ -222,6 +222,29 @@ for (let sc = 0; sc < records.length; sc++) {
   check("research: needs a command centre", state.byte(A.techLevel) === level && sim.messages.includes(0xef));
 }
 
+// --- tank yard ($A620) ------------------------------------------------------------------------------
+{
+  const spawned = [];
+  const { state, world } = fresh(0, 5);
+  const sim = new Sim(world, { rng: createRng(5), spawnUnit: (x, y, adv) => (spawned.push([x, y, adv]), true) });
+  const at = world.objectCount * 8;
+  world.objects.set([0, 0x45, 0, 0, 20, 30, 0, 0], at);
+  world.objectCount++;
+  state.setWord(0x133f8, 1);
+  state.setByte(0x144c8, 0);
+  state.setWord(0x1337a, 1);
+  state.setLong(0x143fa, 8);
+  state.setLong(0x13156, 100);
+  state.setLong(0x1315a, 100); // good 1 and 3 stocks
+  state.setLong(0x1315e, 100);
+  sim.tankYard();
+  check("tank yard: counter advances by workers", world.objects[at + 6] === 8, String(world.objects[at + 6]));
+  sim.tankYard();
+  sim.tankYard();
+  check("tank yard: unit spawned at the yard", spawned.length === 1 && spawned[0][0] === 20 && spawned[0][1] === 30, JSON.stringify(spawned));
+  check("tank yard: counter restarts", world.objects[at + 6] === 0);
+}
+
 // --- determinism ------------------------------------------------------------------------------------
 {
   const run = (seed) => {

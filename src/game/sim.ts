@@ -107,6 +107,9 @@ export interface SimOptions {
   decide?: (offer: Offer) => boolean;
   // Called in the weekly step where the original runs $7000 (construction countdown).
   onWeek?: () => void;
+  // $37CA at the end of the tank yard step: put a finished unit next to the yard at (x, y).
+  // Returns false when no neighbouring cell is free. Without a unit layer the unit is only counted.
+  spawnUnit?: (x: number, y: number, advanced: boolean) => boolean;
 }
 
 export class Sim {
@@ -120,6 +123,7 @@ export class Sim {
   private readonly decide: (offer: Offer) => boolean;
 
   private onWeek: (() => void) | undefined;
+  private spawnUnit: (x: number, y: number, advanced: boolean) => boolean;
 
   constructor(
     readonly world: World,
@@ -129,6 +133,7 @@ export class Sim {
     this.rng = options.rng ?? createRng(0x55746f70);
     this.decide = options.decide ?? (() => false);
     this.onWeek = options.onWeek;
+    this.spawnUnit = options.spawnUnit ?? (() => true);
     if (this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
   }
 
@@ -550,6 +555,7 @@ export class Sim {
     this.moraleMonthly();
     this.crimeMonthly();
     this.production();
+    this.tankYard();
     this.research();
     s.setLong(0x1436a, s.long(0x14376));
     s.setLong(0x14376, 0);
@@ -941,9 +947,52 @@ export class Sim {
     s.setLong(V.crime, (d1 - reduction) >>> 0);
   }
 
+  // $A620: each tank yard (record tile $45) takes goods 1 until its counter (byte +6) reaches 20,
+  // then 2 of good 3, then puts a unit on a free neighbouring cell and starts over. Unit type 10
+  // when invention bit 2 is set, else 9.
+  tankYard(): void {
+    const s = this.s;
+    if (s8(s.byte(V.power)) >= 0xa) return;
+    if (s.word(0x133f8) === 0) return this.msg(0xb3);
+    const yards = s.word(0x1337a);
+    if (yards === 0) return;
+    const per = divuQ(s.long(0x143fa), yards);
+    if (per === 0) return;
+    const objects = this.world.objects;
+    let left = yards;
+    for (let slot = 0; slot < this.world.objectCount && left > 0; slot++) {
+      const at = slot * 8;
+      if (((objects[at] << 8) | objects[at + 1]) !== 0x45) continue;
+      left--;
+      let counter = objects[at + 6];
+      if (counter < 0x80) {
+        if (counter < 20) {
+          const want = s8(per) < 20 - counter ? per & 0xff : 20 - counter;
+          const took = this.removeGoods(want, 1);
+          if (took === 0) return this.msg(0x96);
+          counter = (counter + took) & 0xff;
+          objects[at + 6] = counter;
+          this.add32(0x1437a, took);
+          this.add32(0x143a2, took);
+          s.setLong(0x1434a, s.long(0x1434a) - took);
+          if (s8(counter) < 20) continue;
+        }
+        if (this.removeGoods(2, 3) === 0) return this.msg(0x94);
+        objects[at + 6] = 0xff;
+      }
+      const advanced = (s.long(V.invention) & 4) !== 0;
+      if (this.spawnUnit(objects[at + 4], objects[at + 5], advanced)) {
+        objects[at + 6] = 0;
+        this.add32(0x143b6, 1);
+      } else {
+        this.msg(0x95);
+      }
+    }
+  }
+
   // $A360: production. Pool 5 (workshop) makes good 4, pool 0 turns good 1 into good 3,
   // mines (pool 2) yield good 2 and ore, the fuel plant (pool 1) fills the tanks.
-  // $A620 (tank yard) and $AC04 (ship yard) are not ported.
+  // $AC04 (ship yard) is not ported.
   private production(): void {
     const s = this.s;
     for (let i = 0; i < 6; i++) s.setLong(0x143a6 + 4 * i, 0);

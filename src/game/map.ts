@@ -84,7 +84,10 @@ export class MapScene {
       ? new ObjectLayer(options.sprites, tiles, this.cells, (t, x, y) => this.drawTile(t, x, y), () => world.state.byte(A.techLevel))
       : null;
     const builder = new Builder(world, readFlagTable(disk), readWeights(disk), (n) => this.messages.push(n));
-    this.sim = new Sim(world, { onWeek: () => builder.weekly() });
+    this.sim = new Sim(world, {
+      onWeek: () => builder.weekly(),
+      spawnUnit: (x, y, advanced) => (this.objects ? this.objects.units.spawnAtYard(x, y, advanced) !== null : true),
+    });
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();

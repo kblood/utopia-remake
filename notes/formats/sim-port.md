@@ -70,7 +70,7 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 | `$11D34` (gun animation, special bit and daily) | graphics/unit logic |
 | `$ACE2` (ship fuel), `$4798`, `$12510`, `$127A0` (weekly unit/enemy code), `$A5A6` (fuel withdrawal for ships) | unit lists not modelled |
 | `$7000` construction countdown (weekly) | needs the placement code; conversion logic is `$703A` (documented in game-state.md 7.2) |
-| `$A620` tank yard, `$AC04` ship yard | spawn units (`$37CA`, neighbour flags `$710A`) |
+| `$AC04` ship yard | spawns ships |
 | `$AF12/$B018` alien intelligence | not traced to the point of a faithful port |
 | events 1, 3, 4, 8, 9, 11, 12, 13, 15, 17 | alien/meteor/units/mine collapse (needs `$7372` demolish); event 5 is empty in the original |
 | crime consequences above level 50 (`$10D00`, `$10D9E`) | unit and building destruction |
@@ -91,3 +91,12 @@ price and half of the spend of fund `$142D6` divided by the price (the same half
 `$142DA`). Reaching the per-level threshold (table `$B154`) raises the level (capped at 10), ORs the
 level's invention bits (`$B214`) into the queue `$14476` (`$1135A` then announces them one by one into `$14472`), clears `$144C7`, and rewrites the scale bytes
 `$145A3..$145A9` from tables `$12D56` / `$B251`. Test: `test/sim.mjs`.
+
+## Tank yard (`$A620`, ported as `Sim.tankYard()`)
+
+Monthly after production. Workers per yard = `$143FA` (job pool 4) / yard count (`$1337A`). Each
+record with tile `$45` has a counter in byte +6: it takes good 1 until the counter reaches 20
+(message `$96` when the stock is empty), then 2 of good 3 (`$94`), sets the counter to `$FF`, then
+asks `SimOptions.spawnUnit(x, y, advanced)` for a free neighbour cell (`UnitSystem.spawnAtYard`);
+on success the counter resets and `$143B6` counts the unit, otherwise message `$95` and it retries.
+Test: `test/sim.mjs`.
