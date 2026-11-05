@@ -42,3 +42,15 @@ Målet er en motor i stil med ScummVM. Motoren er open source og indeholder inge
 - Hvordan udpakkes `Disk.1` korrekt? amitools kan ikke åbne den som standard ADF, så filsystemet skal analyseres i detaljer.
 - Hvilken lyd- og grafikstruktur bruger spillet? Det kræver analyse af de udpakkede filer.
 - Hvilke dele af spillogikken skal specificeres først?
+
+## Status (what the engine covers)
+
+Playable end to end from the player's own game folder: title/intro, language and scenario menus, the map with scrolling, build/demolish, markers, the
+F1-F6, trade, staffing, intelligence, overview and council windows, building click windows (power, command centre, hospital, sports, ship yard, missile
+launchers, teleporter, guns), save/load, music and sound effects. The simulation covers economy, population, research, tank/ship yards, construction,
+crime, mine collapse, the daily events, meteors, alien waves, enemy units, combat and ship/tank orders (`sim*.ts`, `enemies.ts`, `orders.ts`).
+
+Open points (cannot be settled without comparing against the running original; each is marked HYPOTHESIS in the format notes):
+which music track belongs to which screen, real animation/pass rates, unit speeds, flag bits 11/13/15, a few window text positions and colours, sprite hit
+boxes, and Disk.4 save-file compatibility (the browser cannot write the original disk format). Soak tests: 60k-120k random-input frames per run complete
+without exceptions; `npm test` covers each ported subsystem headlessly.
