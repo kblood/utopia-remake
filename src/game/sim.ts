@@ -6,6 +6,7 @@
 import { A, PERIOD, type GameState } from "./state.js";
 import { Fleet, type EffectKind } from "./sim-ships.js";
 import { Aliens, type EnemySpawn } from "./sim-aliens.js";
+import { Alerts, LIGHT } from "./sim-alerts.js";
 import { OBJECT_SLOTS, T, type World } from "./world.js";
 import { createRng, divsQ, divuQ, divuReg, mulu, muls, s16, s8, type Rng } from "./sim-math.js";
 import { GOOD_WEIGHT, JOB_POOL_TYPES, POWER_TYPES, RESEARCH_BITS, RESEARCH_INDEX, RESEARCH_SCALE, RESEARCH_THRESHOLD, STARVATION_LEVEL, TAX_MORALE, TAX_QOL } from "./sim-tables.js";
@@ -112,6 +113,11 @@ export interface SimOptions {
   decide?: (offer: Offer) => boolean;
   // Called in the weekly step where the original runs $7000 (construction countdown).
   onWeek?: () => void;
+  // $7342: the Command Centre record at `slot` went online or offline; its map tiles must be redrawn
+  // (Builder.construction.redrawCentre).
+  centreChanged?: (slot: number) => void;
+  // $9A36 point of the daily step: the message log protect counters count down (Messages.dayPassed).
+  onDay?: () => void;
   // $37CA at the end of the tank yard step: put a finished unit next to the yard at (x, y).
   // Returns false when no neighbouring cell is free. Without a unit layer the unit is only counted.
   spawnUnit?: (x: number, y: number, advanced: boolean) => boolean;
@@ -146,6 +152,8 @@ export class Sim {
   private readonly decide: (offer: Offer) => boolean;
 
   private onWeek: (() => void) | undefined;
+  private centreHook: ((slot: number) => void) | undefined;
+  private dayHook: (() => void) | undefined;
   private spawnUnit: (x: number, y: number, advanced: boolean) => boolean;
   private readonly interactive: boolean;
   private demolishAt: (x: number, y: number) => void;
@@ -157,6 +165,8 @@ export class Sim {
   // Own spaceships and the ship yard ($AC04, $4060, $ACE2, ...), alien/meteor/intelligence code.
   readonly fleet: Fleet;
   readonly aliens: Aliens;
+  // Warning lights and the view bookmark ($15634.., $144BD, $144E8).
+  readonly alerts: Alerts;
   pending: { offer: Offer; apply: (accepted: boolean) => void } | null = null;
 
   constructor(
@@ -167,6 +177,8 @@ export class Sim {
     this.rng = options.rng ?? createRng(0x55746f70);
     this.decide = options.decide ?? (() => false);
     this.onWeek = options.onWeek;
+    this.centreHook = options.centreChanged;
+    this.dayHook = options.onDay;
     this.spawnUnit = options.spawnUnit ?? (() => true);
     this.interactive = options.interactive ?? false;
     this.demolishAt = options.demolishAt ?? (() => {});
@@ -178,6 +190,7 @@ export class Sim {
     if (this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
     this.fleet = new Fleet(this);
     this.aliens = new Aliens(this);
+    this.alerts = new Alerts(this.state);
   }
 
   // Called once per main-loop pass ($333A cadence, 2 video frames; not while paused): the meteor countdown
@@ -190,6 +203,7 @@ export class Sim {
 
   // Hooks used by Fleet / Aliens.
   effect(kind: EffectKind, x: number, y: number): void {
+    if (kind === "focus") this.alerts.focus(x, y); // $11432
     this.effectHook?.(kind, x, y);
   }
   spawnEnemy(spawn: EnemySpawn): boolean {
@@ -312,12 +326,13 @@ export class Sim {
 
   // ---- daily -----------------------------------------------------------------------------
 
-  // $99C4 daily branch. $ACE2 (ship fuel), $11D34, message timers and $AF12 (alien
-  // intelligence) are not ported.
+  // $99C4 daily branch. $11D34 (gun turret AI) is not ported.
   private daily(): void {
     if (this.s.byte(A.day) === 1) this.qualityOfLife();
     this.fleet.dailyFuel(); // $ACE2
     this.checkGameOver();
+    this.alerts.daily(); // $144BD countdown
+    this.dayHook?.(); // $15698 message timers
     if (this.gameOver) return;
     this.eventScheduler();
     this.aliens.dailyIntel(); // $AF12
@@ -380,8 +395,8 @@ export class Sim {
 
   // ---- weekly ----------------------------------------------------------------------------
 
-  // $99C4 weekly branch: $10FCA (eclipse) and the $144B2 counter. $7000 (construction
-  // countdown, through the onWeek option), $4798, $12510 and $127A0 are not ported.
+  // $99C4 weekly branch: $7000 (construction countdown, ported in construction.ts and run through
+  // the onWeek option) and $4798 (ship refuelling).
   private weekly(): void {
     this.onWeek?.();
     this.fleet.weeklyRefuel(); // $4798
@@ -797,21 +812,23 @@ export class Sim {
     if (s.byte(V.power) >= 0xe) return;
     if (this.tCount(TY.commandCentre) !== 0) return;
     if (this.tActive(TY.commandCentre) === 0) return;
-    this.setCommandCentreActive(0xff, -1);
+    const slot = this.setCommandCentreActive(0xff, -1);
+    if (slot >= 0) this.centreHook?.(slot); // $9B8C: $7342
     s.setWord(this.tAddr(TY.commandCentre) + T.total, 1);
   }
 
   // Record byte +3 of the first Command Centre object (tile $4C): $FF online, 0 offline.
-  // `only` >= 0 restricts the search to a record whose byte currently has that value.
-  private setCommandCentreActive(flag: number, only: number): boolean {
+  // `only` >= 0 restricts the search to a record whose byte currently has that value. Returns the
+  // record's slot offset, or -1 when none matched.
+  private setCommandCentreActive(flag: number, only: number): number {
     const objects = this.world.objects;
     for (let i = 0; i < objects.length; i += 8) {
       if (((objects[i] << 8) | objects[i + 1]) !== 0x4c) continue;
       if (only >= 0 && objects[i + 3] !== only) continue;
       objects[i + 3] = flag;
-      return true;
+      return i;
     }
-    return false;
+    return -1;
   }
 
   // $9E3A: colonists on farms (type 19 is filled first, then type 18), 10 per building.
@@ -847,6 +864,7 @@ export class Sim {
   private food(): void {
     const s = this.s;
     s.setByte(V.starving, 0);
+    this.alerts.set(LIGHT.food, false); // $9E9E
     const taken = this.removeGoods(s.long(V.stock), 0);
     s.setLong(0x1433e, taken);
     const pop = s.long(V.population);
@@ -860,6 +878,7 @@ export class Sim {
       if (this.addGoods(net, 0).overflow) this.msg(0x6d);
       return;
     }
+    this.alerts.set(LIGHT.food, true); // $9F0E: st.b $15654
     const level = divuQ(mulu(-net, 20), pop);
     s.setByte(V.starving, STARVATION_LEVEL[level] ?? 0);
     this.applyMorale((level + 1) * -100);
@@ -893,6 +912,7 @@ export class Sim {
   private air(): void {
     const s = this.s;
     s.setByte(V.airShort, 0);
+    this.alerts.set(LIGHT.air, false); // $9CE0
     const pop = s.long(V.population);
     s.setLong(0x14362, pop);
     this.add32(0x14392, pop);
@@ -908,6 +928,7 @@ export class Sim {
     d0 = (d0 + prod - pop) | 0;
     if (d0 < 0) {
       s.setByte(V.airShort, 10);
+      this.alerts.set(LIGHT.air, true); // $9D9C: st.b $15664
       this.setTStored(a, 0);
       this.setTStored(b, 0);
       this.applyMorale(muls(divuQ(mulu(-d0, 100), pop), -20));
@@ -1025,6 +1046,7 @@ export class Sim {
   // powered sets the shortage level ($144C8 = 21 - its position).
   private power(): void {
     const s = this.s;
+    this.alerts.set(LIGHT.power, false); // $A0D4: clr.b $15634
     let d0 = 0;
     if (s.byte(V.eclipse) === 0) {
       d0 += mulu(this.tStored(TY.solarA), this.tCount(TY.solarA));
@@ -1063,8 +1085,12 @@ export class Sim {
       return;
     }
     s.setByte(V.power, level);
-    if (level >= 0xe && this.setCommandCentreActive(0, 0xff)) {
-      // The Command Centre goes offline: its record is switched off and it stops counting.
+    this.alerts.set(LIGHT.power, true); // $A19C: st.b $15634
+    const offline = level >= 0xe ? this.setCommandCentreActive(0, 0xff) : -1;
+    if (offline >= 0) {
+      // The Command Centre goes offline: its record is switched off, it stops counting and its
+      // tiles change to the offline ones ($7342).
+      this.centreHook?.(offline);
       s.setWord(this.tAddr(TY.commandCentre) + T.total, 0);
       this.msg(0x12c);
     }

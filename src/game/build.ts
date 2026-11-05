@@ -1,17 +1,13 @@
 // Building placement, construction and demolition. Ports of the original routines
-// $6BF4 (place), $7000/$703A (weekly construction countdown and completion), $7372 (demolish),
-// $6F22/$7628/$7696 (placement rules), $6FC4/$6A8C (writing cells). Notes:
+// $6BF4 (place), $7372 (demolish), $6F22/$7628/$7696 (placement rules); the weekly construction
+// countdown $7000/$703A and the cell writers $6FC4/$6A8C live in construction.ts. Notes:
 // notes/formats/game-state.md section 7 and notes/formats/building.md.
 
 import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK } from "../data/scenario.js";
+import { Construction, SITE_TILE, TILE_WAREHOUSE } from "./construction.js";
 import { T, type World } from "./world.js";
 
-export const SITE_TILE = 0x32;
-const TILE_COMMAND_CENTRE = 0x4c;
-const TILE_COMMAND_OFF = 0x50;
-const TILE_WAREHOUSE = 0x44;
-const TILE_MINE = 0x60;
-const TILE_FUEL = 0x3e;
+export { SITE_TILE };
 const TILE_CLEARED = 0x38;
 const TILE_DRILL = 0x3c;
 
@@ -32,9 +28,6 @@ const V = {
 
 const FLAG_BLOCK_MASK = 0x5400; // $6F22: bits 14, 12, 10 of a cell word
 const FLAG_NEAR = 0x0400; // $7628: bit 10
-const FLAG_KEEP = 0xe800;
-const FLAG_RICHNESS = 0x8000;
-const FLAG_FUEL = 0x0800;
 
 // Strings the original shows for placement results (indices into the language string table).
 export const MSG = {
@@ -61,12 +54,20 @@ export interface Placement {
 export class Builder {
   // `flagTable` = the 256 bytes at $16408 of the game image (cell flag byte per tile id),
   // `weights` = longs at $B0EC (weight per unit of the five stored goods).
+  readonly construction: Construction;
+  // A click refused for lack of money drops the selection; $15EF0 (placement) also leaves build mode.
+  // The owner of the mode (controls.ts) sets this.
+  onBuildCancelled: (leaveBuildMode: boolean) => void = () => {};
+
   constructor(
     private readonly world: World,
-    private readonly flagTable: Uint8Array,
+    flagTable: Uint8Array,
     private readonly weights: number[],
     private readonly say: (message: number) => void,
-  ) {}
+    phase?: () => boolean,
+  ) {
+    this.construction = new Construction(world, flagTable, phase);
+  }
 
   private get s() {
     return this.world.state;
@@ -86,35 +87,13 @@ export class Builder {
     return -1;
   }
 
-  // $6FC4: set tile id and its flag byte in the origin cell (and the other three of a 2x2).
+  // $6FC4 / $6A8C, see construction.ts.
   private markCells(tile: number, x: number, y: number, size: number): void {
-    const flags = this.flagTable[tile] << 8;
-    const cells = this.world.cells;
-    const set = (cx: number, cy: number): void => {
-      if (cx >= MAP_WIDTH || cy >= MAP_HEIGHT) return;
-      const i = this.cellIndex(cx, cy);
-      cells[i] = (cells[i] & FLAG_KEEP) | tile | flags;
-    };
-    set(x, y);
-    if (size !== 1) {
-      set(x + 1, y);
-      set(x, y + 1);
-      set(x + 1, y + 1);
-    }
+    this.construction.markSite(tile, x, y, size);
   }
 
-  // $6A8C: write a finished building's tile ids (tile, +1, +2, +3 for a 2x2).
   private writeBuilding(tile: number, x: number, y: number, size: number): void {
-    const flags = this.flagTable[tile] << 8;
-    const cells = this.world.cells;
-    const parts: [number, number][] = size === 1 ? [[0, 0]] : [[0, 0], [1, 0], [0, 1], [1, 1]];
-    parts.forEach(([dx, dy], n) => {
-      const cx = x + dx;
-      const cy = y + dy;
-      if (cx >= MAP_WIDTH || cy >= MAP_HEIGHT) return;
-      const i = this.cellIndex(cx, cy);
-      cells[i] = (cells[i] & FLAG_KEEP) | (tile + n) | flags;
-    });
+    this.construction.writeTiles(tile, x, y, size);
   }
 
   // $6D58: placement is only allowed away from the map border.
@@ -208,14 +187,18 @@ export class Builder {
       this.say(MSG.noWorkers);
       return false;
     }
+    // $6CA2-$6CBE: the workers are moved to the builders counter BEFORE the money test. Without the
+    // money the click is refused (message $25, build mode left by $15EF0) but the colonists stay
+    // in `$1432A`: an original quirk, kept.
+    s.setLong(V.freeColonists, free);
+    s.setLong(V.builders, s.long(V.builders) + workers);
     const cost = s.word(t + T.buildCost);
     const money = s.signedLong(V.money) - cost;
     if (money < 0) {
       this.say(MSG.noMoney);
+      this.onBuildCancelled(true);
       return false;
     }
-    s.setLong(V.freeColonists, free);
-    s.setLong(V.builders, s.long(V.builders) + workers);
     s.setLong(V.money, money >>> 0);
     s.setLong(V.spent, s.long(V.spent) + cost);
 
@@ -242,6 +225,7 @@ export class Builder {
     const money = s.signedLong(V.money) - cost;
     if (money < 0) {
       this.say(MSG.noMoney);
+      this.onBuildCancelled(false); // $6D2C: the selection ($142B2/$142B6) is cleared, the mode stays
       return false;
     }
     s.setLong(V.money, money >>> 0);
@@ -252,66 +236,7 @@ export class Builder {
 
   // $7000: one week passes; every construction site counts down and completes at zero.
   weekly(): void {
-    const o = this.world.objects;
-    for (let i = 0; i < o.length; i += 8) {
-      if (((o[i] << 8) | o[i + 1]) !== SITE_TILE) continue;
-      if (--o[i + 6] === 0) this.complete(i);
-    }
-  }
-
-  // $703A
-  private complete(slot: number): void {
-    const s = this.s;
-    const o = this.world.objects;
-    const recordTile = (o[slot + 2] << 8) | o[slot + 3];
-    let tile = recordTile;
-    const type = this.world.findType(tile);
-    const t = this.world.typeAddress(type);
-    const x = o[slot + 4];
-    const y = o[slot + 5];
-    o[slot] = recordTile >> 8;
-    o[slot + 1] = recordTile & 0xff;
-    o[slot + 2] = s.byte(t + 1);
-    o[slot + 3] = s.byte(t + 3);
-    const workers = s.byte(t + 4);
-    s.setLong(V.builders, s.long(V.builders) - workers);
-    s.setLong(V.freeColonists, s.long(V.freeColonists) + workers);
-    s.setWord(t + T.active, s.word(t + T.active) + 1);
-    s.setWord(V.sites, Math.max(0, s.word(V.sites) - 1));
-    if (tile === TILE_COMMAND_CENTRE) {
-      if (s.word(t + T.active) === 1) {
-        o[slot + 3] = 0xff;
-        s.setWord(t + T.total, s.word(t + T.total) + 1);
-      } else {
-        tile = TILE_COMMAND_OFF;
-      }
-    } else {
-      s.setWord(t + T.total, s.word(t + T.total) + 1);
-    }
-    if (tile === TILE_WAREHOUSE) s.setLong(V.capacity, s.long(V.capacity) + 80000);
-    o[slot + 6] = 0;
-    o[slot + 7] = 0;
-    if (tile === TILE_MINE) o[slot + 6] = this.countFlag(x, y, FLAG_RICHNESS);
-    if (tile === TILE_FUEL) o[slot + 6] = this.countFlag(x, y, FLAG_FUEL);
-    if (tile === 0x0f || tile === 0x1f) {
-      o[slot + 2] = 0;
-      o[slot + 6] = Math.random() < 0.5 ? 0xff : 1;
-      o[slot + 7] = 0;
-    }
-    this.writeBuilding(tile, x, y, s.byte(t + 1));
-  }
-
-  private countFlag(x: number, y: number, flag: number): number {
-    let n = 0;
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const cx = x + dx;
-        const cy = y + dy;
-        if (cx < 0 || cy < 0 || cx >= MAP_WIDTH || cy >= MAP_HEIGHT) continue;
-        if (this.world.cells[this.cellIndex(cx, cy)] & flag) n++;
-      }
-    }
-    return n;
+    this.construction.weekly();
   }
 
   // $72C0: the object record whose origin cell is (x, y) (a 2x2 building is found through

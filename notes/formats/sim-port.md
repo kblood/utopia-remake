@@ -67,10 +67,45 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 
 | Routine | Reason |
 |---|---|
-| `$11D34` (gun animation, special bit and daily) | graphics/unit logic |
-| `$7000` construction countdown (weekly) | needs the placement code; conversion logic is `$703A` (documented in game-state.md 7.2) |
-| `$11D34`-style unit movement/attack AI, the real `$7000`, sound calls | out of scope; ground/air enemy units, defection and repair go through `SimOptions` hooks |
-| `$15698` message timers, `$144BD` scroll countdown, `$15xxx` redraw flags, `$7342` redraw | UI only |
+| `$11D34` (gun animation, special bit and daily) | graphics/unit logic (enemy units and combat belong to units.ts / enemies.ts) |
+| `$15xxx` redraw flags | the remake redraws every frame |
+| sound calls | out of scope |
+
+Ported since the first version of this table: the construction countdown `$7000`/`$703A` (`src/game/construction.ts`), the Command Centre
+redraw `$7342`, the warning lights and view bookmark, the message log timers, and the power gate of the tile animation (section below).
+
+## Construction, lights, message timers (`construction.ts`, `sim-alerts.ts`, `messages.ts`, `map.ts`)
+
+- **Placement `$6BF4`** (`Builder.place`): the type's worker count moves from the free colonists `$13136` to the builders `$1432A` **before** the money test
+  (original quirk, kept: a failed purchase for lack of money leaves the workers in `$1432A`; message `$25`, then select mode via `$15EF0`). On success the
+  cost is paid, `$6FC4` writes the scaffold tile `$32` (flag byte of tile `$32` from `$16408`, bits `$E800` of the old cell preserved) into 1 or 4 cells,
+  the record gets word `$32`, +2 = target tile, +6 = type build weeks, and `$142C4` (site count) is raised.
+- **Weekly `$7000`** (first step of the weekly branch): loops `$142C4` times over the records whose word is `$32`; byte +6 is decremented, at 0 the site is
+  completed (`$703A`) and `$142C4` lowered. The site count bounds the loop; the original scan has no end bound, the port stops at the end of the list.
+  The week count is therefore the type's weeks byte (type +2): the scaffold shows for weeks-1 weekly passes, the building appears on the pass number weeks.
+  With 90 frames per day and 7 days per week one week = 630 frames.
+- **Completion `$703A`**: record word := target tile, +2 := type +1 (footprint), +3 := type +3, workers go from `$1432A` back to `$13136`, type active (+A) ++,
+  total (+C) ++ except a non-first Command Centre (tile `$4C` with active > 1: tile becomes `$50`, +3 stays, not counted; the first one gets +3 = `$FF`),
+  warehouse `$44`: `$14432` += 80000, +6/+7 cleared; mine `$60`: +6 = number of the 9 cells with flag `$8000` (`$75D4`); fuel `$3E`: same with `$0800`;
+  solar tiles `$0F`/`$1F`: +2 = 0, +6 = 1 or `$FF` from the beam position bit (`$2E00`; `Construction.phase`), +7 = 0. Finally `$6A8C` writes tile+n into the cells
+  (footprint byte 1 = one cell, else 2 x 2: tile, +1 right, +2 below, +3 diagonal; flag byte from the first tile). **No completion message is posted.**
+- **Command Centre redraw `$7342`**: after the online/offline change by `$A1EA` (power failure) / `$9B8C` (recovery) the record's cells are rewritten with
+  `$4C` (byte +3 = `$FF`) or `$50`. `Sim` option `centreChanged(slot)` is wired to `Construction.redrawCentre` in `map.ts`.
+- **Warning lights `$5D30`** (table `$15628`, 16 bytes per light: image pointer at +4, x/y words at +8/+10 = 16x16 at (0|16|32|48, 139), flag byte at `$15634` +
+  16k, toggle byte +`$D`): power (set `$A19C`, cleared `$A0D4`), bookmark (`$11432`), food (`$9F0E` set / `$9E9E` clear), air (`$9D9C` / `$9CE0`). An unlit light is
+  skipped; a lit one is drawn on every second frame. Icons: 5 planes, 16 x 16, unmasked, at the pointer in the table (`readLightIcons`).
+- **View bookmark**: `$11432` (the "focus" effect of events: meteor, alien, battle, ...) does not scroll. It stores x-4, y-4 (limited to `$5C` / `$43`) at
+  `$144E8`/`$144EA`, lights the second light and sets the countdown `$144BD` to 6. The daily pass (`$144BD`, between `$B086` and `$15698`) does `subq.b #1`; once
+  the byte goes negative the counter is cleared and the light turns off (seven days of light). A click inside the rect x `$10-$1F`, y `$8B-$9B` (`$5D70`, handler
+  `$159CE`) swaps the current view origin with the bookmark, so a second click returns.
+- **Message log `$5A8C` / `$15698`**: the panel holds three entries, each with a protect counter set to 10 (days) when added; the daily pass decrements them.
+  A new entry on a full panel scrolls the oldest out; if the oldest is still protected the panel is wiped instead (new one alone). Survivors of a scroll or wipe
+  have their protect cleared. The idle timer `$14634` = 500 frames empties the panel. `Messages.dayPassed()` is called from `Sim` (`onDay`).
+- **`$6936` animation**: tile ids 6..13 animate only while the power level `$144C8` is below 4.
+- Tests: `test/construction.mjs` (both footprints, order of two sites, count bound, Command Centre / warehouse / mine / fuel / solar completion, funds quirk,
+  frame-driven weeks, Command Centre redraw through power failure and recovery, lights, bookmark, message protect counters).
+- Hypotheses: icon order is power / bookmark / food / air from the set and clear sites; the 25 Hz blink on the Amiga comes from the double-buffered toggle;
+  the funds quirk is genuine original behaviour (the `$6BF4` code subtracts before comparing); `$15EF0` = back to select mode.
 
 ## Test results (npm test, scenario 0 and all ten starting states)
 

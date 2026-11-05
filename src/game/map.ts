@@ -8,7 +8,7 @@ import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK, TILE_WIDTH, type Tile } from "../d
 import { Screen, SCREEN_WIDTH } from "../gfx/screen.js";
 import type { Input } from "./intro.js";
 import type { GameStrings } from "../data/gamestrings.js";
-import { readFlagTable, readInventionText, readWeights } from "../data/gameimage.js";
+import { readFlagTable, readInventionText, readLightIcons, readWeights } from "../data/gameimage.js";
 import { Builder } from "./build.js";
 import { Controls } from "./controls.js";
 import { Messages } from "./messages.js";
@@ -18,6 +18,7 @@ import { SFX } from "../audio/sfx.js";
 import { MarkerMode, markerMessageText } from "./screens/markers.js";
 import { A } from "./state.js";
 import { Sim } from "./sim.js";
+import { Alerts, LIGHT_SIZE, LIGHT_X, LIGHT_Y } from "./sim-alerts.js";
 import type { World } from "./world.js";
 
 export const VIEW_CELLS = 8;
@@ -29,6 +30,7 @@ const START_X = 47;
 const START_Y = 33;
 const REPEAT_FRAMES = 4;
 const ANIMATED_FLAG = 0x400;
+const A_POWER_LEVEL = 0x144c8;
 // The original steps animated cells once per main-loop pass; its real rate is unknown, so this is a guess.
 const ANIMATION_FRAMES = 6;
 
@@ -86,6 +88,8 @@ export class MapScene {
   private readonly markerMode = new MarkerMode();
   private repeat = 0;
   private frame = 0;
+  private lightWasDown = false;
+  private readonly lightIcons: Uint8Array[];
 
   constructor(
     private readonly disk: Uint8Array,
@@ -110,6 +114,8 @@ export class MapScene {
       },
       destroyUnit: () => this.destroyFirstUnit(),
       onWeek: () => builder.weekly(),
+      centreChanged: (slot) => builder.construction.redrawCentre(slot),
+      onDay: () => this.messages.dayPassed(),
       effect: (kind, x, y) => this.simEffect(kind, x, y),
       spawnUnit: (x, y, advanced) => (this.objects ? this.objects.units.spawnAtYard(x, y, advanced) !== null : true),
     });
@@ -127,6 +133,7 @@ export class MapScene {
       return true;
     };
     this.controls.onClick = () => this.playSfx(SFX.CLICK);
+    this.lightIcons = readLightIcons(disk);
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }
@@ -152,10 +159,7 @@ export class MapScene {
     if (kind === "explosion" || kind === "meteorImpact") this.explosionAt(x, y);
     else if (kind === "launch") this.playSfx(SFX.LAUNCH);
     else if (kind === "alienAppear") this.playSfx(SFX.ALERT);
-    else if (kind === "focus") {
-      this.scrollX = Math.max(0, Math.min(MAX_SCROLL_X, x - VIEW_CELLS / 2));
-      this.scrollY = Math.max(0, Math.min(MAX_SCROLL_Y, y - VIEW_CELLS / 2));
-    }
+    // "focus" ($11432): Sim.alerts stores the view bookmark and lights the second warning light.
   }
 
   // Shows a string-table message on the message line / log.
@@ -192,6 +196,13 @@ export class MapScene {
     const step = input.rightButton ? 6 : 1;
     for (const key of input.keys?.splice(0) ?? []) this.key(key, input);
     const used = this.controls.update(input);
+    // $159CE: a click on the second warning light swaps the view with the stored bookmark.
+    if (!used && input.leftButton && !this.lightWasDown && Alerts.hitsBookmark(input.pointerX, input.pointerY)) {
+      const target = this.sim.alerts.swapView(this.scrollX, this.scrollY);
+      this.scrollX = Math.max(0, Math.min(MAX_SCROLL_X, target.x));
+      this.scrollY = Math.max(0, Math.min(MAX_SCROLL_Y, target.y));
+    }
+    this.lightWasDown = input.leftButton;
     if (!used && (input.leftButton || input.rightButton)) {
       const arrow = ARROWS.find(
         (a) => input.pointerX >= a.x0 && input.pointerX <= a.x1 && input.pointerY >= a.y0 && input.pointerY <= a.y1,
@@ -229,6 +240,7 @@ export class MapScene {
         if (id >= 1 && id <= 3) {
           id = id === 3 ? 1 : id + 1;
         } else if (id >= 6 && id <= 13) {
+          if (this.state.byte(A_POWER_LEVEL) >= 4) continue; // $69BA: building animation stops on a power shortage
           id++;
           if (id === 10 || id > 13) id -= 4;
         } else {
@@ -242,6 +254,7 @@ export class MapScene {
   private draw(): void {
     this.screen.pixels.set(this.background);
     this.drawTiles();
+    this.drawLights();
     this.drawTopBar();
     this.controls.draw(this.screen);
     this.messages.draw(this.screen);
@@ -259,6 +272,17 @@ export class MapScene {
       }
     }
     this.objects?.drawMarkers(this.screen, this.scrollX, this.scrollY);
+  }
+
+  // $5D30: the four warning lights (power, event bookmark, food, air) blink while their flag is set.
+  private drawLights(): void {
+    for (let k = 0; k < 4; k++) {
+      if (!this.sim.alerts.visible(k)) continue;
+      const icon = this.lightIcons[k];
+      for (let row = 0; row < LIGHT_SIZE; row++) {
+        for (let col = 0; col < LIGHT_SIZE; col++) this.screen.pixels[(LIGHT_Y + row) * SCREEN_WIDTH + LIGHT_X[k] + col] = icon[row * LIGHT_SIZE + col];
+      }
+    }
   }
 
   // Top bar, redrawn every frame: date, money, and quality of life (notes/formats/game-text.md, section 8).

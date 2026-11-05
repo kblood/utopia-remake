@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
-    "test": "node test/sim.mjs && node test/aliens.mjs && node test/build.mjs && node test/music.mjs && node test/sfx.mjs && node test/save.mjs && node test/units.mjs && node test/screens.mjs && node test/buildings.mjs && node test/overview.mjs"
+    "test": "node test/sim.mjs && node test/aliens.mjs && node test/build.mjs && node test/music.mjs && node test/sfx.mjs && node test/save.mjs && node test/units.mjs && node test/screens.mjs && node test/buildings.mjs && node test/overview.mjs && node test/construction.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3"

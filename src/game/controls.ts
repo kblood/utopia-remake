@@ -78,7 +78,12 @@ export class Controls {
     private readonly say: (message: number) => void,
     private readonly view: () => { x: number; y: number },
     private readonly onDiskMenu: () => void = () => {},
-  ) {}
+  ) {
+    builder.onBuildCancelled = (leave) => {
+      this.selection = null;
+      if (leave) this.mode = "select";
+    };
+  }
 
   get menuVisible(): boolean {
     return this.menuOpen;
