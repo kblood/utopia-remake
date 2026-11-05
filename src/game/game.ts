@@ -6,6 +6,7 @@ import type { Music } from "../audio/music.js";
 import { GameStrings } from "../data/gamestrings.js";
 import { loadMap, loadTileSet, readScenarioRecords, type ScenarioRecord } from "../data/scenario.js";
 import type { Screen } from "../gfx/screen.js";
+import { loadSprites } from "../data/sprites.js";
 import { AnnounceScene } from "./announce.js";
 import { IntroScene, type Input } from "./intro.js";
 import { LanguageScene, type Language } from "./language.js";
@@ -59,7 +60,7 @@ export class Game {
       loadTileSet(this.disk1, this.disk2, record).tiles,
       new World(new GameState(this.disk2, record.block), loadMap(this.disk2, record)),
       this.strings!,
-      { onDiskMenu: () => this.openDiskMenu() },
+      { onDiskMenu: () => this.openDiskMenu(), sprites: loadSprites(this.disk1, this.disk2, record) },
     );
     this.menu = null;
     this.stage = "map";

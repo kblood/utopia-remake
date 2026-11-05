@@ -102,8 +102,13 @@ export class MapScene {
   }
 
   // Keyboard ($15B4A): P and space toggle the pause ($156A9 bit 2).
-  private key(key: string): void {
+  private key(key: string, input: Input): void {
     if (key === "p" || key === "P" || key === " ") this.sim.paused = !this.sim.paused;
+    // Keys 1-8 drop or lift a marker pin on the cell under the pointer (messages $71 / $72).
+    if (this.objects && key >= "1" && key <= "8") {
+      const cell = this.controls.pickCell(input.pointerX, input.pointerY);
+      if (cell) this.messages.push(this.objects.toggleMarker(Number(key), cell.x, cell.y) === "placed" ? 0x71 : 0x72);
+    }
   }
 
   private scroll(dx: number, dy: number, step: number): void {
@@ -117,7 +122,7 @@ export class MapScene {
 
   update(input: Input): void {
     const step = input.rightButton ? 6 : 1;
-    for (const key of input.keys?.splice(0) ?? []) this.key(key);
+    for (const key of input.keys?.splice(0) ?? []) this.key(key, input);
     const used = this.controls.update(input);
     if (!used && (input.leftButton || input.rightButton)) {
       const arrow = ARROWS.find(
