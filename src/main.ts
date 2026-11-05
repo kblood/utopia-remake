@@ -10,6 +10,7 @@ import { GameState } from "./game/state.js";
 import { World } from "./game/world.js";
 import { loadMap, loadTileSet, readScenarioRecords } from "./data/scenario.js";
 import type { Screen } from "./gfx/screen.js";
+import { drawPointer, POINTER_ARROW, readPointer } from "./gfx/pointer.js";
 
 const WIDTH = 320;
 const HEIGHT = 256;
@@ -49,23 +50,6 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D): void {
 
 const FRAME_MS = 20; // 50 Hz, like the original PAL display
 
-// Placeholder pointer (arrow outline); the original sprite format is not decoded yet.
-const POINTER_SHAPE = ["X", "XX", "XXX", "XXXX", "XXXXX", "XXXXXX", "XXXXXXX", "XXXXXXXX", "XXXXX", "XX XX", "X  XX", "    XX"];
-
-function drawPointer(rgba: Uint8ClampedArray, x: number, y: number): void {
-  POINTER_SHAPE.forEach((row, dy) => {
-    for (let dx = 0; dx < row.length; dx++) {
-      const px = x + dx;
-      const py = y + dy;
-      if (row[dx] !== "X" || px < 0 || py < 0 || px >= 320 || py >= 200) continue;
-      const i = (py * 320 + px) * 4;
-      const edge = dx === 0 || dx === row.length - 1 || dy === 0 || dy === POINTER_SHAPE.length - 1;
-      const v = edge ? 0 : 255;
-      rgba[i] = rgba[i + 1] = rgba[i + 2] = v;
-    }
-  });
-}
-
 async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, files: File[]): Promise<void> {
   const disk1 = files.find((f) => f.name.toLowerCase() === "disk.1");
   if (!disk1) return;
@@ -73,6 +57,7 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
   if (!disk2) return;
   const disk = new Uint8Array(await disk1.arrayBuffer());
   const scenarioDisk = new Uint8Array(await disk2.arrayBuffer());
+  const pointer = readPointer(disk, POINTER_ARROW);
   const intro = new IntroScene(disk);
   let language: LanguageScene | null = null;
   let map: MapScene | null = null;
@@ -117,7 +102,7 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
     const rgba = active.toRgba();
-    if (map || language?.pointerVisible) drawPointer(rgba, input.pointerX, input.pointerY);
+    if (map || language?.pointerVisible) drawPointer(pointer, active, rgba, input.pointerX, input.pointerY);
     ctx.putImageData(new ImageData(rgba, 320, 200), 0, 0);
     requestAnimationFrame(step);
   };
