@@ -19,3 +19,10 @@ export const TAX_QOL = [1000, 900, 800, 700, 600, 500, 400, 300, 200, 100, 0, 0,
 
 // $B23C: starvation level written to $144B4 by food shortage (index = shortage*20/population).
 export const STARVATION_LEVEL = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40] as const;
+
+// Research ($B154, $B214, $12D56, $B251): progress needed per technology level, invention bits
+// gained at each level, the level's price index and the per-level unit scale.
+export const RESEARCH_THRESHOLD = [500, 1000, 2000, 4000, 6500, 9000, 11500, 14000, 16500, 32768450] as const;
+export const RESEARCH_BITS = [0x0, 0x2, 0xc1, 0x14104, 0x1c00, 0x2200, 0x20, 0x20008, 0x8000, 0x10] as const;
+export const RESEARCH_INDEX = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5] as const;
+export const RESEARCH_SCALE = [0, 2, 4, 2, 3, 1] as const;

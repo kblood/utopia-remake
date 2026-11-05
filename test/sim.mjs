@@ -195,6 +195,33 @@ for (let sc = 0; sc < records.length; sc++) {
   check("5y: weight within capacity", state.long(0x13166) <= state.long(0x14432));
 }
 
+// --- research ($AB0C) -------------------------------------------------------------------------------
+{
+  const { state, sim } = fresh(0, 3);
+  state.setWord(0x133f8, 1);
+  state.setByte(0x144c8, 0);
+  state.setLong(0x13142, 200);
+  state.setLong(0x142d2, 1000000);
+  state.setLong(0x142d6, 1000000);
+  state.setLong(0x142de, 0);
+  const before = state.byte(A.techLevel);
+  const bits = state.long(0x14472);
+  sim.research();
+  check("research: funds spent", state.long(0x142d2) < 1000000 && state.long(0x142d6) < 1000000);
+  check("research: progress made", state.long(0x142de) > 0);
+  const mid = state.byte(A.techLevel);
+  state.setLong(0x13142, 0);
+  state.setLong(0x142de, 1000000);
+  sim.research();
+  check("research: level rises past threshold", state.byte(A.techLevel) === mid + 1 && mid >= before, `${before} ${mid} ${state.byte(A.techLevel)}`);
+  check("research: invention bits set", state.long(0x14472) !== bits);
+  state.setWord(0x133f8, 0);
+  const level = state.byte(A.techLevel);
+  state.setLong(0x142de, 99999999);
+  sim.research();
+  check("research: needs a command centre", state.byte(A.techLevel) === level && sim.messages.includes(0xef));
+}
+
 // --- determinism ------------------------------------------------------------------------------------
 {
   const run = (seed) => {

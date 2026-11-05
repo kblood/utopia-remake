@@ -71,7 +71,7 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 | `$ACE2` (ship fuel), `$4798`, `$12510`, `$127A0` (weekly unit/enemy code), `$A5A6` (fuel withdrawal for ships) | unit lists not modelled |
 | `$7000` construction countdown (weekly) | needs the placement code; conversion logic is `$703A` (documented in game-state.md 7.2) |
 | `$A620` tank yard, `$AC04` ship yard | spawn units (`$37CA`, neighbour flags `$710A`) |
-| `$AB0C` research, `$AF12/$B018` alien intelligence | not traced to the point of a faithful port |
+| `$AF12/$B018` alien intelligence | not traced to the point of a faithful port |
 | events 1, 3, 4, 8, 9, 11, 12, 13, 15, 17 | alien/meteor/units/mine collapse (needs `$7372` demolish); event 5 is empty in the original |
 | crime consequences above level 50 (`$10D00`, `$10D9E`) | unit and building destruction |
 | `$15698` message timers, `$144BD` scroll countdown, `$15xxx` redraw flags, `$7342` redraw | UI only |
@@ -81,3 +81,13 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 Date chain (336 days, 48 weeks, first month roll 01/07/2090), month income = pop*tax + grant (pop 104 after births: 6040), no shortage at the start of any
 scenario, shortage paths (food, air), job conservation, staffed workshop production and weight bookkeeping, game over, five years without player action
 (survives, QoL 41..55, morale -5845..8016, money integer, nothing non-finite), determinism with a seed.
+
+## Research (`$AB0C`, ported as `Sim.research()`)
+
+Runs monthly after production. Skipped when the power byte `$144C8` is 7 or more; without a command
+centre (`$133F8` = 0) it only posts message `$EF`. Price = 25 + 10 x technology level (`$14592`).
+Progress `$142DE` gains the scientist count (`$13142`) plus the spend of fund `$142D2` divided by the
+price and half of the spend of fund `$142D6` divided by the price (the same half also feeds
+`$142DA`). Reaching the per-level threshold (table `$B154`) raises the level (capped at 10), ORs the
+level's invention bits (`$B214`) into `$14472`, clears `$144C7`, and rewrites the scale bytes
+`$145A3..$145A9` from tables `$12D56` / `$B251`. Test: `test/sim.mjs`.

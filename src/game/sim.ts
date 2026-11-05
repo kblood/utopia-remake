@@ -6,7 +6,7 @@
 import { A, PERIOD, type GameState } from "./state.js";
 import { T, type World } from "./world.js";
 import { createRng, divsQ, divuQ, divuReg, mulu, muls, s16, s8, type Rng } from "./sim-math.js";
-import { GOOD_WEIGHT, JOB_POOL_TYPES, POWER_TYPES, STARVATION_LEVEL, TAX_MORALE, TAX_QOL } from "./sim-tables.js";
+import { GOOD_WEIGHT, JOB_POOL_TYPES, POWER_TYPES, RESEARCH_BITS, RESEARCH_INDEX, RESEARCH_SCALE, RESEARCH_THRESHOLD, STARVATION_LEVEL, TAX_MORALE, TAX_QOL } from "./sim-tables.js";
 
 // Variable-block addresses used by the simulation (game-state.md section 3).
 const V = {
@@ -254,6 +254,49 @@ export class Sim {
       this.events.push({ kind: "announce", id: 1 });
       this.sysFlags |= SYS.gameOver;
     }
+  }
+
+  // $AB0C: scientists turn the two research funds into progress; reaching the next threshold
+  // raises the technology level and unlocks the invention bits of that level.
+  research(): void {
+    const s = this.s;
+    if (s.byte(V.power) >= 7) return;
+    if (s.word(0x133f8) === 0) {
+      this.msg(0xef);
+      return;
+    }
+    const tech = s.byte(A.techLevel);
+    const price = 25 + tech * 10;
+    let progress = s.long(0x142de);
+    const scientists = s.long(V.scientists);
+    progress = (progress + scientists) >>> 0;
+    let spend = mulu(scientists, price) >>> 0;
+    const second = spend;
+    let fundA = s.long(0x142d2);
+    if (((fundA - spend) | 0) < 0) spend = fundA;
+    fundA = (fundA - spend) >>> 0;
+    progress = (progress + s16(divuQ(spend, price))) >>> 0;
+    s.setLong(0x142d2, fundA);
+    let fundB = s.long(0x142d6);
+    let share = second;
+    if (((fundB - share) | 0) < 0) share = fundB;
+    fundB = (fundB - share) >>> 0;
+    share = s16(divuQ(share, price)) >> 1;
+    progress = (progress + share) >>> 0;
+    s.setLong(V.researchAccum, (s.long(V.researchAccum) + share) >>> 0);
+    s.setLong(0x142d6, fundB);
+    s.setLong(0x142de, progress);
+    if (((progress - RESEARCH_THRESHOLD[tech - 1]) | 0) < 0) return;
+
+    let level = tech + 1;
+    if (level === 11) level = 10;
+    s.setByte(A.techLevel, level);
+    const index = level - 1;
+    s.setLong(V.invention, (s.long(V.invention) | RESEARCH_BITS[index]) >>> 0);
+    s.setByte(V.inventionDelay, 0);
+    const scale = RESEARCH_INDEX[index];
+    s.setByte(0x145a3, scale);
+    for (let i = 0; i < 6; i++) s.setByte(0x145a4 + i, RESEARCH_SCALE[i] * scale);
   }
 
   // ---- weekly ----------------------------------------------------------------------------
@@ -507,7 +550,7 @@ export class Sim {
     this.moraleMonthly();
     this.crimeMonthly();
     this.production();
-    // $AB0C (research) is not ported.
+    this.research();
     s.setLong(0x1436a, s.long(0x14376));
     s.setLong(0x14376, 0);
     s.setLong(0x14372, s.long(0x1437a));
