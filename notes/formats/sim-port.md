@@ -67,11 +67,10 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 
 | Routine | Reason |
 |---|---|
-| `$11D34` (gun animation, special bit and daily) | graphics/unit logic (enemy units and combat belong to units.ts / enemies.ts) |
 | `$15xxx` redraw flags | the remake redraws every frame |
 | sound calls | out of scope |
 
-Ported since the first version of this table: the construction countdown `$7000`/`$703A` (`src/game/construction.ts`), the Command Centre
+Ported since the first version of this table: the enemy/combat side (`enemies.ts`, notes/formats/enemies.md: enemy units, attacks, own fire, guns `$11D34`, ships, missiles, defect/repair hooks), the construction countdown `$7000`/`$703A` (`src/game/construction.ts`), the Command Centre
 redraw `$7342`, the warning lights and view bookmark, the message log timers, and the power gate of the tile animation (section below).
 
 ## Construction, lights, message timers (`construction.ts`, `sim-alerts.ts`, `messages.ts`, `map.ts`)

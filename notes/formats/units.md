@@ -27,7 +27,7 @@ Tags: **[V]** = read from disassembly/data (and, where noted, checked by test/re
 See `map-rendering.md` 7.2 for the arrays. Only the own ground units (`$3AB06`, "tanks") are covered by this port. `$333A` (once per main-loop pass):
 
 1. Sub-tick `$144C9`: incremented each pass; at 9 it wraps to 0 and sets bit 7 of `$156A9` = **"move tick"**; at 4 it sets bit 6 (enemy ground move tick).
-2. For every used slot of `$3AB06` (type byte != 0): unless paused (`$156A9` bit 2): if the move tick is set, or byte +9 is >= 0, then clear bit 7 of +9, call **`$38E2`** (movement) and `$12588` (combat hook, d7 = `$145A3`). Types 9 and 10 have +9 = $FF at creation, so they only move on the move tick, i.e. once per **9 passes**.
+2. For every used slot of `$3AB06` (type byte != 0): unless paused (`$156A9` bit 2): if the move tick is set, or byte +9 is >= 0, then clear bit 7 of +9, call **`$38E2`** (movement) and `$12588` (combat hook, d7 = `$145A3`). Types 9 and 10 have +9 = $FF at creation: the first step waits for a move tick; that tick clears bit 7 and from then on the unit is stepped in **every pass** (the earlier reading "once per 9 passes" was wrong). Only the combat hook `$12588` (which acts on the move tick only and sets bit 7 again for the shooter) makes a firing tank wait for the next move tick. See enemies.md.
 3. `$3694` computes the screen position and the visibility, the entry goes into the draw list (flags 1 for these units).
 
 The pass rate is not known statically (the loop waits for at least one vertical blank per pass; with 64 CPU-blitted tiles it is probably 2-3 frames). The port assumes 2 frames per pass: **[H]** a unit crosses a cell in 8 move ticks = 72 passes = 144 frames = 2.9 s; the effect timings are equally uncertain.
@@ -108,7 +108,7 @@ for k in 0..6:                           (slot 6 repeats slot 5 for type 10, ori
     return
 done: +B = $FF (order finished or way blocked), +6/+7 = 0
 ```
-So a cell is **reserved by writing its map flag bit 14 when the unit starts towards it**, the unit's coordinates (+1/+2) change only at arrival, and a stationary unit holds bit 14 on its own cell. A target 5 cells away diagonally+straight takes 1 + 8 * 5 = 41 move ticks (the first tick chooses the direction); the remake test asserts this.
+So a cell is **reserved by writing its map flag bit 14 when the unit starts towards it**, the unit's coordinates (+1/+2) change only at arrival, and a stationary unit holds bit 14 on its own cell. A target 5 cells away diagonally+straight takes 1 + 8 * 5 = 41 steps (the first step chooses the direction) once the unit is running; a fresh unit first waits up to 9 passes for its move tick. The remake test asserts both.
 
 Type 10 (UNIT_ADVANCED in the port) passes blocked cells whose tile id is >= $88 (the rock/crater range) [V code; the name "advanced" and the "rock crossing" purpose are H, based on the unlock bit and the data]. Both types never leave via the recent-direction list the way they came ("no U-turn within the next 3 directions").
 
@@ -127,13 +127,13 @@ The image's initial data has +0 = 1..8 (type = pin number) and +2 = $FF (`$866E`
 ## 7. Port (`src/game/units.ts`, `objects.ts`, `data/sprites.ts`)
 
 - `loadSprites(disk1, disk2, record)` builds the 27 types from the two sheets; `SpriteSet.frame(type, frame, anim)` decodes a frame to palette indices + opacity (top row first).
-- `UnitSystem` (units.ts): `spawn`, `spawnAtYard` (the exit order above), `order`, `remove`, `tick()` (one main-loop pass; moves every 9th), `step(unit)` (= `$38E2`). The occupied mark is bit 14 of the shared `world.cells` word, plus a per-cell flag byte array (`flags`, bit 2). Hook `lost` for border exits (no morale change applied).
-- `ObjectLayer` (objects.ts): `update()` per 50 Hz frame (2 frames per pass), `drawAfterCell(screen, scrollX, scrollY, vx, vy)` draws everything on a view cell right after its tile, drawing the flat neighbour tiles in front of a moving unit first (map-rendering.md 7.4) and exposing `claimed(vx, vy)` so the tile loop skips them; `drawMarkers` last; `toggleMarker(n, x, y)`, `clearMarkers`, `markerCell(n)`, `spawnEffect`, `destroyUnit`, and `extra` (a list of drawables for ships/enemies later).
+- `UnitSystem` (units.ts): `spawn`, `spawnAtYard` (the exit order above), `order`, `remove`, `tick()` (one main-loop pass; the unit waits for its first move tick, then steps every pass; `UnitSystem.clock` is the shared `PassClock` of the sub-tick `$144C9`), `step(unit)` (= `$38E2`). The occupied mark is bit 14 of the shared `world.cells` word, plus a per-cell flag byte array (`flags`, bit 2). Hook `lost` for border exits (no morale change applied).
+- `ObjectLayer` (objects.ts): `update()` per 50 Hz frame (2 frames per pass), `drawAfterCell(screen, scrollX, scrollY, vx, vy)` draws everything on a view cell right after its tile, drawing the flat neighbour tiles in front of a moving unit first (map-rendering.md 7.4) and exposing `claimed(vx, vy)` so the tile loop skips them; `drawMarkers` last; `toggleMarker(n, x, y)`, `clearMarkers`, `markerCell(n)`, `spawnEffect`, `destroyUnit`, `extra` (a list of other drawables) and `enemies` (an `EnemySystem`, stepped after the own units in every pass and drawn after them; see enemies.md).
 - `MapScene` creates the layer when it is given `{ sprites }` in its options (`loadSprites(...)` in `main.ts`).
 
 ## 8. Not traced / open
 
-- `$12588` (called after each own-unit update with d7 = `$145A3`): scans 48 cells around the unit (offset table `$12C96`) for enemy ground units, hits them (`sub d7, +8`), sound `$11B4`, destroys at 0 hit points. Own units therefore shoot automatically; not ported.
-- Spaceships (`$3A746`, `$42BE`, mode machine in `game-state.md` 3.8), enemy ground (`$3A12C`, `$1193E`, uses `$38E2` in enemy mode), enemy air (`$39E20`), the specials `$144A8`, `$1449C`; the selection/hit test `$3EDC` and the unit screens that issue the orders.
+- `$12588`, spaceships (`$3A746`, `$42BE`), enemy ground (`$3A12C`, `$1193E`) and air (`$39E20`, `$11A9E`), guns `$11D34`: ported, see enemies.md.
+- The specials `$144A8`, `$1449C`; the selection/hit test `$3EDC` and the unit screens that issue the orders.
 - Whether pass rate = frame rate; real animation speeds of units and effects.
 - `$14274`, `$14278`, `$14294` exact meaning; what happens when a unit enters a type >= $88 cell (does a rock vanish?) - not seen in `$38E2`.

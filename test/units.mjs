@@ -77,14 +77,15 @@ function freeBlock(sys, w, h) {
   }
   throw new Error("no free block");
 }
-// Runs movement steps (9 passes each) until the unit has no order any more.
-function stepsToArrive(sys, unit, limit = 500) {
-  let steps = 0;
-  while (unit.hasTarget && steps < limit) {
-    for (let i = 0; i < 9; i++) sys.tick();
-    steps++;
+// Runs main-loop passes until the unit has no order any more. A new unit waits for the first move tick (the
+// 9th pass); after that it is stepped on every pass.
+function stepsToArrive(sys, unit, limit = 5000) {
+  let passes = 0;
+  while (unit.hasTarget && passes < limit) {
+    sys.tick();
+    passes++;
   }
-  return steps;
+  return passes;
 }
 
 {
@@ -98,8 +99,14 @@ function stepsToArrive(sys, unit, limit = 500) {
 
   sys.order(u, b.x + 5, b.y + 3);
   const steps = stepsToArrive(sys, u);
-  // One step to pick the direction, then 8 steps of 2 pixels per cell; 3 diagonal and 2 straight cells.
-  check("walks (5,3) in 41 movement steps", steps === 41, `steps ${steps}`);
+  // The unit already had its first move tick (9 passes above), so it now steps on every pass: one step to
+  // pick the direction, then 8 steps of 2 pixels per cell; 3 diagonal and 2 straight cells = 41 steps.
+  check("walks (5,3) in 41 passes", steps === 41, `passes ${steps}`);
+  const fresh2 = fresh();
+  const b2 = freeBlock(fresh2.sys, 12, 8);
+  const w = fresh2.sys.spawn(UNIT_BASIC, b2.x, b2.y, 0);
+  fresh2.sys.order(w, b2.x + 5, b2.y + 3);
+  check("a new unit waits for the first move tick (pass 9)", stepsToArrive(fresh2.sys, w) === 9 + 40);
   check("arrives on the target", u.x === b.x + 5 && u.y === b.y + 3 && u.dx === 0 && u.dy === 0 && !u.moving);
   const marked = [];
   for (let i = 0; i < cells.length; i++) if (cells[i] & OCCUPIED) marked.push(i);
@@ -110,7 +117,7 @@ function stepsToArrive(sys, unit, limit = 500) {
   const dirs = [];
   sys.order(u, u.x - 4, u.y);
   while (u.hasTarget) {
-    for (let i = 0; i < 9; i++) sys.tick();
+    sys.tick();
     if (dirs[dirs.length - 1] !== u.dir) dirs.push(u.dir);
   }
   check("straight order uses one direction", dirs.join() === "6", dirs.join());
@@ -123,8 +130,10 @@ function stepsToArrive(sys, unit, limit = 500) {
   const u = sys.spawn(UNIT_BASIC, b.x, b.y + 3, 0);
   sys.order(u, b.x + 1, b.y + 2);
   const seen = [];
-  for (let i = 0; i < 18; i++) {
-    for (let k = 0; k < 9; k++) sys.tick();
+  for (let k = 0; k < 9; k++) sys.tick(); // the move tick: the first step picks the direction
+  seen.push(`${u.dx},${u.dy}`);
+  for (let i = 0; i < 17; i++) {
+    sys.tick();
     seen.push(`${u.dx},${u.dy}`);
   }
   const expected = Array.from({ length: 15 }, (_, i) => `${2 * (i + 1)},0`).join(";");
@@ -181,7 +190,7 @@ function stepsToArrive(sys, unit, limit = 500) {
   while (!sys.cellFree(MAP_WIDTH - 1, y)) y++;
   const u = sys.spawn(UNIT_BASIC, MAP_WIDTH - 1, y, 0);
   sys.order(u, 120, y);
-  stepsToArrive(sys, u, 100);
+  stepsToArrive(sys, u, 2000);
   check("walking off the map removes the unit and calls the hook", sys.units.length === 0 && lost.length === 1, `units ${sys.units.length}`);
   check("its reserved cell is released", (cells[y * MAP_WIDTH + MAP_WIDTH - 1] & OCCUPIED) === 0);
 }

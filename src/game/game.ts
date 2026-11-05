@@ -69,14 +69,17 @@ export class Game {
   }
 
   private screenContext(map: MapScene): ScreenContext {
-    return { disk: this.disk1, world: map.world, sim: map.sim, strings: this.strings!, say: (n) => map.say(n), scroll: map.scrollRef, objects: map.objects ?? undefined };
+    return { disk: this.disk1, world: map.world, sim: map.sim, strings: this.strings!, say: (n) => map.say(n), scroll: map.scrollRef, objects: map.objects ?? undefined, otherUnits: () => map.enemies?.overview() ?? {} };
   }
 
   // A click on a map cell in select mode ($7140): a building window, or an immediate effect.
   private selectCell(x: number, y: number): void {
     const map = this.map!;
     if (this.stage !== "map" || map.sim.gameOver) return;
-    const scene = createBuildingScreen(this.screenContext(map), x, y);
+    const scene = createBuildingScreen(this.screenContext(map), x, y, {
+      findTarget: (range, tx, ty) => map.enemies?.findTarget(range, tx, ty) ?? null,
+      launchMissile: (from, target) => map.enemies?.launchMissile(from, target) ?? false,
+    });
     if (scene) this.showWindow(scene);
   }
 

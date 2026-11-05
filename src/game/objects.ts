@@ -1,11 +1,13 @@
 // Objects drawn over the map: own units, the eight marker pins, short-lived effects and any extra
 // sprites. Positions, hiding rules and draw order follow $333A/$3694/$6540/$3768/$3310, see
-// notes/formats/map-rendering.md sections 7.2-7.5. Enemy units and spaceships are not simulated yet;
-// they (and anything else with a sprite) can be shown through `extra`.
+// notes/formats/map-rendering.md sections 7.2-7.5. Enemy units, spaceships and missiles live in an
+// EnemySystem attached with `enemies` (stepped after the own units in every pass); anything else with a
+// sprite can be shown through `extra`.
 
 import { MAP_WIDTH, TILE_ID_MASK, type Tile } from "../data/scenario.js";
 import { SPRITE_WIDTH, type SpriteSet } from "../data/sprites.js";
 import { Screen, SCREEN_HEIGHT, SCREEN_WIDTH } from "../gfx/screen.js";
+import type { EnemySystem } from "./enemies.js";
 import { UnitSystem, type Unit, type UnitHooks } from "./units.js";
 
 const VIEW = 8;
@@ -78,6 +80,7 @@ export class ObjectLayer {
   readonly markers: Marker[] = Array.from({ length: MARKER_COUNT }, (_, i) => ({ type: i + 1, x: 0, y: NO_MARKER }));
   readonly effects: Effect[] = [];
   readonly extra: Drawable[] = [];
+  enemies: EnemySystem | null = null;
   paused = false;
   private frames = 0;
   private readonly early = new Set<number>(); // view cells whose tile was already drawn
@@ -97,6 +100,7 @@ export class ObjectLayer {
   update(): void {
     if (this.paused || ++this.frames % FRAMES_PER_PASS !== 0) return;
     this.units.tick();
+    this.enemies?.pass(this.units.clock);
     // Effects ($3560): count down byte +5, free the entry once it goes below 0.
     for (let i = this.effects.length - 1; i >= 0; i--) {
       if (--this.effects[i].frame < 0) this.effects.splice(i, 1);
@@ -169,7 +173,7 @@ export class ObjectLayer {
         this.blit(screen, u.type, u.dir, 0, vx, vy, u.dx, u.dy, 0);
       }
     }
-    for (const d of this.extra) {
+    for (const d of [...(this.enemies?.drawables() ?? []), ...this.extra]) {
       const frame = d.frame ?? 0;
       if (d.x === cx && d.y === cy && ObjectLayer.shown(d.type, vx, vy, d.dx ?? 0, d.dy ?? 0, frame)) {
         this.blit(screen, d.type, frame, d.anim ?? 0, vx, vy, d.dx ?? 0, d.dy ?? 0, d.lift ?? 0);

@@ -12,7 +12,9 @@ import { readFlagTable, readInventionText, readLightIcons, readWeights } from ".
 import { Builder } from "./build.js";
 import { Controls } from "./controls.js";
 import { Messages } from "./messages.js";
-import { ObjectLayer } from "./objects.js";
+import { loadCombatTables } from "../data/combat.js";
+import { EnemySystem } from "./enemies.js";
+import { EFFECT_EXPLOSION, EFFECT_EXPLOSION_HIGH, ObjectLayer } from "./objects.js";
 import type { SpriteSet } from "../data/sprites.js";
 import { SFX } from "../audio/sfx.js";
 import { MarkerMode, markerMessageText } from "./screens/markers.js";
@@ -72,6 +74,7 @@ export class MapScene {
   private readonly messages: Messages;
   readonly controls: Controls;
   readonly objects: ObjectLayer | null; // units, marker pins and effects; null without the sprite sheets
+  readonly enemies: EnemySystem | null; // enemy ground and air units, ships, missiles, guns (needs the object layer)
   scrollX = START_X;
   scrollY = START_Y;
   // Live accessor for the overview window, which reads and writes the scroll position.
@@ -103,7 +106,10 @@ export class MapScene {
     this.cells = world.cells;
     this.state = world.state;
     this.objects = options.sprites
-      ? new ObjectLayer(options.sprites, tiles, this.cells, (t, x, y) => this.drawTile(t, x, y), () => world.state.byte(A.techLevel))
+      ? new ObjectLayer(options.sprites, tiles, this.cells, (t, x, y) => this.drawTile(t, x, y), () => world.state.byte(A.techLevel), {
+          lost: (u) => this.enemies?.tankLeft(u),
+          combat: (u, moveTick) => this.enemies?.tankCombat(u, moveTick),
+        })
       : null;
     const builder = new Builder(world, readFlagTable(disk), readWeights(disk), (n) => this.messages.push(n));
     this.sim = new Sim(world, {
@@ -118,7 +124,18 @@ export class MapScene {
       onDay: () => this.messages.dayPassed(),
       effect: (kind, x, y) => this.simEffect(kind, x, y),
       spawnUnit: (x, y, advanced) => (this.objects ? this.objects.units.spawnAtYard(x, y, advanced) !== null : true),
+      spawnEnemy: (spawn) => this.enemies?.spawn(spawn) ?? true,
+      defectUnit: () => (this.enemies ? this.enemies.defect() : { x: -1, y: -1 }),
+      repairUnits: (amount) => this.enemies?.repair(amount),
     });
+    this.enemies = this.objects
+      ? new EnemySystem(this.sim, this.objects.units, loadCombatTables(disk), {
+          explode: (x, y, lift, high) => this.enemyExplosion(x, y, lift, high),
+          sound: (id) => this.playSfx(id),
+          buildingHeight: (x, y) => tiles[(this.cells[y * MAP_WIDTH + x] & TILE_ID_MASK) - 1]?.rows ?? 0,
+        })
+      : null;
+    if (this.objects) this.objects.enemies = this.enemies;
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     if (options.onScreen) this.controls.onScreen = options.onScreen;
     if (options.onSelect) this.controls.onSelect = options.onSelect;
@@ -154,10 +171,19 @@ export class MapScene {
     this.playSfx(SFX.EXPLOSION_LOW, inside ? 64 : 32);
   }
 
+  // $1237C for combat: the blast sprite (the high one for a destroyed unit) at the victim's altitude.
+  private enemyExplosion(x: number, y: number, lift: number, high: boolean): void {
+    this.objects?.spawnEffect(high ? EFFECT_EXPLOSION_HIGH : EFFECT_EXPLOSION, x, y, lift);
+    const inside = x >= this.scrollX && x < this.scrollX + VIEW_CELLS && y >= this.scrollY && y < this.scrollY + VIEW_CELLS;
+    this.playSfx(high ? SFX.EXPLOSION_HIGH : SFX.EXPLOSION_LOW, inside ? 64 : 32);
+  }
+
   // Graphics and sound the sim asks for (explosions, scroll-to-cell, launches, meteors, aliens).
   private simEffect(kind: string, x: number, y: number): void {
-    if (kind === "explosion" || kind === "meteorImpact") this.explosionAt(x, y);
-    else if (kind === "launch") this.playSfx(SFX.LAUNCH);
+    if (kind === "explosion" || kind === "meteorImpact") {
+      this.explosionAt(x, y);
+      this.objects?.spawnEffect(EFFECT_EXPLOSION, x, y);
+    } else if (kind === "launch") this.playSfx(SFX.LAUNCH);
     else if (kind === "alienAppear") this.playSfx(SFX.ALERT);
     // "focus" ($11432): Sim.alerts stores the view bookmark and lights the second warning light.
   }
@@ -216,6 +242,7 @@ export class MapScene {
     }
     if (++this.frame % ANIMATION_FRAMES === 0) this.animateCells();
     this.sim.tick();
+    this.enemies?.frame();
     if (this.frame % 2 === 0) this.sim.pass();
     if (this.objects) {
       this.objects.paused = this.sim.paused;
