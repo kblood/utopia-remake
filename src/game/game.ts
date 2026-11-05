@@ -2,6 +2,7 @@
 // disk menu (save / load / new scenario) opened from the map. Follows the original's stages
 // (notes/formats/text.md, game-proper.md); the slide show and code check are left out.
 
+import type { Music } from "../audio/music.js";
 import { GameStrings } from "../data/gamestrings.js";
 import { loadMap, loadTileSet, readScenarioRecords, type ScenarioRecord } from "../data/scenario.js";
 import type { Screen } from "../gfx/screen.js";
@@ -29,6 +30,7 @@ export class Game {
   constructor(
     private readonly disk1: Uint8Array,
     private readonly disk2: Uint8Array,
+    private readonly music: Music | null = null,
   ) {
     this.intro = new IntroScene(disk1);
     this.records = readScenarioRecords(disk2);
@@ -58,6 +60,9 @@ export class Game {
     );
     this.menu = null;
     this.stage = "map";
+    // Which track belongs to which screen is not known (notes/formats/music.md): track 0 for
+    // the title and menus, one of the other three per scenario in the game.
+    this.music?.play(1 + (index % 3));
   }
 
   private openScenarioMenu(): void {
@@ -69,7 +74,7 @@ export class Game {
   }
 
   private openDiskMenu(): void {
-    this.openMenu("disk", "DISK MENU", [{ label: "SAVE GAME" }, { label: "LOAD GAME" }, { label: "NEW SCENARIO" }, { label: "BACK TO GAME" }]);
+    this.openMenu("disk", "DISK MENU", [{ label: "SAVE GAME" }, { label: "LOAD GAME" }, { label: "NEW SCENARIO" }, { label: `MUSIC: TRACK ${(this.music?.current ?? 0) + 1}`, enabled: this.music !== null }, { label: "BACK TO GAME" }]);
   }
 
   private slotLabels(): { label: string; enabled?: boolean }[] {
@@ -81,6 +86,7 @@ export class Game {
       case "intro":
         if (this.intro.update(input) === "clicked") {
           this.language = new LanguageScene(this.disk1, this.intro.screen);
+          this.music?.play(0);
           this.stage = "language";
         }
         break;
@@ -108,7 +114,10 @@ export class Game {
         if (choice === 0) this.openMenu("save", "SAVE GAME", this.slotLabels());
         else if (choice === 1) this.openMenu("load", "LOAD GAME", this.slotLabels());
         else if (choice === 2) this.openScenarioMenu();
-        else this.closeMenu();
+        else if (choice === 3 && this.music) {
+          this.music.play(((this.music.current < 0 ? 0 : this.music.current) + 1) % this.music.trackCount);
+          this.openDiskMenu();
+        } else this.closeMenu();
         break;
       }
       case "save": {
