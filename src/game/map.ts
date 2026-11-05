@@ -8,6 +8,9 @@ import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK, TILE_WIDTH, type Tile } from "../d
 import { Screen, SCREEN_WIDTH } from "../gfx/screen.js";
 import type { Input } from "./intro.js";
 import type { GameStrings } from "../data/gamestrings.js";
+import { readFlagTable, readWeights } from "../data/gameimage.js";
+import { Builder } from "./build.js";
+import { Controls } from "./controls.js";
 import { Messages } from "./messages.js";
 import { A } from "./state.js";
 import { Sim } from "./sim.js";
@@ -58,6 +61,7 @@ export class MapScene {
   private readonly state: World["state"];
   readonly sim: Sim;
   private readonly messages: Messages;
+  readonly controls: Controls;
   scrollX = START_X;
   scrollY = START_Y;
   private repeat = 0;
@@ -72,7 +76,9 @@ export class MapScene {
     this.messages = new Messages(disk, strings);
     this.cells = world.cells;
     this.state = world.state;
-    this.sim = new Sim(world);
+    const builder = new Builder(world, readFlagTable(disk), readWeights(disk), (n) => this.messages.push(n));
+    this.sim = new Sim(world, { onWeek: () => builder.weekly() });
+    this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }));
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }
@@ -88,7 +94,8 @@ export class MapScene {
 
   update(input: Input): void {
     const step = input.rightButton ? 6 : 1;
-    if (input.leftButton || input.rightButton) {
+    const used = this.controls.update(input);
+    if (!used && (input.leftButton || input.rightButton)) {
       const arrow = ARROWS.find(
         (a) => input.pointerX >= a.x0 && input.pointerX <= a.x1 && input.pointerY >= a.y0 && input.pointerY <= a.y1,
       );
@@ -131,6 +138,7 @@ export class MapScene {
     this.screen.pixels.set(this.background);
     this.drawTiles();
     this.drawTopBar();
+    this.controls.draw(this.screen);
     this.messages.draw(this.screen);
   }
 

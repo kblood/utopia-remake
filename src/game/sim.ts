@@ -105,6 +105,8 @@ export interface SimOptions {
   // Answer of the original's two-button dialog $DECC: true = first button (accept the Earth
   // request: buy the colonists / hand over the scientists), false = second button.
   decide?: (offer: Offer) => boolean;
+  // Called in the weekly step where the original runs $7000 (construction countdown).
+  onWeek?: () => void;
 }
 
 export class Sim {
@@ -117,6 +119,8 @@ export class Sim {
   private readonly rng: Rng;
   private readonly decide: (offer: Offer) => boolean;
 
+  private onWeek: (() => void) | undefined;
+
   constructor(
     readonly world: World,
     options: SimOptions = {},
@@ -124,6 +128,7 @@ export class Sim {
     this.state = world.state;
     this.rng = options.rng ?? createRng(0x55746f70);
     this.decide = options.decide ?? (() => false);
+    this.onWeek = options.onWeek;
     if (this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
   }
 
@@ -254,9 +259,10 @@ export class Sim {
   // ---- weekly ----------------------------------------------------------------------------
 
   // $99C4 weekly branch: $10FCA (eclipse) and the $144B2 counter. $7000 (construction
-  // countdown), $4798, $12510 and $127A0 are not ported.
+  // countdown, through the onWeek option), $4798, $12510 and $127A0 are not ported.
   private weekly(): void {
     this.eclipseWeekly();
+    this.onWeek?.();
     const c = this.s.byte(0x144b2);
     if (c !== 0) this.s.setByte(0x144b2, c - 1);
   }
