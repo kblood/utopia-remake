@@ -1,0 +1,146 @@
+// Scene flow of the whole program: credit roll -> language -> scenario choice -> map, with the
+// disk menu (save / load / new scenario) opened from the map. Follows the original's stages
+// (notes/formats/text.md, game-proper.md); the slide show and code check are left out.
+
+import { GameStrings } from "../data/gamestrings.js";
+import { loadMap, loadTileSet, readScenarioRecords, type ScenarioRecord } from "../data/scenario.js";
+import type { Screen } from "../gfx/screen.js";
+import { IntroScene, type Input } from "./intro.js";
+import { LanguageScene, type Language } from "./language.js";
+import { MapScene } from "./map.js";
+import { MenuScene } from "./menu.js";
+import { applyGame, captureGame, readSlot, SAVE_SLOTS, slotSummaries, writeSlot } from "./save.js";
+import { GameState } from "./state.js";
+import { World } from "./world.js";
+
+type Stage = "intro" | "language" | "scenario" | "map" | "disk" | "save" | "load";
+
+export class Game {
+  private stage: Stage = "intro";
+  private readonly intro: IntroScene;
+  private language: LanguageScene | null = null;
+  private strings: GameStrings | null = null;
+  private menu: MenuScene | null = null;
+  private map: MapScene | null = null;
+  private scenario = 0;
+  private readonly records: ScenarioRecord[];
+  pointerVisible = false;
+
+  constructor(
+    private readonly disk1: Uint8Array,
+    private readonly disk2: Uint8Array,
+  ) {
+    this.intro = new IntroScene(disk1);
+    this.records = readScenarioRecords(disk2);
+  }
+
+  get screen(): Screen {
+    if (this.stage === "intro") return this.intro.screen;
+    if (this.stage === "language") return this.language!.screen;
+    if (this.menu) return this.menu.screen;
+    return this.map!.screen;
+  }
+
+  private openMenu(stage: Stage, title: string, labels: { label: string; enabled?: boolean }[]): void {
+    this.stage = stage;
+    this.menu = new MenuScene(this.disk1, title, labels);
+  }
+
+  private startScenario(index: number): void {
+    const record = this.records[index];
+    this.scenario = index;
+    this.map = new MapScene(
+      this.disk1,
+      loadTileSet(this.disk1, this.disk2, record).tiles,
+      new World(new GameState(this.disk2, record.block), loadMap(this.disk2, record)),
+      this.strings!,
+      { onDiskMenu: () => this.openDiskMenu() },
+    );
+    this.menu = null;
+    this.stage = "map";
+  }
+
+  private openScenarioMenu(): void {
+    this.openMenu(
+      "scenario",
+      "CHOOSE A SCENARIO",
+      this.records.map((r, i) => ({ label: `${i + 1}. ${r.name || "SCENARIO"}` })),
+    );
+  }
+
+  private openDiskMenu(): void {
+    this.openMenu("disk", "DISK MENU", [{ label: "SAVE GAME" }, { label: "LOAD GAME" }, { label: "NEW SCENARIO" }, { label: "BACK TO GAME" }]);
+  }
+
+  private slotLabels(): { label: string; enabled?: boolean }[] {
+    return slotSummaries().map((s, i) => ({ label: s ? `SLOT ${i + 1}  ${s.date}` : `SLOT ${i + 1}  EMPTY` }));
+  }
+
+  update(input: Input): void {
+    switch (this.stage) {
+      case "intro":
+        if (this.intro.update(input) === "clicked") {
+          this.language = new LanguageScene(this.disk1, this.intro.screen);
+          this.stage = "language";
+        }
+        break;
+      case "language": {
+        this.pointerVisible = this.language!.pointerVisible;
+        const result = this.language!.update(input);
+        if (result.state === "chosen") {
+          this.strings = new GameStrings(this.disk1, result.language as Language);
+          this.pointerVisible = true;
+          this.openScenarioMenu();
+        }
+        break;
+      }
+      case "scenario": {
+        const choice = this.menu!.update(input);
+        if (choice !== null && choice >= 0) this.startScenario(choice);
+        break;
+      }
+      case "map":
+        this.map!.update(input);
+        break;
+      case "disk": {
+        const choice = this.menu!.update(input);
+        if (choice === null) break;
+        if (choice === 0) this.openMenu("save", "SAVE GAME", this.slotLabels());
+        else if (choice === 1) this.openMenu("load", "LOAD GAME", this.slotLabels());
+        else if (choice === 2) this.openScenarioMenu();
+        else this.closeMenu();
+        break;
+      }
+      case "save": {
+        const choice = this.menu!.update(input);
+        if (choice === null) break;
+        if (choice >= 0 && choice < SAVE_SLOTS) {
+          const map = this.map!;
+          writeSlot(choice, captureGame(map.sim.world, map.sim, this.scenario, map.scrollX, map.scrollY));
+        }
+        this.closeMenu();
+        break;
+      }
+      case "load": {
+        const choice = this.menu!.update(input);
+        if (choice === null) break;
+        const data = choice >= 0 ? readSlot(choice) : null;
+        if (data) {
+          this.startScenario(data.scenario);
+          const map = this.map!;
+          applyGame(data, map.sim.world, map.sim);
+          map.scrollX = data.scrollX;
+          map.scrollY = data.scrollY;
+        } else {
+          this.closeMenu();
+        }
+        break;
+      }
+    }
+  }
+
+  private closeMenu(): void {
+    this.menu = null;
+    this.stage = "map";
+  }
+}

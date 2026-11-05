@@ -72,13 +72,14 @@ export class MapScene {
     private readonly tiles: Tile[],
     world: World,
     strings: GameStrings,
+    options: { onDiskMenu?: () => void } = {},
   ) {
     this.messages = new Messages(disk, strings);
     this.cells = world.cells;
     this.state = world.state;
     const builder = new Builder(world, readFlagTable(disk), readWeights(disk), (n) => this.messages.push(n));
     this.sim = new Sim(world, { onWeek: () => builder.weekly() });
-    this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }));
+    this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }

@@ -29,7 +29,7 @@ const BUTTONS: { x: number; y: number }[] = [
   { x: 272, y: 139 },
 ];
 const BUTTON_SIZE = 16;
-export const BUTTON = { build: 0, demolish: 2 } as const;
+export const BUTTON = { build: 0, demolish: 2, disk: 8 } as const;
 
 const INVENTION = 0x14472;
 const NAME_STRING = 0x10; // type entry +$10: string index of the building name
@@ -69,6 +69,7 @@ export class Controls {
     private readonly strings: GameStrings,
     private readonly say: (message: number) => void,
     private readonly view: () => { x: number; y: number },
+    private readonly onDiskMenu: () => void = () => {},
   ) {}
 
   get menuVisible(): boolean {
@@ -150,6 +151,8 @@ export class Controls {
     } else if (button === BUTTON.demolish) {
       this.mode = this.mode === "demolish" ? "select" : "demolish";
       this.selection = null;
+    } else if (button === BUTTON.disk) {
+      this.onDiskMenu();
     }
   }
 

@@ -51,6 +51,16 @@ export class GameState {
     this.applyDefaults();
   }
 
+  // The whole flat image ($13034-$14633), as the original's save area B holds it.
+  snapshot(): Uint8Array {
+    return this.bytes.slice();
+  }
+
+  restore(image: Uint8Array): void {
+    if (image.length !== STATE_BYTES) throw new Error("GameState.restore: wrong image size");
+    this.bytes.set(image);
+  }
+
   byte(addr: number): number {
     return this.bytes[addr - STATE_BASE];
   }
