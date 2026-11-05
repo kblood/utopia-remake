@@ -22,6 +22,7 @@ export abstract class PanelScene implements ScreenScene {
   protected readonly pointer = new Pointer();
   protected pressedButton = -1;
   private buttons: number[];
+  private councilMode = false;
 
   constructor(
     protected readonly ctx: ScreenContext,
@@ -58,6 +59,12 @@ export abstract class PanelScene implements ScreenScene {
   // Called when the screen is left (a place for write-backs done on exit).
   protected onClose(): void {}
 
+  // The council room ($15DCE) shows a report without the button column and leaves it on the next left
+  // press ($B99C with bit 5 of $156A8 set waits with $2E48 instead of using the buttons).
+  setCouncilMode(on = true): void {
+    this.councilMode = on;
+  }
+
   protected setButtonTable(address: number): void {
     this.buttons = this.ui.readButtonTable(address);
   }
@@ -67,6 +74,13 @@ export abstract class PanelScene implements ScreenScene {
     if (input.keys) input.keys.length = 0;
     this.pointer.update(input);
     const p = this.pointer;
+    if (this.councilMode) {
+      if (keys.includes("Escape") || p.rightPressed || p.pressedEdge) {
+        this.onClose();
+        return "close";
+      }
+      return "running";
+    }
     const used = this.onKeys(keys);
     // Escape and the right mouse button leave the screen (convenience; the original needs a button).
     if (!this.modal && !used && (keys.includes("Escape") || p.rightPressed)) {
@@ -92,6 +106,7 @@ export abstract class PanelScene implements ScreenScene {
   draw(screen: Screen): void {
     this.ui.frame(screen, this.window);
     this.drawContent(screen);
+    if (this.councilMode) return;
     this.ui.drawButtons(screen, this.buttons);
     if (this.pressedButton >= 0) this.ui.invertButton(screen, this.pressedButton);
   }

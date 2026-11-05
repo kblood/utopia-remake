@@ -96,8 +96,44 @@ Entry: x 150, y 135, 4 digits, field 6 bytes; prompts idx 170 (buy), 171 (sell),
 Windows $F100 {240,2,10,10} (picture) and $F110 {0,0,30,25}, labels $F144 (idx 287 title (78,8), 294 (6,20), 157 money (140,29)), buttons $F118; heading idx $18B + level ($144CA) at (102,20) in yellow; intelligence grant $1446A at (88,29) (6 digits), money at (178,29). Buttons 8 and 9 leave. A click with y in 29-37 opens an entry at (94,29), 5 digits; `grant += min(typed, money)`, `money -= same`, then `$AD70` sets $144CA: 0 when the grant is 0, 1 below 5000, 2 below 20000, else 3 (skipped when bit 2 of $156AA is set - meaning unknown, ignored).
 Not ported: the alien report text and portraits (`$E530`, `$E642`, images from Disk.2 at +$24 with a separate text table at $6B060), and the second frame style of `$B6CE` (the port uses the plain window frame).
 
-## 7. Not ported
+## 7. Remaining gaps
 
-- `$F176` (icon column button 1): the full-screen map overview with its own graphics ($2FD4A, $3998A, $7FA40), layer buttons (mode byte $144B6), click-to-scroll ($144E4/$144E6) and a preview window. Not a window screen; needs its own work.
-- `$30FE` (button 3) is not a screen (marker mode, see `units.md`).
 - The F-key handlers in the original check nothing before opening; if the game is over or a dialog is up the caller should not open them.
+- The overview does not simulate enemy ground units, enemy aircraft or own ships (see section 8); the caller can pass them through `ScreenContext.otherUnits`.
+
+## 8. Overview map (icon column button 1, $F176) and marker mode (button 3, $30FE) - `overview.ts`, `markers.ts`
+
+Status: logic traced from the disassembly and rendered headless; no emulator comparison was possible. VERIFIED = read straight from the code and the tables on the disk; HYPOTHESIS = guessed.
+
+Opening: `createScreen("overview", ctx)`. Full-screen: picture 0 of the table at $8C8C (sectors $2E8-$2F6, palette from its tail) replaces the frame and palette. Closing puts the pristine gameplay picture and palette back (the map scene redraws on top). Button rectangles $FF5C (8 x {x0,x1,y0,y1}, ended by $FFFF): buttons 0-6 choose the layer, button 7 leaves.
+
+Geometry (VERIFIED): the whole 100 x 75 map at 2 x 2 pixels per cell from (8,8); a 16 x 16 masked frame (image $105C4, five planes x 16 rows x 4 bytes, plane 0 is the mask) around the 8 x 8 cell view at scroll ($144E4/$144E6, clamped to $5C/$43 by $FB1E); a magnified 8 x 8 cell preview of the view at (232,75), 8 x 8 pixels per cell; a strip of eight pin images ($10A88, 8 x 8, five planes x 8 rows, 40 bytes each) at (232,151); legend text in the message panel: six string indices per layer at $FF9E (7 x 6 words, $FFFE blank), drawn at the slots $FFF2 ({index,x,y} x 6).
+
+Controls (VERIFIED): a press on a layer button shows it inverted, the release sets mode byte $144B6 = button (7 = leave) and redraws. A click on the map (x < $D1, y < $A0) centres the view on the clicked cell: scroll = ((x-8)>>1)-4, ((y-8)>>1)-4, clamped. A click in the preview (x $E8-$127, y $4A-$89) calls $311E for the clicked cell with no message. The port also closes on Escape or the right button (the original only has button 7).
+
+Layers (colour = palette index of the overview picture; VERIFIED from $F632-$FA24, legend swatches checked against the legend table):
+- 0 buildings: rock (bit 12 set and bit 10 clear) 2, animated cells by tile id: $32 -> 9, 1-3 -> $D, $60 -> $15, $3E -> $18, $48-$4B -> 6, other -> $12; everything else 5.
+- 1 and 2 deposits: cells with map flag bit 15 (layer 1) or bit 11 (layer 2) are $D when the matching invention (bit 9 resp. 10 of long $14472) is known or the cell lies inside an 11 x 11 box ($F954) around any animated cell (bit 10); otherwise rock 2 or ground 5.
+- 3 coverage and units: tile ids 6-13 are $D, cells inside coverage $12, else 5; then units.
+- 4 units only: rock 2 / ground 5 plus the unit overlay.
+- 5, 6: further tile-id class tables ($F86A, $F7FE) - see `overview.ts`.
+- Coverage ($F6E4): animated cells project a mask by tile id: <6 or >=14 the 7 x 7 mask ($10018), 6-9 the 21 x 21 mask ($10049), 10-13 the 31 x 31 mask ($10202); the two big ones only while byte $144C8 is below 4 (signed); invention bit 17 covers everything.
+- Unit overlay ($FA24): own ground units $18 and ships 6 always; enemy ground units 9 and enemy aircraft $15 only inside coverage. Lists: $3AB06 own, $3A746 ships, $3A12C enemy ground, $39E20 enemy air.
+
+Pins (VERIFIED): placed markers are drawn on the map and preview only every other blink period; a pin that is on the map leaves its slot in the strip black.
+
+HYPOTHESIS / port decisions:
+- Blink period: the original counts 6000 polls of the mouse buttons ($10A84); the port toggles every 8 frames.
+- Meaning of $144C8: treated as the power state (it is only compared with 4); sim.ts uses it the same way.
+- Enemy ground units, aircraft and own ships are not simulated by the port; the overview only shows them when the caller supplies them.
+- The pressed-button flip: $57D6 complements one plane (colour ^ 8); `Ui.invertButton` used by the other screens complements all planes. Not unified.
+- A click with x < 8 on the map wraps around in the original ($F2D4 subtracts unsigned); the port clamps to 0.
+
+Marker mode (button 3, $30FE, VERIFIED): not a screen. It shows message $6F and sets flag $144B3. The next left click on a map cell ($158CA, screen mode 1) calls $311E with that cell instead of selecting, and clears the flag (also when nothing can be placed). $311E: a pin already on the cell is lifted (message $72); else the lowest unused pin goes there (message $71, pin number '1'-'8' patched into the text via the placeholder byte of the string); with all eight in use nothing happens (message $70). In the port: `MarkerMode.arm()` returns 0x6F, `MarkerMode.click(layer, x, y)` returns null when not armed or the result; `markerMessageText(strings, pin)` gives the text of $71.
+
+## 9. Council room (icon column button 5, $15CFE) - `council.ts`
+
+Status: traced and rendered headless; VERIFIED unless marked.
+
+Button 5 refuses with message $B2 when word $133F8 is zero (no game running); otherwise it shows picture 2 of the table at $8C8C (sectors $2F8-$327, palette from its tail) with six adviser rectangles at $1614E ({x0,x1,y0,y1} each, ended by $FFFF; order = F1..F6: colony, resources, finances, buildings, research, defence). A left press on an adviser draws a caption window ($E850, label lists via the pointers at $E858, two lines each) and his portrait (88 x 79 pixels at (224,33), sheet in sectors $328-$34B, six images of 11 x 79 bytes x 5 planes, LZ packed) and calls the matching F-key report handler; that report runs with bit 5 of $156A8 set - no button column, it waits for a left press and returns to the room. A left press outside every adviser (or Escape / right button in the port) leaves; the gameplay picture and palette are restored by the port.
+HYPOTHESIS: none beyond the portrait sheet's plane layout being the same as the other planar images (checked by the render).
