@@ -7,6 +7,7 @@ import { IntroScene, type Input } from "./game/intro.js";
 import { LanguageScene } from "./game/language.js";
 import { MapScene } from "./game/map.js";
 import { GameState } from "./game/state.js";
+import { World } from "./game/world.js";
 import { loadMap, loadTileSet, readScenarioRecords } from "./data/scenario.js";
 import type { Screen } from "./gfx/screen.js";
 
@@ -108,8 +109,7 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
         map = new MapScene(
           disk,
           loadTileSet(disk, scenarioDisk, record).tiles,
-          loadMap(scenarioDisk, record),
-          new GameState(scenarioDisk, record.block),
+          new World(new GameState(scenarioDisk, record.block), loadMap(scenarioDisk, record)),
         );
       }
     }

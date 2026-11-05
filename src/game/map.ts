@@ -7,7 +7,8 @@ import { decodePicture, PICTURES } from "../data/picture.js";
 import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK, TILE_WIDTH, type Tile } from "../data/scenario.js";
 import { Screen, SCREEN_WIDTH } from "../gfx/screen.js";
 import type { Input } from "./intro.js";
-import { A, GameState } from "./state.js";
+import { A } from "./state.js";
+import type { World } from "./world.js";
 
 export const VIEW_CELLS = 8;
 const MAX_SCROLL_X = MAP_WIDTH - VIEW_CELLS;
@@ -51,6 +52,7 @@ export class MapScene {
   readonly screen = new Screen();
   private readonly background: Uint8Array;
   private readonly cells: Uint16Array;
+  private readonly state: World["state"];
   scrollX = START_X;
   scrollY = START_Y;
   private repeat = 0;
@@ -59,10 +61,10 @@ export class MapScene {
   constructor(
     private readonly disk: Uint8Array,
     private readonly tiles: Tile[],
-    cells: Uint16Array,
-    private readonly state: GameState,
+    world: World,
   ) {
-    this.cells = cells.slice();
+    this.cells = world.cells;
+    this.state = world.state;
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }
