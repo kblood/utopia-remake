@@ -63,7 +63,7 @@ export class Game {
   private openScreen(kind: ScreenKind): void {
     const map = this.map!;
     if (this.stage !== "map" || map.sim.gameOver) return;
-    const window = createScreen(kind, { disk: this.disk1, world: map.world, sim: map.sim, strings: this.strings!, say: (n) => map.say(n) });
+    const window = createScreen(kind, { disk: this.disk1, world: map.world, sim: map.sim, strings: this.strings!, say: (n) => map.say(n), scroll: map.scrollRef, objects: map.objects ?? undefined });
     this.frozen = map.screen.pixels.slice();
     this.window = window;
     this.stage = "screen";
@@ -95,7 +95,7 @@ export class Game {
   }
 
   private openDiskMenu(): void {
-    this.openMenu("disk", "DISK MENU", [{ label: "SAVE GAME" }, { label: "LOAD GAME" }, { label: "NEW SCENARIO" }, { label: `MUSIC: TRACK ${(this.music?.current ?? 0) + 1}`, enabled: this.music !== null }, { label: "BACK TO GAME" }]);
+    this.openMenu("disk", "DISK MENU", [{ label: "SAVE GAME" }, { label: "LOAD GAME" }, { label: "NEW SCENARIO" }, { label: `MUSIC: TRACK ${(this.music?.current ?? 0) + 1}`, enabled: this.music !== null }, { label: `EFFECTS: ${this.sfx?.enabled === false ? "OFF" : "ON"}`, enabled: this.sfx !== null }, { label: "BACK TO GAME" }]);
   }
 
   private slotLabels(): { label: string; enabled?: boolean }[] {
@@ -190,6 +190,9 @@ export class Game {
         else if (choice === 2) this.openScenarioMenu();
         else if (choice === 3 && this.music) {
           this.music.play(((this.music.current < 0 ? 0 : this.music.current) + 1) % this.music.trackCount);
+          this.openDiskMenu();
+        } else if (choice === 4 && this.sfx) {
+          this.sfx.setEnabled(!this.sfx.enabled);
           this.openDiskMenu();
         } else this.closeMenu();
         break;

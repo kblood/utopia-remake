@@ -43,4 +43,12 @@ export class GameStrings {
     if (offset >= 0) for (let i = 0; i < 4 && offset + i < out.length; i++) out[offset + i] = digits[i];
     return out;
   }
+
+  // Offset (in the text `get` returns) of the number placeholder of string `index`, or -1 when the string
+  // has no placeholder prefix. Callers patch as many characters as their number has digits.
+  placeholder(index: number): number {
+    if (index < 0 || index >= STRING_COUNT) return -1;
+    const at = (this.data[index * 2] << 8) | this.data[index * 2 + 1];
+    return this.data[at] < 0x20 ? this.data[at] : -1;
+  }
 }

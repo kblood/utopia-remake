@@ -15,6 +15,7 @@ import { Messages } from "./messages.js";
 import { ObjectLayer } from "./objects.js";
 import type { SpriteSet } from "../data/sprites.js";
 import { SFX } from "../audio/sfx.js";
+import { MarkerMode, markerMessageText } from "./screens/markers.js";
 import { A } from "./state.js";
 import { Sim } from "./sim.js";
 import type { World } from "./world.js";
@@ -71,7 +72,18 @@ export class MapScene {
   readonly objects: ObjectLayer | null; // units, marker pins and effects; null without the sprite sheets
   scrollX = START_X;
   scrollY = START_Y;
+  // Live accessor for the overview window, which reads and writes the scroll position.
+  readonly scrollRef: { x: number; y: number } = (() => {
+    const scene = this;
+    return {
+      get x() { return scene.scrollX; },
+      set x(v: number) { scene.scrollX = v; },
+      get y() { return scene.scrollY; },
+      set y(v: number) { scene.scrollY = v; },
+    };
+  })();
   private readonly playSfx: (id: number, volume?: number) => void;
+  private readonly markerMode = new MarkerMode();
   private repeat = 0;
   private frame = 0;
 
@@ -80,7 +92,7 @@ export class MapScene {
     private readonly tiles: Tile[],
     world: World,
     strings: GameStrings,
-    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel") => void; sfx?: (id: number, volume?: number) => void; sprites?: SpriteSet } = {},
+    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel" | "overview" | "council") => void; sfx?: (id: number, volume?: number) => void; sprites?: SpriteSet } = {},
   ) {
     this.messages = new Messages(disk, strings);
     this.world = world;
@@ -103,6 +115,15 @@ export class MapScene {
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     if (options.onScreen) this.controls.onScreen = options.onScreen;
     this.playSfx = options.sfx ?? (() => {});
+    this.controls.onMarkerButton = () => this.messages.push(this.markerMode.arm());
+    this.controls.cellHook = (x, y) => {
+      if (!this.objects) return false;
+      const result = this.markerMode.click(this.objects, x, y);
+      if (!result) return false;
+      if (result.pin) this.messages.pushText(markerMessageText(strings, result.pin));
+      else this.messages.push(result.message);
+      return true;
+    };
     this.controls.onClick = () => this.playSfx(SFX.CLICK);
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();

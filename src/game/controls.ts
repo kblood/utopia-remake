@@ -29,7 +29,7 @@ const BUTTONS: { x: number; y: number }[] = [
   { x: 272, y: 139 },
 ];
 const BUTTON_SIZE = 16;
-export const BUTTON = { build: 0, demolish: 2, trade: 4, staff: 6, intel: 7, disk: 8 } as const;
+export const BUTTON = { build: 0, overview: 1, demolish: 2, marker: 3, trade: 4, council: 5, staff: 6, intel: 7, disk: 8 } as const;
 
 const INVENTION = 0x14472;
 const NAME_STRING = 0x10; // type entry +$10: string index of the building name
@@ -63,7 +63,10 @@ export class Controls {
   private wasRight = false;
   // Opens a window screen for icon buttons 4 (trade), 6 (staffing) and 7 (intelligence).
   onClick: () => void = () => {};
-  onScreen: (kind: "trade" | "staff" | "intel") => void = () => {};
+  onScreen: (kind: "trade" | "staff" | "intel" | "overview" | "council") => void = () => {};
+  // Button 3 arms marker mode; the hook gets the next map cell click first and returns true when it used it.
+  onMarkerButton: () => void = () => {};
+  cellHook: (x: number, y: number) => boolean = () => false;
 
   constructor(
     private readonly disk: Uint8Array,
@@ -143,6 +146,7 @@ export class Controls {
     }
     const cell = this.pickCell(input.pointerX, input.pointerY);
     if (!cell) return false;
+    if (this.cellHook(cell.x, cell.y)) return true;
     if (this.mode === "build" && this.selection) this.builder.place(this.selection, cell.x, cell.y);
     else if (this.mode === "demolish") this.builder.demolish(cell.x, cell.y);
     return true;
@@ -155,6 +159,12 @@ export class Controls {
     } else if (button === BUTTON.demolish) {
       this.mode = this.mode === "demolish" ? "select" : "demolish";
       this.selection = null;
+    } else if (button === BUTTON.overview) {
+      this.onScreen("overview");
+    } else if (button === BUTTON.marker) {
+      this.onMarkerButton();
+    } else if (button === BUTTON.council) {
+      this.onScreen("council");
     } else if (button === BUTTON.trade) {
       this.onScreen("trade");
     } else if (button === BUTTON.staff) {

@@ -31,6 +31,12 @@ export class Messages {
     private readonly strings: GameStrings,
   ) {}
 
+  // A message line with already patched text (e.g. the marker pin number).
+  pushText(text: number[]): void {
+    this.lineText = text;
+    this.lineLeft = LINE_FRAMES;
+  }
+
   push(index: number): void {
     const text = this.strings.get(index);
     if (text.length === 0) return;
