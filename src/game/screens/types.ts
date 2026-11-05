@@ -23,4 +23,4 @@ export interface ScreenContext {
   say?: (index: number) => void;
 }
 
-export type ScreenKind = "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "trade" | "market" | "staff" | "intel" | "overview";
+export type ScreenKind = "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "trade" | "market" | "staff" | "intel";

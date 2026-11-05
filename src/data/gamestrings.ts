@@ -31,4 +31,16 @@ export class GameStrings {
     while (this.data[at] !== 0 && at < this.data.length) out.push(this.data[at++]);
     return out;
   }
+
+  // A message with a number placeholder (text with four filler characters, prefixed by the offset
+  // of the first one). Returns the text with `digits` (four characters, see $15C5A) put in place.
+  // Strings without a placeholder prefix come back unchanged.
+  withNumber(index: number, digits: ArrayLike<number>): number[] {
+    if (index < 0 || index >= STRING_COUNT) return [];
+    const at = (this.data[index * 2] << 8) | this.data[index * 2 + 1];
+    const offset = this.data[at] < 0x20 ? this.data[at] : -1;
+    const out = this.get(index);
+    if (offset >= 0) for (let i = 0; i < 4 && offset + i < out.length; i++) out[offset + i] = digits[i];
+    return out;
+  }
 }
