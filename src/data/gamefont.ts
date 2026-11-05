@@ -27,6 +27,40 @@ export function readTemplate(disk: Uint8Array, address: number): number[] {
   return out;
 }
 
+export function advanceOf(disk: Uint8Array, raw: number): number {
+  const code = (raw >= 0x61 ? raw - 0x20 : raw) - 0x20;
+  if (code < 0 || code >= TABLE_ENTRIES) return 0;
+  return disk[imageOffset(CHAR_TABLE) + 2 * code + 1];
+}
+
+// Word-wraps like $5C30: when the width reaches `width` the text breaks at the last space.
+// Returns the text with line breaks ($FF) inserted and the number of lines.
+export function wrapText(disk: Uint8Array, text: number[], width: number): { text: number[]; lines: number } {
+  const out = text.slice();
+  let sum = 0;
+  let lastSpace = -1;
+  let lines = 1;
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i];
+    if (c === 0xff) {
+      sum = 0;
+      lastSpace = -1;
+      lines++;
+      continue;
+    }
+    if (c === 0x20) lastSpace = i;
+    sum += advanceOf(disk, c);
+    if (sum >= width && lastSpace >= 0) {
+      out[lastSpace] = 0xff;
+      lines++;
+      sum = 0;
+      for (let j = lastSpace + 1; j <= i; j++) sum += advanceOf(disk, out[j]);
+      lastSpace = -1;
+    }
+  }
+  return { text: out, lines };
+}
+
 // Draws a string with the in-game font; only ink pixels are painted. Returns the x after it.
 export function drawGameText(disk: Uint8Array, screen: Screen, text: ArrayLike<number>, x: number, y: number, color: number): number {
   let cx = x;

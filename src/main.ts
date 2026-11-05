@@ -4,9 +4,10 @@
 
 import { detectProfile } from "./data/detect.js";
 import { IntroScene, type Input } from "./game/intro.js";
-import { LanguageScene } from "./game/language.js";
+import { LanguageScene, type LanguageResult } from "./game/language.js";
 import { MapScene } from "./game/map.js";
 import { GameState } from "./game/state.js";
+import { GameStrings } from "./data/gamestrings.js";
 import { World } from "./game/world.js";
 import { loadMap, loadTileSet, readScenarioRecords } from "./data/scenario.js";
 import type { Screen } from "./gfx/screen.js";
@@ -61,6 +62,7 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
   const intro = new IntroScene(disk);
   let language: LanguageScene | null = null;
   let map: MapScene | null = null;
+  let result: LanguageResult = { state: "running" };
 
   const input: Input = { leftButton: false, rightButton: false, pointerX: 0, pointerY: 0 };
   canvas.addEventListener("mousedown", (e) => {
@@ -89,12 +91,13 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
         map.update(input);
       } else if (language === null) {
         if (intro.update(input) === "clicked") language = new LanguageScene(disk, intro.screen);
-      } else if (language.update(input).state === "chosen") {
+      } else if ((result = language.update(input)).state === "chosen") {
         const record = readScenarioRecords(scenarioDisk)[0];
         map = new MapScene(
           disk,
           loadTileSet(disk, scenarioDisk, record).tiles,
           new World(new GameState(scenarioDisk, record.block), loadMap(scenarioDisk, record)),
+          new GameStrings(disk, result.language),
         );
       }
     }

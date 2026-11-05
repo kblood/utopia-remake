@@ -7,6 +7,8 @@ import { decodePicture, PICTURES } from "../data/picture.js";
 import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK, TILE_WIDTH, type Tile } from "../data/scenario.js";
 import { Screen, SCREEN_WIDTH } from "../gfx/screen.js";
 import type { Input } from "./intro.js";
+import type { GameStrings } from "../data/gamestrings.js";
+import { Messages } from "./messages.js";
 import { A } from "./state.js";
 import { Sim } from "./sim.js";
 import type { World } from "./world.js";
@@ -55,6 +57,7 @@ export class MapScene {
   private readonly cells: Uint16Array;
   private readonly state: World["state"];
   readonly sim: Sim;
+  private readonly messages: Messages;
   scrollX = START_X;
   scrollY = START_Y;
   private repeat = 0;
@@ -64,7 +67,9 @@ export class MapScene {
     private readonly disk: Uint8Array,
     private readonly tiles: Tile[],
     world: World,
+    strings: GameStrings,
   ) {
+    this.messages = new Messages(disk, strings);
     this.cells = world.cells;
     this.state = world.state;
     this.sim = new Sim(world);
@@ -96,6 +101,8 @@ export class MapScene {
     }
     if (++this.frame % ANIMATION_FRAMES === 0) this.animateCells();
     this.sim.tick();
+    for (const index of this.sim.messages.splice(0)) this.messages.push(index);
+    this.messages.update();
     this.draw();
   }
 
@@ -124,6 +131,7 @@ export class MapScene {
     this.screen.pixels.set(this.background);
     this.drawTiles();
     this.drawTopBar();
+    this.messages.draw(this.screen);
   }
 
   private drawTiles(): void {
