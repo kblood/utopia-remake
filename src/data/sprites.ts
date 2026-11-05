@@ -121,14 +121,32 @@ function decodeFrame(t: SpriteType, image: number, mask: number): SpriteFrame {
   return { rows, index, opaque };
 }
 
-// Builds the 27 sprite types for a scenario: the 21 built-in ones and the scenario's six.
-export function loadSprites(disk1: Uint8Array, disk2: Uint8Array, record: ScenarioRecord): SpriteSet {
+function builtinTypes(disk1: Uint8Array): (SpriteType | null)[] {
   const gameStart = GAME_FIRST_SECTOR * SECTOR_SIZE - GAME_BASE;
   const builtinSheet = unpackLz(sectors(disk1, BUILTIN_SHEET));
   const types: (SpriteType | null)[] = [];
   for (let i = 0; i < BUILTIN_TYPES; i++) {
     types.push(readDescriptor(disk1, gameStart + DESCRIPTORS + i * DESCRIPTOR_SIZE, i + 1, builtinSheet));
   }
+  return types;
+}
+
+const builtinCache = new WeakMap<Uint8Array, SpriteSet>();
+
+// The 21 built-in sprite types only (marker pins, units, ships, effects), which need Disk.1 alone.
+// The window screens use it for the ship and marker icons; the result is cached per disk.
+export function loadBuiltinSprites(disk1: Uint8Array): SpriteSet {
+  let set = builtinCache.get(disk1);
+  if (!set) {
+    set = new SpriteSet([...builtinTypes(disk1), ...Array.from({ length: SCENARIO_TYPES }, () => null)]);
+    builtinCache.set(disk1, set);
+  }
+  return set;
+}
+
+// Builds the 27 sprite types for a scenario: the 21 built-in ones and the scenario's six.
+export function loadSprites(disk1: Uint8Array, disk2: Uint8Array, record: ScenarioRecord): SpriteSet {
+  const types = builtinTypes(disk1);
   const scenarioSheet = sectors(disk2, record.sprites);
   const block = sectors(disk2, record.block);
   for (let i = 0; i < SCENARIO_TYPES; i++) {
