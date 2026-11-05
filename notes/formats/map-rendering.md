@@ -141,6 +141,7 @@ The list is sorted by `$4860` (selection sort on the first word, **descending**,
 - Frame layout (32 pixels wide, 20 or 25 rows): 5 bit-planes of `rows * 4` bytes, then the mask plane (mask address = image address + 5 * rows * 4), **bottom row first**, exactly like tiles. Types 1-8 are small numbered pin markers, 9-17 are vehicle-like sprites with 8-9 facing frames, 18-21 are effect animations with 3-4 frames (rendering them confirms the layout).
 - Blit `$3260` (called from `$3768`): d0 = x, d1 = y of the **bottom row**, rows are written upward (stride -40), any x pixel alignment via shifts, `dst = (dst & ~mask) | (src & mask)` per plane. Objects with x < 0 or x > 255 are not drawn; the sprite is clipped on the right by a mask table `$4C9A` for x >= 224 (visible pixels end around x = 254/255, i.e. the window edge).
 - For type $18 the frame address is advanced by `+8(descriptor) * 8 * byte $14(entry)` (animation counter); purpose not explored.
+- Scenario descriptors (types 22-27): the scenario loader (`$8B02`, `$7D0E`) reads the record's +$10 sector pair raw to `$16136 + $BA00`, and `$8B5C-$8B80` adds that base to the six descriptors at `$13034`. Implemented in `src/data/sprites.ts`. Details, the per-type content and the unit/effect/pin logic: `units.md`.
 
 ### 7.4 Draw order interleaving, `$6540` (VERIFIED)
 
@@ -191,7 +192,7 @@ A remake can simply redraw the pristine background picture for the region x 0..2
 - Real animation rate of cells and objects (depends on the pass time of the main loop).
 - Purpose of the draw-list flag bit 1 gating (`$156A9` bit 3), of `$144C8`, of the type-$18 frame logic, and of overlay table `$15628` (`$5D30`).
 - Which game entities the arrays at `$3A746`, `$3A12C`, `$39E20`, `$39D42` hold (types and behaviour), the exact sub-cell offset ranges (dx, dy) of moving objects, and the hide rules at the window edge (`$36D4`-`$3732`) beyond the sketch above.
-- The 6 scenario-specific sprite descriptors (types 22-27): images are loaded from the scenario's +$10 blocks, relocation not traced; entries 24 and 27 of scenario 0 are all zero.
+- Types 22-27 (scenario sprites): loading and relocation are traced (7.3); entries 24 and 27 of scenario 0 are all zero. What the enemy sprites are used for is in `units.md` section 8 (not traced).
 - Whether a loaded save restores scroll, and the default scroll for scenario starts beyond the new-game init (47, 33).
 - The generated pattern behind rows 24-87 of the background (section 9).
 - Variant B of the slave (different patch addresses) was not compared; the map code itself is not patched by the slave.
