@@ -262,6 +262,29 @@ for (let sc = 0; sc < records.length; sc++) {
   check("mine collapse: message", sim.messages.includes(0xdf));
 }
 
+// --- tank requisition ($11280) --------------------------------------------------------------------
+{
+  const mk = () => {
+    const { state, world } = fresh(0, 11);
+    const sim = new Sim(world, { rng: createRng(11), interactive: true });
+    state.setWord(0x1429c, 20);
+    state.setLong(0x14254, 20);
+    return { state, sim };
+  };
+  const a = mk();
+  const money = a.state.signedLong(A.money);
+  a.sim.eventTankRequisition(100);
+  check("tank requisition: dialog pending", a.sim.pending !== null && a.sim.pending.offer.what === "tanks");
+  const n = a.sim.pending.offer.count;
+  a.sim.resolveOffer(true);
+  check("tank requisition: tanks handed over", a.state.word(0x1429c) === 20 - n && a.state.long(0x14254) === 20 - n, `${n}`);
+  const b = mk();
+  b.sim.eventTankRequisition(100);
+  const fine = b.sim.pending.offer.price;
+  b.sim.resolveOffer(false);
+  check("tank requisition: refusal costs the fine", b.state.word(0x1429c) === 20 && b.state.signedLong(A.money) === money - fine);
+}
+
 // --- determinism ------------------------------------------------------------------------------------
 {
   const run = (seed) => {

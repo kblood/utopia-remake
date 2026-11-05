@@ -72,7 +72,7 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 | `$7000` construction countdown (weekly) | needs the placement code; conversion logic is `$703A` (documented in game-state.md 7.2) |
 | `$AC04` ship yard | spawns ships |
 | `$AF12/$B018` alien intelligence | not traced to the point of a faithful port |
-| events 1, 3, 8, 9, 11, 12, 13, 15, 17 (event 4, mine collapse `$11090`, is ported: random mine record demolished through `SimOptions.demolishAt`, message `$DF`, morale -300) | alien/meteor/units/mine collapse (needs `$7372` demolish); event 5 is empty in the original |
+| events 1, 3, 8, 9, 12, 13, 15, 17 (event 11, tank requisition `$11280`, is ported with the Earth dialog and `SimOptions.destroyUnit` = `$4692`; event 4, mine collapse `$11090`, is ported: random mine record demolished through `SimOptions.demolishAt`, message `$DF`, morale -300) | alien/meteor/units/mine collapse (needs `$7372` demolish); event 5 is empty in the original |
 | crime consequences above level 50 (`$10D00`, `$10D9E`) | unit and building destruction |
 | `$15698` message timers, `$144BD` scroll countdown, `$15xxx` redraw flags, `$7342` redraw | UI only |
 
@@ -100,3 +100,6 @@ record with tile `$45` has a counter in byte +6: it takes good 1 until the count
 asks `SimOptions.spawnUnit(x, y, advanced)` for a free neighbour cell (`UnitSystem.spawnAtYard`);
 on success the counter resets and `$143B6` counts the unit, otherwise message `$95` and it retries.
 Test: `test/sim.mjs`.
+
+Unit bookkeeping (`$37CA`, `$4692`): a new unit raises `$1429C` (cap 99, message `$8F`) and the type count
+`$14254` (type 9) / `$14258` (type 10); destroying one lowers them, raises `$14294` and costs 50 morale.

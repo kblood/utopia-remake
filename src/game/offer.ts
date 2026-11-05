@@ -14,6 +14,7 @@ const QUESTION = 0xe3;
 const TEXTS = {
   colonists: { title: 0xe0, body: 0xe1, amount: 0xe2 },
   scientists: { title: 0xe4, body: 0xe5, amount: 0xe6 },
+  tanks: { title: 0xe7, body: 0xe8, amount: 0xe6 },
 } as const;
 const BUTTONS = [
   { label: "ACCEPT", x: 76, y: 140, w: 72, h: 16, accept: true },

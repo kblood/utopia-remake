@@ -92,10 +92,10 @@ const MAX_POOL = 9;
 export type SimEvent =
   | { kind: "announce"; id: number } // $E770 d1: 1 game over, 2 quality of life 80, 3 quality of life 90
   | { kind: "invention"; bit: number } // $DF5A
-  | { kind: "offer"; what: "colonists" | "scientists"; count: number; price: number; accepted: boolean };
+  | { kind: "offer"; what: "colonists" | "scientists" | "tanks"; count: number; price: number; accepted: boolean };
 
 export interface Offer {
-  what: "colonists" | "scientists";
+  what: "colonists" | "scientists" | "tanks";
   count: number;
   price: number; // Gr per colonist (colonists) or total fine (scientists)
 }
@@ -110,6 +110,9 @@ export interface SimOptions {
   // $37CA at the end of the tank yard step: put a finished unit next to the yard at (x, y).
   // Returns false when no neighbouring cell is free. Without a unit layer the unit is only counted.
   spawnUnit?: (x: number, y: number, advanced: boolean) => boolean;
+  // $4692: remove the first unit from the map; returns its type (9 or 10), or null when none exists.
+  // Without a unit layer a unit of the type with a non-zero count is chosen.
+  destroyUnit?: () => number | null;
   // $7372: knock down the building at a cell (used by the mine collapse event).
   demolishAt?: (x: number, y: number) => void;
   // When true an Earth offer waits in `pending` (and time stops) until resolveOffer() is called,
@@ -131,6 +134,7 @@ export class Sim {
   private spawnUnit: (x: number, y: number, advanced: boolean) => boolean;
   private readonly interactive: boolean;
   private demolishAt: (x: number, y: number) => void;
+  private destroyUnit: () => number | null;
   pending: { offer: Offer; apply: (accepted: boolean) => void } | null = null;
 
   constructor(
@@ -144,6 +148,7 @@ export class Sim {
     this.spawnUnit = options.spawnUnit ?? (() => true);
     this.interactive = options.interactive ?? false;
     this.demolishAt = options.demolishAt ?? (() => {});
+    this.destroyUnit = options.destroyUnit ?? (() => (this.s.long(0x14254) > 0 ? 9 : this.s.long(0x14258) > 0 ? 10 : null));
     if (this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
   }
 
@@ -370,6 +375,8 @@ export class Sim {
         return this.eventTradeComputer(chance);
       case 10:
         return this.eventScientistsRequisition(chance);
+      case 11:
+        return this.eventTankRequisition(chance);
       case 14:
         return this.eventEclipse(chance);
       case 16:
@@ -379,7 +386,7 @@ export class Sim {
       case 19:
         return this.eventCrime();
       default:
-        return; // 1, 3, 8, 9, 11, 12, 13, 15, 17 not ported; 5 is empty in the original
+        return; // 1, 3, 8, 9, 12, 13, 15, 17 not ported; 5 is empty in the original
     }
   }
 
@@ -438,6 +445,30 @@ export class Sim {
     s.setByte(V.inventionDelay, 5);
     this.events.push({ kind: "invention", bit: bitNo });
     this.applyMorale(0x5dc);
+  }
+
+  // $11280: Earth requisitions 1..9 tanks (only above 10 units); refusing costs a fine.
+  eventTankRequisition(chance: number): void {
+    const s = this.s;
+    if (this.roll(100) >= chance) return;
+    if (s16(s.word(V.tanks)) <= 10) return;
+    const count = this.roll(9) + 1;
+    let fine = divuReg(s.long(V.money), this.roll(8) + 2) & 0xfffe;
+    if (fine >= 0xf423f) fine = 0xf423f;
+    this.ask({ what: "tanks", count, price: fine }, (accepted) => {
+      if (!accepted) {
+        s.setLong(V.money, s.long(V.money) - fine);
+        return;
+      }
+      for (let i = 0; i < count; i++) {
+        const type = this.destroyUnit();
+        if (type === null) break;
+        s.setWord(V.tanks, s.word(V.tanks) - 1);
+        this.add32(type === 9 ? 0x14254 : 0x14258, -1);
+        this.add32(0x14294, 1);
+        this.applyMorale(-50);
+      }
+    });
   }
 
   // $11090: a random mine collapses.
@@ -1033,9 +1064,14 @@ export class Sim {
         objects[at + 6] = 0xff;
       }
       const advanced = (s.long(V.invention) & 4) !== 0;
-      if (this.spawnUnit(objects[at + 4], objects[at + 5], advanced)) {
+      if (s.word(V.tanks) >= 99) {
+        objects[at + 6] = 0;
+        this.msg(0x8f); // $37CA: the unit list is full
+      } else if (this.spawnUnit(objects[at + 4], objects[at + 5], advanced)) {
         objects[at + 6] = 0;
         this.add32(0x143b6, 1);
+        s.setWord(V.tanks, s.word(V.tanks) + 1);
+        this.add32(advanced ? 0x14258 : 0x14254, 1);
       } else {
         this.msg(0x95);
       }

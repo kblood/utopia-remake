@@ -87,12 +87,23 @@ export class MapScene {
     this.sim = new Sim(world, {
       interactive: true,
       demolishAt: (x, y) => builder.demolish(x, y),
+      destroyUnit: () => this.destroyFirstUnit(),
       onWeek: () => builder.weekly(),
       spawnUnit: (x, y, advanced) => (this.objects ? this.objects.units.spawnAtYard(x, y, advanced) !== null : true),
     });
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
+  }
+
+  // $4692: removes the first unit (the original walks its list in slot order).
+  private destroyFirstUnit(): number | null {
+    const layer = this.objects;
+    if (!layer) return this.state.long(0x14254) > 0 ? 9 : this.state.long(0x14258) > 0 ? 10 : null;
+    const unit = layer.units.units[0];
+    if (!unit) return null;
+    layer.destroyUnit(unit);
+    return unit.type;
   }
 
   // Shows a string-table message on the message line / log.
