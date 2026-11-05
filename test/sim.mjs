@@ -245,6 +245,23 @@ for (let sc = 0; sc < records.length; sc++) {
   check("tank yard: counter restarts", world.objects[at + 6] === 0);
 }
 
+// --- mine collapse ($11090) -----------------------------------------------------------------------
+{
+  const hit = [];
+  const { state, world } = fresh(0, 9);
+  const sim = new Sim(world, { rng: createRng(9), demolishAt: (x, y) => hit.push([x, y]) });
+  const at = world.objectCount * 8;
+  world.objects.set([0, 0x60, 0, 0, 33, 44, 0, 0], at);
+  world.objectCount++;
+  state.setWord(0x133c2, 1);
+  const morale = state.signedLong(A.morale);
+  sim.eventMineCollapse(100);
+  const last = hit[hit.length - 1];
+  check("mine collapse: a mine is demolished", hit.length === 1 && state.word(0x133c2) === 1 && last !== undefined);
+  check("mine collapse: morale drops", state.signedLong(A.morale) < morale);
+  check("mine collapse: message", sim.messages.includes(0xdf));
+}
+
 // --- determinism ------------------------------------------------------------------------------------
 {
   const run = (seed) => {

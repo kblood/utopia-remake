@@ -86,6 +86,7 @@ export class MapScene {
     const builder = new Builder(world, readFlagTable(disk), readWeights(disk), (n) => this.messages.push(n));
     this.sim = new Sim(world, {
       interactive: true,
+      demolishAt: (x, y) => builder.demolish(x, y),
       onWeek: () => builder.weekly(),
       spawnUnit: (x, y, advanced) => (this.objects ? this.objects.units.spawnAtYard(x, y, advanced) !== null : true),
     });

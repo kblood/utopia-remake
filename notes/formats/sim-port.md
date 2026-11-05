@@ -72,7 +72,7 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 | `$7000` construction countdown (weekly) | needs the placement code; conversion logic is `$703A` (documented in game-state.md 7.2) |
 | `$AC04` ship yard | spawns ships |
 | `$AF12/$B018` alien intelligence | not traced to the point of a faithful port |
-| events 1, 3, 4, 8, 9, 11, 12, 13, 15, 17 | alien/meteor/units/mine collapse (needs `$7372` demolish); event 5 is empty in the original |
+| events 1, 3, 8, 9, 11, 12, 13, 15, 17 (event 4, mine collapse `$11090`, is ported: random mine record demolished through `SimOptions.demolishAt`, message `$DF`, morale -300) | alien/meteor/units/mine collapse (needs `$7372` demolish); event 5 is empty in the original |
 | crime consequences above level 50 (`$10D00`, `$10D9E`) | unit and building destruction |
 | `$15698` message timers, `$144BD` scroll countdown, `$15xxx` redraw flags, `$7342` redraw | UI only |
 

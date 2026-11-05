@@ -110,6 +110,8 @@ export interface SimOptions {
   // $37CA at the end of the tank yard step: put a finished unit next to the yard at (x, y).
   // Returns false when no neighbouring cell is free. Without a unit layer the unit is only counted.
   spawnUnit?: (x: number, y: number, advanced: boolean) => boolean;
+  // $7372: knock down the building at a cell (used by the mine collapse event).
+  demolishAt?: (x: number, y: number) => void;
   // When true an Earth offer waits in `pending` (and time stops) until resolveOffer() is called,
   // instead of asking `decide`.
   interactive?: boolean;
@@ -128,6 +130,7 @@ export class Sim {
   private onWeek: (() => void) | undefined;
   private spawnUnit: (x: number, y: number, advanced: boolean) => boolean;
   private readonly interactive: boolean;
+  private demolishAt: (x: number, y: number) => void;
   pending: { offer: Offer; apply: (accepted: boolean) => void } | null = null;
 
   constructor(
@@ -140,6 +143,7 @@ export class Sim {
     this.onWeek = options.onWeek;
     this.spawnUnit = options.spawnUnit ?? (() => true);
     this.interactive = options.interactive ?? false;
+    this.demolishAt = options.demolishAt ?? (() => {});
     if (this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
   }
 
@@ -358,6 +362,8 @@ export class Sim {
         return this.eventColonistOffer(chance);
       case 2:
         return this.eventInvention();
+      case 4:
+        return this.eventMineCollapse(chance);
       case 6:
         return this.eventPowerAccident(chance);
       case 7:
@@ -373,7 +379,7 @@ export class Sim {
       case 19:
         return this.eventCrime();
       default:
-        return; // 1, 3, 4, 8, 9, 11, 12, 13, 15, 17 not ported; 5 is empty in the original
+        return; // 1, 3, 8, 9, 11, 12, 13, 15, 17 not ported; 5 is empty in the original
     }
   }
 
@@ -432,6 +438,25 @@ export class Sim {
     s.setByte(V.inventionDelay, 5);
     this.events.push({ kind: "invention", bit: bitNo });
     this.applyMorale(0x5dc);
+  }
+
+  // $11090: a random mine collapses.
+  eventMineCollapse(chance: number): void {
+    const s = this.s;
+    if (this.roll(100) >= chance) return;
+    const mines = s.word(0x133c2);
+    if (mines === 0) return;
+    let skip = this.roll(mines);
+    const o = this.world.objects;
+    for (let slot = 0; slot < this.world.objectCount; slot++) {
+      const at = slot * 8;
+      if (((o[at] << 8) | o[at + 1]) !== TILE_MINE) continue;
+      if (skip-- > 0) continue;
+      this.demolishAt(o[at + 4], o[at + 5]);
+      this.msg(0xdf);
+      this.applyMorale(-300);
+      return;
+    }
   }
 
   // $10F5E: lightning in the power storage.
