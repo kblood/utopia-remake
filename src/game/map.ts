@@ -8,6 +8,7 @@ import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK, TILE_WIDTH, type Tile } from "../d
 import { Screen, SCREEN_WIDTH } from "../gfx/screen.js";
 import type { Input } from "./intro.js";
 import { A } from "./state.js";
+import { Sim } from "./sim.js";
 import type { World } from "./world.js";
 
 export const VIEW_CELLS = 8;
@@ -53,6 +54,7 @@ export class MapScene {
   private readonly background: Uint8Array;
   private readonly cells: Uint16Array;
   private readonly state: World["state"];
+  readonly sim: Sim;
   scrollX = START_X;
   scrollY = START_Y;
   private repeat = 0;
@@ -65,6 +67,7 @@ export class MapScene {
   ) {
     this.cells = world.cells;
     this.state = world.state;
+    this.sim = new Sim(world);
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }
@@ -92,7 +95,7 @@ export class MapScene {
       this.repeat = 0;
     }
     if (++this.frame % ANIMATION_FRAMES === 0) this.animateCells();
-    this.state.tickFrame();
+    this.sim.tick();
     this.draw();
   }
 
