@@ -6,6 +6,7 @@ import type { Music } from "../audio/music.js";
 import { GameStrings } from "../data/gamestrings.js";
 import { loadMap, loadTileSet, readScenarioRecords, type ScenarioRecord } from "../data/scenario.js";
 import type { Screen } from "../gfx/screen.js";
+import { AnnounceScene } from "./announce.js";
 import { IntroScene, type Input } from "./intro.js";
 import { LanguageScene, type Language } from "./language.js";
 import { MapScene } from "./map.js";
@@ -14,7 +15,7 @@ import { applyGame, captureGame, readSlot, SAVE_SLOTS, slotSummaries, writeSlot 
 import { GameState } from "./state.js";
 import { World } from "./world.js";
 
-type Stage = "intro" | "language" | "scenario" | "map" | "disk" | "save" | "load";
+type Stage = "intro" | "language" | "scenario" | "map" | "disk" | "save" | "load" | "announce";
 
 export class Game {
   private stage: Stage = "intro";
@@ -22,6 +23,7 @@ export class Game {
   private language: LanguageScene | null = null;
   private strings: GameStrings | null = null;
   private menu: MenuScene | null = null;
+  private announce: AnnounceScene | null = null;
   private map: MapScene | null = null;
   private scenario = 0;
   private readonly records: ScenarioRecord[];
@@ -39,6 +41,7 @@ export class Game {
   get screen(): Screen {
     if (this.stage === "intro") return this.intro.screen;
     if (this.stage === "language") return this.language!.screen;
+    if (this.announce) return this.announce.screen;
     if (this.menu) return this.menu.screen;
     return this.map!.screen;
   }
@@ -105,9 +108,26 @@ export class Game {
         if (choice !== null && choice >= 0) this.startScenario(choice);
         break;
       }
-      case "map":
-        this.map!.update(input);
+      case "map": {
+        const map = this.map!;
+        map.update(input);
+        for (const event of map.sim.events.splice(0)) {
+          if (event.kind === "announce" && !this.announce) {
+            this.announce = new AnnounceScene(this.disk1, this.strings!, map.screen, event.id);
+            this.stage = "announce";
+          }
+        }
         break;
+      }
+      case "announce": {
+        if (this.announce!.update(input)) {
+          const over = this.announce!.id === 1;
+          this.announce = null;
+          if (over) this.openScenarioMenu();
+          else this.stage = "map";
+        }
+        break;
+      }
       case "disk": {
         const choice = this.menu!.update(input);
         if (choice === null) break;
