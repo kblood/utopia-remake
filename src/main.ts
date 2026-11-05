@@ -64,7 +64,12 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
   let map: MapScene | null = null;
   let result: LanguageResult = { state: "running" };
 
-  const input: Input = { leftButton: false, rightButton: false, pointerX: 0, pointerY: 0 };
+  const input: Input = { leftButton: false, rightButton: false, pointerX: 0, pointerY: 0, keys: [] };
+  window.addEventListener("keydown", (e) => {
+    if (e.repeat) return;
+    input.keys?.push(e.key);
+    if (/^F[1-6]$/.test(e.key) || e.key === " ") e.preventDefault();
+  });
   canvas.addEventListener("mousedown", (e) => {
     if (e.button === 0) input.leftButton = true;
     if (e.button === 2) input.rightButton = true;

@@ -20,6 +20,7 @@ export interface Input {
   rightButton: boolean;
   pointerX: number; // screen pixels, 0-319
   pointerY: number; // screen rows, 0-199
+  keys?: string[]; // KeyboardEvent.key values pressed since the last update (consumed by the scene)
 }
 
 export type IntroResult = "running" | "clicked";

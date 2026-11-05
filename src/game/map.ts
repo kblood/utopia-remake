@@ -83,6 +83,11 @@ export class MapScene {
     this.background = this.screen.pixels.slice();
   }
 
+  // Keyboard ($15B4A): P and space toggle the pause ($156A9 bit 2).
+  private key(key: string): void {
+    if (key === "p" || key === "P" || key === " ") this.sim.paused = !this.sim.paused;
+  }
+
   private scroll(dx: number, dy: number, step: number): void {
     const x = Math.max(0, Math.min(MAX_SCROLL_X, this.scrollX + dx * step));
     const y = Math.max(0, Math.min(MAX_SCROLL_Y, this.scrollY + dy * step));
@@ -94,6 +99,7 @@ export class MapScene {
 
   update(input: Input): void {
     const step = input.rightButton ? 6 : 1;
+    for (const key of input.keys?.splice(0) ?? []) this.key(key);
     const used = this.controls.update(input);
     if (!used && (input.leftButton || input.rightButton)) {
       const arrow = ARROWS.find(
