@@ -75,9 +75,11 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
     if (e.button === 2) input.rightButton = true;
   });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  // A release is applied after the next update, so a click shorter than one frame is still seen.
+  const release = { left: false, right: false };
   canvas.addEventListener("mouseup", (e) => {
-    if (e.button === 0) input.leftButton = false;
-    if (e.button === 2) input.rightButton = false;
+    if (e.button === 0) release.left = true;
+    if (e.button === 2) release.right = true;
   });
   canvas.addEventListener("mousemove", (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -105,6 +107,10 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
           new GameStrings(disk, result.language),
         );
       }
+      if (release.left) input.leftButton = false;
+      if (release.right) input.rightButton = false;
+      release.left = false;
+      release.right = false;
     }
     const active: Screen = map ? map.screen : intro.screen;
     ctx.fillStyle = "#000";
