@@ -27,3 +27,11 @@ export function readWeights(disk1: Uint8Array): number[] {
   }
   return out;
 }
+
+const INVENTION_TABLE = 0xb1cc; // two words per invention: title string, description string
+
+// String index of the description shown when invention `bit` arrives ($DF5A).
+export function readInventionText(disk1: Uint8Array, bit: number): number {
+  const at = imageOffset(INVENTION_TABLE) + 4 * bit + 2;
+  return (disk1[at] << 8) | disk1[at + 1];
+}

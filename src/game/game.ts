@@ -112,6 +112,7 @@ export class Game {
         const map = this.map!;
         map.update(input);
         for (const event of map.sim.events.splice(0)) {
+          if (event.kind === "invention") map.announceInvention(event.bit);
           if (event.kind === "announce" && !this.announce) {
             this.announce = new AnnounceScene(this.disk1, this.strings!, map.screen, event.id);
             this.stage = "announce";

@@ -8,7 +8,7 @@ import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK, TILE_WIDTH, type Tile } from "../d
 import { Screen, SCREEN_WIDTH } from "../gfx/screen.js";
 import type { Input } from "./intro.js";
 import type { GameStrings } from "../data/gamestrings.js";
-import { readFlagTable, readWeights } from "../data/gameimage.js";
+import { readFlagTable, readInventionText, readWeights } from "../data/gameimage.js";
 import { Builder } from "./build.js";
 import { Controls } from "./controls.js";
 import { Messages } from "./messages.js";
@@ -88,6 +88,17 @@ export class MapScene {
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
+  }
+
+  // Shows a string-table message on the message line / log.
+  say(index: number): void {
+    this.messages.push(index);
+  }
+
+  // $DF5A: a new invention. The original opens a picture dialog; here the description from table
+  // $B1CC (word pair per invention: title, description) goes to the message log.
+  announceInvention(bit: number): void {
+    this.messages.push(readInventionText(this.disk, bit));
   }
 
   // Keyboard ($15B4A): P and space toggle the pause ($156A9 bit 2).
