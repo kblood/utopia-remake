@@ -68,11 +68,8 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 | Routine | Reason |
 |---|---|
 | `$11D34` (gun animation, special bit and daily) | graphics/unit logic |
-| `$ACE2` (ship fuel), `$4798`, `$12510`, `$127A0` (weekly unit/enemy code), `$A5A6` (fuel withdrawal for ships) | unit lists not modelled |
 | `$7000` construction countdown (weekly) | needs the placement code; conversion logic is `$703A` (documented in game-state.md 7.2) |
-| `$AC04` ship yard | spawns ships |
-| `$AF12/$B018` alien intelligence | not traced to the point of a faithful port |
-| events 1, 3, 8, 9, 12, 13, 15, 17 (event 11, tank requisition `$11280`, is ported with the Earth dialog and `SimOptions.destroyUnit` = `$4692`; event 4, mine collapse `$11090`, is ported: random mine record demolished through `SimOptions.demolishAt`, message `$DF`, morale -300) | alien/meteor/units/mine collapse (needs `$7372` demolish); event 5 is empty in the original |
+| `$11D34`-style unit movement/attack AI, the real `$7000`, sound calls | out of scope; ground/air enemy units, defection and repair go through `SimOptions` hooks |
 | `$15698` message timers, `$144BD` scroll countdown, `$15xxx` redraw flags, `$7342` redraw | UI only |
 
 ## Test results (npm test, scenario 0 and all ten starting states)
@@ -111,3 +108,41 @@ Crime above 50 runs arson (`$10D00`): unless invention bit 3 is set, a 40% roll 
 damage counter `$1346A`++, -500 morale, message `$119`). Above 60 `$10D9E` runs unrest (`$144BE`): a 10%
 roll starts it, each round either the police win (`$121`), or it drains until the counter hits 0, which
 is announcement id 0 and game over (heading `$183`); otherwise message `$120` with chance (6-n)*10%.
+
+## Ship yard, ships, fuel (`src/game/sim-ships.ts`, `Sim.fleet`)
+
+Ships are kept as `Fleet.slots` (type 11..16, x, y, dir, hp, mode, tech, class, fuel word, lift). `$AC04` runs monthly after the tank yard:
+skipped when the power byte `$144C8` is 9 or more (signed) or without a command centre (`$133F8`); workers per yard = job pool 3 (`$143F6`) /
+yard count (`$133D4`). Each record with tile `$36`: +6 = ordered class 1..6 (0 idle), +7 = remaining cost of good 1. Stage 1 removes
+min(workers per yard, +7) units of good 1 per month (message `$C6` and abort when the stock is empty; `$1437A`/`$143A2` += taken, `$1434A` -= taken);
+stage 2 takes `$B251[class-1]` = 0,2,4,2,3,1 units of good 3 (message `$C5` when none could be removed), sets +7 = `$FF` and launches.
+Frame costs `$F012` = 50,100,180,240,80,50 (class 5 needs invention bit 4); order is made by `Fleet.orderShip(slot, class)`.
+Launch `$4060`: pad = record tile `$48` with +3 = `$FF` within 5 cells of the yard; its four cells are tried in the order (x,y) (x,y+1) (x+1,y+1) (x+1,y),
+first without cell bit 14. None: message `$C7`, yard keeps +7 = `$FF` and retries next month. Success: +6/+7 cleared, `$143B2`++, `$387E` creates a
+ship of type `$4BBE[class]` = 11..16, direction 8 (cap 40 ships `$1429E`, message `$C8`), hp/mode/fuel from table `$4B76` (rows type 9..17), fuel
+cleared unless class 4, type count `$14254 + 4*(type-9)`++ (not type 17), cell bit 14 set.
+Destroy `$46CC`: type count--, `$14294`++, morale -100 (not type 17), ship count--, cell bit cleared, explosion effect, optional message.
+`$ACE2` daily fuel: mode 1 burns 1, modes 2/3 burn 2; fuel <= 0 destroys with message `$40`; types 15 and 17 are skipped.
+`$4798` weekly refuel: landed (mode 0), class != 4 ships on pad tiles `$48..$4B` with a fuel tank tile `$3F/$40` within x-7..x+6, y-7..y+6 are filled
+to `$4A98` = 400,600,600,1200,`$FFFF`,400 from the tanks (`$13310` + `$13322`); too little stock = all of it and message `$EE` once a month
+(flag cleared in the monthly code). `$A5A6` withdrawal has the same flat 800/1200 split as `$A51A`. `$12510` weekly repair: ships and ground units
+heal tech/2 hit points up to the type maximum (ground units through `SimOptions.repairUnits(amount)`).
+
+## Alien events and intelligence (`src/game/sim-aliens.ts`, `Sim.aliens`)
+
+- Event 12 `$113A6`: first ship with lift != 0 explodes (message `$109`). Event 15 `$114AC` (power level < 6): T[13].C x 400 fuel is beamed out of
+  the tanks (message `$52`), half is lost, the ships are topped up 20 per round, the rest goes back into the tanks. Event 17 `$11566`: first own tank
+  defects to the enemy (`$142A2`++, `$1429C`--, message `$181`; `SimOptions.defectUnit`).
+- Event 1 `$1146A`: alien sprite (`$144A8`, type 19) at a random marker cell (tile `$7F`, first 10 in row-major order, kept at `$14524`/`$144A6`).
+  Event 8 `$1160E`: meteor (`$1449C`, type 21, timer `$78`, message `$182`, none with invention bit 8) falls 4 per main-loop pass (`Sim.pass()`), impact
+  `$11676` bombs the 5x5 cells flagged `$0400` (counter `$1346A`, morale -1000 once).
+- Event 9 `$11724` attack wave: `$B018` countdown `$141B2`, strength +`$18` decaying by `$1D`, roll against strength, warning pass-through by table
+  `$14060` (message `$8D`; SYS bit1 pending flag), then entries of the alien block (`$13456 + $20 + 64*(level-1)`) are queued into one of 16 spawn groups
+  (`$135C6`, stride `$92`: 8 spawn cells, 32-long queue at +`$10`, count +`$90`, direction +`$91`). `$1187C` (`Sim.pass()` -> `spawnStep`) spawns one
+  queued enemy per group visit through `SimOptions.spawnEnemy(spawn)`.
+- Event 13 `$ADA6`: funds decay, level recompute `$AD70` (funds 0 -> 0, < 5000 -> 1, < 20000 -> 2, else 3), ticker countdown, one-shot reports via the tables at
+  `$13EE6/$13F10/$13F3A/$13F64`. Event 3 `$12A16`: battle report when `$144CB` = 4 using tally `$1446E`. `$AF12` daily: aliens age (every 10th call, level from age).
+- `$127A0` weekly battle: front fleet counts `$14274` (8 longs) x power weights, tech/2, the alien age (`$13456 + $14`) wears down; victory sets SYS bit2,
+  morale +5000, funds `$1446A` go to the treasury, level 4; otherwise casualties.
+- Hooks: `SimOptions.effect(kind, x, y)` (explosion, focus, launch, alienAppear, meteorFall, meteorImpact), `spawnEnemy`, `defectUnit`, `repairUnits`.
+  New `SimEvent` kinds: ship (launched/destroyed), intel, aliensDefeated. Test: `test/aliens.mjs`.

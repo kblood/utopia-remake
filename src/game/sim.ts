@@ -4,6 +4,8 @@
 // register widths (see sim-math.ts), quirks included.
 
 import { A, PERIOD, type GameState } from "./state.js";
+import { Fleet, type EffectKind } from "./sim-ships.js";
+import { Aliens, type EnemySpawn } from "./sim-aliens.js";
 import { OBJECT_SLOTS, T, type World } from "./world.js";
 import { createRng, divsQ, divuQ, divuReg, mulu, muls, s16, s8, type Rng } from "./sim-math.js";
 import { GOOD_WEIGHT, JOB_POOL_TYPES, POWER_TYPES, RESEARCH_BITS, RESEARCH_INDEX, RESEARCH_SCALE, RESEARCH_THRESHOLD, STARVATION_LEVEL, TAX_MORALE, TAX_QOL } from "./sim-tables.js";
@@ -83,7 +85,7 @@ const TY = {
 } as const;
 
 // Bits of the system flag byte $156AA (kept in Sim.sysFlags).
-export const SYS = { noUnitBonus: 0x04, gameOver: 0x08, qol80: 0x10, qol90: 0x20, eclipse: 0x40, attack: 0x80 } as const;
+export const SYS = { attackPending: 0x02, noUnitBonus: 0x04, gameOver: 0x08, qol80: 0x10, qol90: 0x20, eclipse: 0x40, attack: 0x80 } as const;
 
 const TILE_MINE = 0x60;
 const TILE_FUEL = 0x3e;
@@ -92,7 +94,10 @@ const MAX_POOL = 9;
 export type SimEvent =
   | { kind: "announce"; id: number } // $E770 d1: 0 colony falls to crime, 1 game over, 2 quality of life 80, 3 quality of life 90
   | { kind: "invention"; bit: number } // $DF5A
-  | { kind: "offer"; what: "colonists" | "scientists" | "tanks"; count: number; price: number; accepted: boolean };
+  | { kind: "offer"; what: "colonists" | "scientists" | "tanks"; count: number; price: number; accepted: boolean }
+  | { kind: "ship"; what: "launched" | "destroyed"; type: number; x: number; y: number } // $4060/$387E, $46CC
+  | { kind: "intel"; slot: number; value: number } // a ticker pair (6, value) written at `slot` (defence screen), message $157 or similar
+  | { kind: "aliensDefeated" }; // $127A0 victory
 
 export interface Offer {
   what: "colonists" | "scientists" | "tanks";
@@ -118,6 +123,16 @@ export interface SimOptions {
   // When true an Earth offer waits in `pending` (and time stops) until resolveOffer() is called,
   // instead of asking `decide`.
   interactive?: boolean;
+  // Graphics hook for everything the original draws as a side effect (explosions, scroll-to-cell, meteor, alien).
+  effect?: (kind: EffectKind, x: number, y: number) => void;
+  // $48EC / $48B6: create an enemy ground (air = false) or air unit at the cell; false = its list is full.
+  // Without a unit layer the unit is only counted ($142A2 / $142A4).
+  spawnEnemy?: (spawn: EnemySpawn) => boolean;
+  // Event 17 ($11566): turn the first own ground unit into an enemy ground unit; returns its cell, or null when
+  // none could be converted. Without a unit layer only the counters change (cell -1).
+  defectUnit?: () => { x: number; y: number } | null;
+  // $12510: heal every own ground unit by `amount` hit points (type maximum from UNIT_INIT).
+  repairUnits?: (amount: number) => void;
 }
 
 export class Sim {
@@ -135,6 +150,13 @@ export class Sim {
   private readonly interactive: boolean;
   private demolishAt: (x: number, y: number) => void;
   private destroyUnit: () => number | null;
+  private effectHook: ((kind: EffectKind, x: number, y: number) => void) | undefined;
+  private spawnEnemyHook: (spawn: EnemySpawn) => boolean;
+  private defectHook: () => { x: number; y: number } | null;
+  private repairHook: ((amount: number) => void) | undefined;
+  // Own spaceships and the ship yard ($AC04, $4060, $ACE2, ...), alien/meteor/intelligence code.
+  readonly fleet: Fleet;
+  readonly aliens: Aliens;
   pending: { offer: Offer; apply: (accepted: boolean) => void } | null = null;
 
   constructor(
@@ -149,7 +171,41 @@ export class Sim {
     this.interactive = options.interactive ?? false;
     this.demolishAt = options.demolishAt ?? (() => {});
     this.destroyUnit = options.destroyUnit ?? (() => (this.s.long(0x14254) > 0 ? 9 : this.s.long(0x14258) > 0 ? 10 : null));
+    this.effectHook = options.effect;
+    this.spawnEnemyHook = options.spawnEnemy ?? (() => true);
+    this.defectHook = options.defectUnit ?? (() => ({ x: -1, y: -1 }));
+    this.repairHook = options.repairUnits;
     if (this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
+    this.fleet = new Fleet(this);
+    this.aliens = new Aliens(this);
+  }
+
+  // Called once per main-loop pass ($333A cadence, 2 video frames; not while paused): the meteor countdown
+  // ($3626) and the alien spawner ($1187C). Not part of tick() because the unit layer owns the pass clock.
+  pass(): void {
+    if (this.paused || this.pending) return;
+    this.aliens.meteorStep();
+    this.aliens.spawnStep();
+  }
+
+  // Hooks used by Fleet / Aliens.
+  effect(kind: EffectKind, x: number, y: number): void {
+    this.effectHook?.(kind, x, y);
+  }
+  spawnEnemy(spawn: EnemySpawn): boolean {
+    return this.spawnEnemyHook(spawn);
+  }
+  defectUnit(): { x: number; y: number } | null {
+    return this.defectHook();
+  }
+  repairUnits(amount: number): void {
+    this.repairHook?.(amount);
+  }
+  // $12332: bomb a building cell: demolish, damage counter $1346A++ (always), explosion.
+  bomb(x: number, y: number): void {
+    this.demolishAt(x, y);
+    this.state.setWord(0x1346a, this.state.word(0x1346a) + 1);
+    this.effect("explosion", x, y);
   }
 
   get gameOver(): boolean {
@@ -187,11 +243,11 @@ export class Sim {
     return this.state;
   }
 
-  private msg(index: number): void {
+  msg(index: number): void {
     this.messages.push(index);
   }
 
-  private roll(range: number): number {
+  roll(range: number): number {
     return this.rng(range);
   }
 
@@ -201,7 +257,7 @@ export class Sim {
   private tActive(i: number): number {
     return this.s.word(this.tAddr(i) + T.active);
   }
-  private tCount(i: number): number {
+  tCount(i: number): number {
     return this.s.word(this.tAddr(i) + T.total);
   }
   private tStored(i: number): number {
@@ -260,9 +316,11 @@ export class Sim {
   // intelligence) are not ported.
   private daily(): void {
     if (this.s.byte(A.day) === 1) this.qualityOfLife();
+    this.fleet.dailyFuel(); // $ACE2
     this.checkGameOver();
     if (this.gameOver) return;
     this.eventScheduler();
+    this.aliens.dailyIntel(); // $AF12
   }
 
   // $B086
@@ -325,8 +383,11 @@ export class Sim {
   // $99C4 weekly branch: $10FCA (eclipse) and the $144B2 counter. $7000 (construction
   // countdown, through the onWeek option), $4798, $12510 and $127A0 are not ported.
   private weekly(): void {
-    this.eclipseWeekly();
     this.onWeek?.();
+    this.fleet.weeklyRefuel(); // $4798
+    this.eclipseWeekly();
+    this.fleet.weeklyRepair(); // $12510
+    this.aliens.weeklyBattle(); // $127A0
     const c = this.s.byte(0x144b2);
     if (c !== 0) this.s.setByte(0x144b2, c - 1);
   }
@@ -365,28 +426,44 @@ export class Sim {
     switch (k) {
       case 0:
         return this.eventColonistOffer(chance);
+      case 1:
+        return this.aliens.eventAlienAppears(chance);
       case 2:
         return this.eventInvention();
+      case 3:
+        return this.aliens.eventBattleReport();
       case 4:
         return this.eventMineCollapse(chance);
       case 6:
         return this.eventPowerAccident(chance);
       case 7:
         return this.eventTradeComputer(chance);
+      case 8:
+        return this.aliens.eventMeteor(chance);
+      case 9:
+        return this.aliens.eventWave();
       case 10:
         return this.eventScientistsRequisition(chance);
       case 11:
         return this.eventTankRequisition(chance);
+      case 12:
+        return this.fleet.eventShipExplosion(chance);
+      case 13:
+        return this.aliens.eventIntelStep();
       case 14:
         return this.eventEclipse(chance);
+      case 15:
+        return this.fleet.eventFuelBeam();
       case 16:
         return this.eventStrike(chance);
+      case 17:
+        return this.aliens.eventTankDefect(chance);
       case 18:
         return this.eventVirus(chance);
       case 19:
         return this.eventCrime();
       default:
-        return; // 1, 3, 8, 9, 12, 13, 15, 17 not ported; 5 is empty in the original
+        return; // 5 is empty in the original
     }
   }
 
@@ -619,7 +696,7 @@ export class Sim {
   }
 
   // $11A5C: the n-th used object record, n random below min(record count, 254).
-  private randomBuilding(): [number, number] | null {
+  randomBuilding(): [number, number] | null {
     const o = this.world.objects;
     let skip = this.roll(Math.min(this.s.word(0x142c2), 0xfe));
     for (let slot = 0; slot < OBJECT_SLOTS; slot++) {
@@ -703,12 +780,14 @@ export class Sim {
     this.crimeMonthly();
     this.production();
     this.tankYard();
+    this.fleet.shipYard(); // $AC04
     this.research();
     s.setLong(0x1436a, s.long(0x14376));
     s.setLong(0x14376, 0);
     s.setLong(0x14372, s.long(0x1437a));
     s.setLong(0x1437a, 0);
     s.setByte(V.eventIndex, 0);
+    this.fleet.fuelWarned = false; // $156B3
   }
 
   // $9B52: after a power failure took the Command Centre offline it comes back once the

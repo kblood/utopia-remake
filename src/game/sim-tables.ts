@@ -26,3 +26,26 @@ export const RESEARCH_THRESHOLD = [500, 1000, 2000, 4000, 6500, 9000, 11500, 140
 export const RESEARCH_BITS = [0x0, 0x2, 0xc1, 0x14104, 0x1c00, 0x2200, 0x20, 0x20008, 0x8000, 0x10] as const;
 export const RESEARCH_INDEX = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5] as const;
 export const RESEARCH_SCALE = [0, 2, 4, 2, 3, 1] as const;
+
+// Ships ($4B76, $4BBE, $4A98, $F012, $B251). Unit types 9/10 are ground units, 11..16 the six ship classes
+// the yard builds, 17 a guided projectile. Rows of $4B76 (8 bytes per type 9..17) hold the start values:
+// hit points, mode, fuel word.
+export const UNIT_INIT: readonly { hp: number; mode: number; fuel: number }[] = [
+  { hp: 0x08, mode: 0xff, fuel: 0xffff },
+  { hp: 0x08, mode: 0xff, fuel: 0xffff },
+  { hp: 0x0a, mode: 0x00, fuel: 0x0190 },
+  { hp: 0x14, mode: 0x00, fuel: 0x0258 },
+  { hp: 0x1e, mode: 0x00, fuel: 0x0258 },
+  { hp: 0x32, mode: 0x00, fuel: 0x04b0 },
+  { hp: 0x1e, mode: 0x00, fuel: 0xffff },
+  { hp: 0x0f, mode: 0x00, fuel: 0x0190 },
+  { hp: 0x28, mode: 0x04, fuel: 0x0000 },
+];
+// $4BBE: unit type of ship class 0..5 (yard order 1..6).
+export const SHIP_UNIT_TYPE = [11, 12, 13, 14, 15, 16] as const;
+// $4A98: fuel capacity per ship class ($FFFF = class 4 never burns fuel).
+export const SHIP_FUEL_CAP = [400, 600, 600, 1200, 0xffff, 400] as const;
+// $F012: units of good 1 the yard needs for class 0..5 (stage 1; stored in record byte +7).
+export const YARD_FRAME_COST = [50, 100, 180, 240, 80, 50] as const;
+// $B251: units of good 3 for class 0..5 (stage 2). The same six bytes are the research scale table.
+export const YARD_GOODS3 = [0, 2, 4, 2, 3, 1] as const;
