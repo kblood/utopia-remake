@@ -20,6 +20,11 @@ export interface Music {
   fadeOut(seconds?: number): void;
   /** Master volume 0..1 (default 1). */
   setVolume(volume: number): void;
+  /**
+   * Silence one of the four Paula channels of the module (0..3), like the original does while a sound effect
+   * owns that channel. Survives track changes. See notes/formats/sfx.md.
+   */
+  setChannelMuted(channel: number, muted: boolean): void;
   /** Call from a gesture handler to make sure the AudioContext is running. */
   resume(): void;
   /** Module title text read from the module header at runtime. */
@@ -33,6 +38,8 @@ export function createMusic(disk1: Uint8Array, _disk2?: Uint8Array): Music {
   let current = -1;
   let volume = 1;
   let stopTimer: ReturnType<typeof setTimeout> | undefined;
+  let player: ModPlayer | null = null;
+  const muted = [false, false, false, false];
 
   const song = (track: number): ModSong => {
     let s = songs.get(track);
@@ -64,13 +71,16 @@ export function createMusic(disk1: Uint8Array, _disk2?: Uint8Array): Music {
       current = track;
       if (!WebAudioSink.supported) return;
       const rate = sink.sampleRate;
-      sink.setPlayer(new ModPlayer(song(track), { sampleRate: rate }));
+      player = new ModPlayer(song(track), { sampleRate: rate });
+      muted.forEach((m, ch) => player?.setChannelMuted(ch, m));
+      sink.setPlayer(player);
       sink.setVolume(volume);
       sink.resume();
     },
     stop() {
       cancelFade();
       current = -1;
+      player = null;
       sink.setPlayer(null);
     },
     fadeOut(seconds = 1) {
@@ -83,6 +93,11 @@ export function createMusic(disk1: Uint8Array, _disk2?: Uint8Array): Music {
       volume = Math.max(0, Math.min(1, v));
       sink.setVolume(volume);
     },
+    setChannelMuted(channel, m) {
+      if (channel < 0 || channel >= muted.length) return;
+      muted[channel] = m;
+      player?.setChannelMuted(channel, m);
+    },
     resume() {
       sink.resume();
     },
@@ -92,6 +107,7 @@ export function createMusic(disk1: Uint8Array, _disk2?: Uint8Array): Music {
     dispose() {
       cancelFade();
       current = -1;
+      player = null;
       sink.dispose();
     },
   };

@@ -12,6 +12,20 @@ function contextConstructor(): AudioContextCtor | undefined {
   return g.AudioContext ?? g.webkitAudioContext;
 }
 
+let shared: AudioContext | null = null;
+
+/**
+ * The one AudioContext used by music and sound effects (created lazily, never closed). Returns null when this
+ * environment has no WebAudio (Node tests). Browsers keep it suspended until a user gesture.
+ */
+export function sharedAudioContext(): AudioContext | null {
+  if (shared && shared.state !== "closed") return shared;
+  const Ctor = contextConstructor();
+  if (!Ctor) return null;
+  shared = new Ctor();
+  return shared;
+}
+
 export class WebAudioSink {
   private ctx: AudioContext | null = null;
   private node: ScriptProcessorNode | null = null;
@@ -30,9 +44,8 @@ export class WebAudioSink {
 
   private ensure(): AudioContext | null {
     if (this.ctx) return this.ctx;
-    const Ctor = contextConstructor();
-    if (!Ctor) return null;
-    const ctx = new Ctor();
+    const ctx = sharedAudioContext();
+    if (!ctx) return null;
     const gain = ctx.createGain();
     gain.connect(ctx.destination);
     const node = ctx.createScriptProcessor(2048, 0, 2);
@@ -90,8 +103,7 @@ export class WebAudioSink {
       this.node.disconnect();
     }
     this.gain?.disconnect();
-    void this.ctx?.close().catch(() => undefined);
-    this.ctx = null;
+    this.ctx = null; // the context is shared with the sound effects and stays open
     this.node = null;
     this.gain = null;
   }

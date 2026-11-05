@@ -59,5 +59,5 @@ music.fadeOut(1.5); music.stop(); music.setVolume(0.8);
 ## Open
 
 - Which track the game picks for which screen/event (track index `byte $8CFE`, set by the music-select screen, disk-menu mode 4, `game-proper.md`); the title/intro and in-game assignment above is inferred from the module titles only.
-- Meaning of the flags words and the sound-effect channel sharing (`$11B4` and the `$1518` timers); sound effects are separate sample playbacks on the same Paula channels and are not part of this module.
+- Meaning of the flags words and the sound-effect channel sharing (`$11B4` and the `$1518` timers); sound effects are separate sample playbacks on the same Paula channels and are not part of this module: see `sfx.md` (the flags word names the two channels effects may take; `Music.setChannelMuted` models the channel muting).
 - The module playback has not been compared sample-for-sample with an emulator capture; correctness is checked structurally (periods, timing, pitch of synthetic modules) and by rendering without NaN.
