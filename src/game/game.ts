@@ -140,7 +140,7 @@ export class Game {
       }
       case "announce": {
         if (this.announce!.update(input)) {
-          const over = this.announce!.id === 1;
+          const over = this.announce!.id < 2;
           this.announce = null;
           if (over) this.openScenarioMenu();
           else this.stage = "map";

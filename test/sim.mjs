@@ -285,6 +285,26 @@ for (let sc = 0; sc < records.length; sc++) {
   check("tank requisition: refusal costs the fine", b.state.word(0x1429c) === 20 && b.state.signedLong(A.money) === money - fine);
 }
 
+// --- crime consequences ($10D00, $10D9E) ---------------------------------------------------------
+{
+  const hit = [];
+  const { state, world } = fresh(0, 13);
+  const sim = new Sim(world, { rng: createRng(13), demolishAt: (x, y) => hit.push([x, y]) });
+  state.setLong(0x142ce, 55);
+  state.setByte(0x144c6, 0); // no security: arson cannot be stopped
+  state.setByte(0x144bc, 6);
+  state.setLong(0x14472, state.long(0x14472) & ~8);
+  const morale = state.signedLong(A.morale);
+  sim.eventCrime();
+  check("crime 55: a building is bombed", hit.length === 1 && sim.messages.includes(0x119), JSON.stringify(sim.messages));
+  check("crime 55: morale falls", state.signedLong(A.morale) < morale);
+  state.setLong(0x142ce, 70);
+  state.setByte(0x144be, 1);
+  sim.sysFlags = 1;
+  sim.eventCrime();
+  check("crime 70: colony falls", sim.gameOver && sim.events.some((e) => e.kind === "announce" && e.id === 0));
+}
+
 // --- determinism ------------------------------------------------------------------------------------
 {
   const run = (seed) => {

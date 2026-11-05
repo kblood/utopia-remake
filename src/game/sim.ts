@@ -4,7 +4,7 @@
 // register widths (see sim-math.ts), quirks included.
 
 import { A, PERIOD, type GameState } from "./state.js";
-import { T, type World } from "./world.js";
+import { OBJECT_SLOTS, T, type World } from "./world.js";
 import { createRng, divsQ, divuQ, divuReg, mulu, muls, s16, s8, type Rng } from "./sim-math.js";
 import { GOOD_WEIGHT, JOB_POOL_TYPES, POWER_TYPES, RESEARCH_BITS, RESEARCH_INDEX, RESEARCH_SCALE, RESEARCH_THRESHOLD, STARVATION_LEVEL, TAX_MORALE, TAX_QOL } from "./sim-tables.js";
 
@@ -90,7 +90,7 @@ const TILE_FUEL = 0x3e;
 const MAX_POOL = 9;
 
 export type SimEvent =
-  | { kind: "announce"; id: number } // $E770 d1: 1 game over, 2 quality of life 80, 3 quality of life 90
+  | { kind: "announce"; id: number } // $E770 d1: 0 colony falls to crime, 1 game over, 2 quality of life 80, 3 quality of life 90
   | { kind: "invention"; bit: number } // $DF5A
   | { kind: "offer"; what: "colonists" | "scientists" | "tanks"; count: number; price: number; accepted: boolean };
 
@@ -595,7 +595,7 @@ export class Sim {
 
   // $10C72: crime consequences. The riot branches of $10D00/$10D9E (crime above 50) are not
   // ported.
-  private eventCrime(): void {
+  eventCrime(): void {
     const s = this.s;
     const crime = s.signedLong(V.crime);
     if (crime < 0) return;
@@ -609,6 +609,70 @@ export class Sim {
     s.setLong(V.deathsPending, dead);
     this.allocateJobs(0);
     if (s8(crime) <= 0x32) return this.msg(0x110);
+    const arson = this.crimeArson();
+    if (s8(crime) <= 0x3c) return this.crimeMessage(arson);
+    this.crimeMessage(this.crimeRiot());
+  }
+
+  private crimeMessage(index: number): void {
+    if (index !== 0) this.msg(index);
+  }
+
+  // $11A5C: the n-th used object record, n random below min(record count, 254).
+  private randomBuilding(): [number, number] | null {
+    const o = this.world.objects;
+    let skip = this.roll(Math.min(this.s.word(0x142c2), 0xfe));
+    for (let slot = 0; slot < OBJECT_SLOTS; slot++) {
+      const at = slot * 8;
+      if (o[at] === 0 && o[at + 1] === 0) continue;
+      if (skip-- === 0) return [o[at + 4], o[at + 5]];
+    }
+    return null;
+  }
+
+  // $10D00: arson. Returns the message index (0 = none).
+  private crimeArson(): number {
+    const s = this.s;
+    if (s.long(V.invention) & 8) return 0;
+    if (s.byte(0x144bc) === 0) {
+      if (this.roll(100) >= 0x28) return 0;
+      s.setByte(0x144bc, 6);
+    }
+    const limit = (s.byte(V.security_pct) * 2) & 0xff;
+    if (s8(this.roll(100) - limit) < 0) {
+      s.setByte(0x144bc, 0);
+      this.applyMorale(0x3e8);
+      return 0x11a;
+    }
+    s.setByte(0x144bc, (s.byte(0x144bc) - 1) & 0xff);
+    const spot = this.randomBuilding();
+    if (!spot) return 0;
+    this.demolishAt(spot[0], spot[1]); // $12332: the building is bombed
+    s.setWord(0x1346a, s.word(0x1346a) + 1);
+    this.applyMorale(-500);
+    return 0x119;
+  }
+
+  // $10D9E: unrest; after six rounds the colony falls (announcement 0, game over).
+  private crimeRiot(): number {
+    const s = this.s;
+    if (s.byte(0x144be) === 0) {
+      if (this.roll(100) >= 0x0a) return 0;
+      s.setByte(0x144be, 6);
+    }
+    const limit = (s.byte(V.security_pct) * 2) & 0xff;
+    if (s8(this.roll(100) - limit) < 0) {
+      s.setByte(0x144be, 0);
+      return 0x121;
+    }
+    const left = (s.byte(0x144be) - 1) & 0xff;
+    s.setByte(0x144be, left);
+    if (left === 0) {
+      this.events.push({ kind: "announce", id: 0 });
+      this.sysFlags |= SYS.gameOver;
+      return 0;
+    }
+    return this.roll(100) < (6 - left) * 10 ? 0x120 : 0;
   }
 
   // ---- monthly ---------------------------------------------------------------------------

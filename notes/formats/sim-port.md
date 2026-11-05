@@ -73,7 +73,6 @@ plausibility tests, there is no emulator comparison). **NOT PORTED** = skipped o
 | `$AC04` ship yard | spawns ships |
 | `$AF12/$B018` alien intelligence | not traced to the point of a faithful port |
 | events 1, 3, 8, 9, 12, 13, 15, 17 (event 11, tank requisition `$11280`, is ported with the Earth dialog and `SimOptions.destroyUnit` = `$4692`; event 4, mine collapse `$11090`, is ported: random mine record demolished through `SimOptions.demolishAt`, message `$DF`, morale -300) | alien/meteor/units/mine collapse (needs `$7372` demolish); event 5 is empty in the original |
-| crime consequences above level 50 (`$10D00`, `$10D9E`) | unit and building destruction |
 | `$15698` message timers, `$144BD` scroll countdown, `$15xxx` redraw flags, `$7342` redraw | UI only |
 
 ## Test results (npm test, scenario 0 and all ten starting states)
@@ -103,3 +102,12 @@ Test: `test/sim.mjs`.
 
 Unit bookkeeping (`$37CA`, `$4692`): a new unit raises `$1429C` (cap 99, message `$8F`) and the type count
 `$14254` (type 9) / `$14258` (type 10); destroying one lowers them, raises `$14294` and costs 50 morale.
+
+## Crime consequences (`$10C72` daily, ported in `Sim.eventCrime()`)
+
+Crime above 50 runs arson (`$10D00`): unless invention bit 3 is set, a 40% roll starts a six-round spell
+(`$144BC`); each round the security percentage (`$144C6`, doubled) decides whether the spell ends
+(+1000 morale, message `$11A`) or a random object record (`$11A5C`) is knocked down (`$12332` = demolish,
+damage counter `$1346A`++, -500 morale, message `$119`). Above 60 `$10D9E` runs unrest (`$144BE`): a 10%
+roll starts it, each round either the police win (`$121`), or it drains until the counter hits 0, which
+is announcement id 0 and game over (heading `$183`); otherwise message `$120` with chance (6-n)*10%.

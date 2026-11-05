@@ -1,5 +1,5 @@
 // Full-screen announcement dialog ($E770): a 64 x 64 portrait, a heading and a message.
-// id 1 = game over, 2 = quality of life 80, 3 = quality of life 90. Layout: notes/formats/screens-misc.md.
+// id 0 = colony falls to crime, id 1 = game over, 2 = quality of life 80, 3 = quality of life 90. Layout: notes/formats/screens-misc.md.
 
 import { COLOR, drawGameText, wrapText } from "../data/gamefont.js";
 import type { GameStrings } from "../data/gamestrings.js";
@@ -33,7 +33,7 @@ export class AnnounceScene {
 
     for (let y = 6; y < 194; y++) for (let x = 16; x < 304; x++) this.screen.pixels[y * 320 + x] = 0;
 
-    const heading = strings.get(id === 1 ? HEADING_GAME_OVER : HEADING_OTHER);
+    const heading = strings.get(id < 2 ? HEADING_GAME_OVER : HEADING_OTHER);
     drawGameText(disk, this.screen, heading, HEADING_X, HEADING_Y, COLOR.highlight);
     const message = wrapText(disk, strings.get(MESSAGES[id] ?? MESSAGES[0]), TEXT_WIDTH);
     drawGameText(disk, this.screen, message.text, TEXT_X, TEXT_Y, COLOR.text);
