@@ -205,7 +205,7 @@ for (let sc = 0; sc < records.length; sc++) {
   state.setLong(0x142d6, 1000000);
   state.setLong(0x142de, 0);
   const before = state.byte(A.techLevel);
-  const bits = state.long(0x14472);
+  const bits = state.long(0x14476);
   sim.research();
   check("research: funds spent", state.long(0x142d2) < 1000000 && state.long(0x142d6) < 1000000);
   check("research: progress made", state.long(0x142de) > 0);
@@ -214,7 +214,7 @@ for (let sc = 0; sc < records.length; sc++) {
   state.setLong(0x142de, 1000000);
   sim.research();
   check("research: level rises past threshold", state.byte(A.techLevel) === mid + 1 && mid >= before, `${before} ${mid} ${state.byte(A.techLevel)}`);
-  check("research: invention bits set", state.long(0x14472) !== bits);
+  check("research: invention bits queued", state.long(0x14476) !== bits);
   state.setWord(0x133f8, 0);
   const level = state.byte(A.techLevel);
   state.setLong(0x142de, 99999999);

@@ -89,5 +89,5 @@ centre (`$133F8` = 0) it only posts message `$EF`. Price = 25 + 10 x technology 
 Progress `$142DE` gains the scientist count (`$13142`) plus the spend of fund `$142D2` divided by the
 price and half of the spend of fund `$142D6` divided by the price (the same half also feeds
 `$142DA`). Reaching the per-level threshold (table `$B154`) raises the level (capped at 10), ORs the
-level's invention bits (`$B214`) into `$14472`, clears `$144C7`, and rewrites the scale bytes
+level's invention bits (`$B214`) into the queue `$14476` (`$1135A` then announces them one by one into `$14472`), clears `$144C7`, and rewrites the scale bytes
 `$145A3..$145A9` from tables `$12D56` / `$B251`. Test: `test/sim.mjs`.

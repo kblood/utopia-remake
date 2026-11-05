@@ -257,7 +257,7 @@ export class Sim {
   }
 
   // $AB0C: scientists turn the two research funds into progress; reaching the next threshold
-  // raises the technology level and unlocks the invention bits of that level.
+  // raises the technology level and queues the invention bits of that level (announced one at a time by $1135A).
   research(): void {
     const s = this.s;
     if (s.byte(V.power) >= 7) return;
@@ -292,7 +292,7 @@ export class Sim {
     if (level === 11) level = 10;
     s.setByte(A.techLevel, level);
     const index = level - 1;
-    s.setLong(V.invention, (s.long(V.invention) | RESEARCH_BITS[index]) >>> 0);
+    s.setLong(V.inventionQueue, (s.long(V.inventionQueue) | RESEARCH_BITS[index]) >>> 0);
     s.setByte(V.inventionDelay, 0);
     const scale = RESEARCH_INDEX[index];
     s.setByte(0x145a3, scale);
