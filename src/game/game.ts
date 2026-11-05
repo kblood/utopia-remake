@@ -8,6 +8,7 @@ import { loadMap, loadTileSet, readScenarioRecords, type ScenarioRecord } from "
 import type { Screen } from "../gfx/screen.js";
 import { loadSprites } from "../data/sprites.js";
 import { AnnounceScene } from "./announce.js";
+import { OfferScene } from "./offer.js";
 import { IntroScene, type Input } from "./intro.js";
 import { LanguageScene, type Language } from "./language.js";
 import { MapScene } from "./map.js";
@@ -16,7 +17,7 @@ import { applyGame, captureGame, readSlot, SAVE_SLOTS, slotSummaries, writeSlot 
 import { GameState } from "./state.js";
 import { World } from "./world.js";
 
-type Stage = "intro" | "language" | "scenario" | "map" | "disk" | "save" | "load" | "announce";
+type Stage = "intro" | "language" | "scenario" | "map" | "disk" | "save" | "load" | "announce" | "offer";
 
 export class Game {
   private stage: Stage = "intro";
@@ -25,6 +26,7 @@ export class Game {
   private strings: GameStrings | null = null;
   private menu: MenuScene | null = null;
   private announce: AnnounceScene | null = null;
+  private offer: OfferScene | null = null;
   private map: MapScene | null = null;
   private scenario = 0;
   private readonly records: ScenarioRecord[];
@@ -118,6 +120,21 @@ export class Game {
             this.announce = new AnnounceScene(this.disk1, this.strings!, map.screen, event.id);
             this.stage = "announce";
           }
+        }
+        if (map.sim.pending && !this.announce && this.stage === "map") {
+          this.offer = new OfferScene(this.disk1, this.strings!, map.sim.pending.offer);
+          this.stage = "offer";
+        }
+        break;
+      }
+      case "offer": {
+        const map = this.map!;
+        this.offer!.draw(map.screen);
+        const answer = this.offer!.update(input);
+        if (answer !== null) {
+          map.sim.resolveOffer(answer);
+          this.offer = null;
+          this.stage = "map";
         }
         break;
       }

@@ -110,6 +110,9 @@ export interface SimOptions {
   // $37CA at the end of the tank yard step: put a finished unit next to the yard at (x, y).
   // Returns false when no neighbouring cell is free. Without a unit layer the unit is only counted.
   spawnUnit?: (x: number, y: number, advanced: boolean) => boolean;
+  // When true an Earth offer waits in `pending` (and time stops) until resolveOffer() is called,
+  // instead of asking `decide`.
+  interactive?: boolean;
 }
 
 export class Sim {
@@ -124,6 +127,8 @@ export class Sim {
 
   private onWeek: (() => void) | undefined;
   private spawnUnit: (x: number, y: number, advanced: boolean) => boolean;
+  private readonly interactive: boolean;
+  pending: { offer: Offer; apply: (accepted: boolean) => void } | null = null;
 
   constructor(
     readonly world: World,
@@ -134,6 +139,7 @@ export class Sim {
     this.decide = options.decide ?? (() => false);
     this.onWeek = options.onWeek;
     this.spawnUnit = options.spawnUnit ?? (() => true);
+    this.interactive = options.interactive ?? false;
     if (this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
   }
 
@@ -143,6 +149,7 @@ export class Sim {
 
   // One video frame: advances the frame countdown and runs whatever became due.
   tick(): void {
+    if (this.pending) return;
     this.state.tickFrame();
     this.run();
   }
@@ -370,6 +377,26 @@ export class Sim {
     }
   }
 
+  // The $DECC dialog: answered by `decide`, or left pending for the interface.
+  private ask(offer: Offer, apply: (accepted: boolean) => void): void {
+    if (this.interactive) {
+      this.pending = { offer, apply };
+      return;
+    }
+    const accepted = this.decide(offer);
+    this.events.push({ kind: "offer", ...offer, accepted });
+    apply(accepted);
+  }
+
+  // Answer of the pending Earth dialog: true = first button.
+  resolveOffer(accepted: boolean): void {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = null;
+    this.events.push({ kind: "offer", ...pending.offer, accepted });
+    pending.apply(accepted);
+  }
+
   // $110FE: Earth offers colonists, 100 Gr each, population/4 of them.
   private eventColonistOffer(chance: number): void {
     const s = this.s;
@@ -378,12 +405,12 @@ export class Sim {
     const count = s.long(V.population) >> 2;
     const price = mulu(count, 100);
     if (((price - s.long(V.money)) | 0) >= 0) return;
-    const accepted = this.decide({ what: "colonists", count, price: 100 });
-    this.events.push({ kind: "offer", what: "colonists", count, price: 100, accepted });
-    if (!accepted) return;
-    s.setLong(V.money, s.long(V.money) - price);
-    this.add32(V.population, count);
-    this.add32(V.freeColonists, count);
+    this.ask({ what: "colonists", count, price: 100 }, (accepted) => {
+      if (!accepted) return;
+      s.setLong(V.money, s.long(V.money) - price);
+      this.add32(V.population, count);
+      this.add32(V.freeColonists, count);
+    });
   }
 
   // $1135A: the next queued invention is announced every sixth call.
@@ -440,17 +467,17 @@ export class Sim {
     this.msg(0xe5);
     const fine = divuReg(s.long(V.money), this.roll(8) + 2) & 0xfffe;
     this.msg(0xe6);
-    const accepted = this.decide({ what: "scientists", count, price: fine });
-    this.events.push({ kind: "offer", what: "scientists", count, price: fine, accepted });
-    if (!accepted) {
-      s.setLong(V.money, s.long(V.money) - fine);
-      return;
-    }
-    this.add32(V.jobAssigned + 4 * 7, -count);
-    this.add32(V.population, -count);
-    this.add32(V.scientists, -count);
-    this.allocateJobs(0);
-    this.applyMorale(-500);
+    this.ask({ what: "scientists", count, price: fine }, (accepted) => {
+      if (!accepted) {
+        s.setLong(V.money, s.long(V.money) - fine);
+        return;
+      }
+      this.add32(V.jobAssigned + 4 * 7, -count);
+      this.add32(V.population, -count);
+      this.add32(V.scientists, -count);
+      this.allocateJobs(0);
+      this.applyMorale(-500);
+    });
   }
 
   // $11058: eclipse (solar output 0 for 1..10 weeks).
