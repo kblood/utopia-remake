@@ -212,6 +212,11 @@ export class MapScene {
   // Keyboard ($15B4A): P and space toggle the pause ($156A9 bit 2).
   private key(key: string, input: Input): void {
     if (key === "p" || key === "P" || key === " ") this.sim.paused = !this.sim.paused;
+    // Raw key $22 (D): $31CC clears all eight pins, message $F2.
+    if (this.objects && (key === "d" || key === "D")) {
+      this.objects.clearMarkers();
+      this.messages.push(0xf2);
+    }
     // Keys 1-8 drop or lift a marker pin on the cell under the pointer (messages $71 / $72).
     if (this.objects && key >= "1" && key <= "8") {
       const cell = this.controls.pickCell(input.pointerX, input.pointerY);
