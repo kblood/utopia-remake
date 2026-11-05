@@ -9,6 +9,7 @@ import type { Screen } from "../gfx/screen.js";
 import { loadSprites } from "../data/sprites.js";
 import { AnnounceScene } from "./announce.js";
 import { OfferScene } from "./offer.js";
+import { createScreen, type ScreenKind, type ScreenScene } from "./screens/index.js";
 import { IntroScene, type Input } from "./intro.js";
 import { LanguageScene, type Language } from "./language.js";
 import { MapScene } from "./map.js";
@@ -17,7 +18,7 @@ import { applyGame, captureGame, readSlot, SAVE_SLOTS, slotSummaries, writeSlot 
 import { GameState } from "./state.js";
 import { World } from "./world.js";
 
-type Stage = "intro" | "language" | "scenario" | "map" | "disk" | "save" | "load" | "announce" | "offer";
+type Stage = "intro" | "language" | "scenario" | "map" | "disk" | "save" | "load" | "announce" | "offer" | "screen";
 
 export class Game {
   private stage: Stage = "intro";
@@ -27,6 +28,8 @@ export class Game {
   private menu: MenuScene | null = null;
   private announce: AnnounceScene | null = null;
   private offer: OfferScene | null = null;
+  private window: ScreenScene | null = null;
+  private frozen: Uint8Array | null = null;
   private map: MapScene | null = null;
   private scenario = 0;
   private readonly records: ScenarioRecord[];
@@ -54,6 +57,16 @@ export class Game {
     this.menu = new MenuScene(this.disk1, title, labels);
   }
 
+  // F1-F6, trade, staffing and intelligence windows over the frozen map frame.
+  private openScreen(kind: ScreenKind): void {
+    const map = this.map!;
+    if (this.stage !== "map" || map.sim.gameOver) return;
+    const window = createScreen(kind, { disk: this.disk1, world: map.world, sim: map.sim, strings: this.strings!, say: (n) => map.say(n) });
+    this.frozen = map.screen.pixels.slice();
+    this.window = window;
+    this.stage = "screen";
+  }
+
   private startScenario(index: number): void {
     const record = this.records[index];
     this.scenario = index;
@@ -62,7 +75,7 @@ export class Game {
       loadTileSet(this.disk1, this.disk2, record).tiles,
       new World(new GameState(this.disk2, record.block), loadMap(this.disk2, record)),
       this.strings!,
-      { onDiskMenu: () => this.openDiskMenu(), sprites: loadSprites(this.disk1, this.disk2, record) },
+      { onDiskMenu: () => this.openDiskMenu(), onScreen: (kind) => this.openScreen(kind), sprites: loadSprites(this.disk1, this.disk2, record) },
     );
     this.menu = null;
     this.stage = "map";
@@ -113,6 +126,13 @@ export class Game {
       }
       case "map": {
         const map = this.map!;
+        const keys = input.keys ?? [];
+        const fkey = keys.findIndex((k) => /^F[1-6]$/.test(k));
+        if (fkey >= 0) {
+          const name = keys.splice(fkey, 1)[0];
+          this.openScreen(name.toLowerCase() as ScreenKind);
+          if ((this.stage as Stage) === "screen") break;
+        }
         map.update(input);
         for (const event of map.sim.events.splice(0)) {
           if (event.kind === "invention") map.announceInvention(event.bit);
@@ -124,6 +144,19 @@ export class Game {
         if (map.sim.pending && !this.announce && this.stage === "map") {
           this.offer = new OfferScene(this.disk1, this.strings!, map.sim.pending.offer);
           this.stage = "offer";
+        }
+        break;
+      }
+      case "screen": {
+        const map = this.map!;
+        map.screen.pixels.set(this.frozen!);
+        const result = this.window!.update(input);
+        if (result === "close") {
+          this.window = null;
+          this.frozen = null;
+          this.stage = "map";
+        } else {
+          this.window!.draw(map.screen);
         }
         break;
       }

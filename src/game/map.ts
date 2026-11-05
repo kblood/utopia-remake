@@ -62,6 +62,7 @@ export class MapScene {
   private readonly cells: Uint16Array;
   private readonly state: World["state"];
   readonly sim: Sim;
+  readonly world: World;
   private readonly messages: Messages;
   readonly controls: Controls;
   readonly objects: ObjectLayer | null; // units, marker pins and effects; null without the sprite sheets
@@ -75,9 +76,10 @@ export class MapScene {
     private readonly tiles: Tile[],
     world: World,
     strings: GameStrings,
-    options: { onDiskMenu?: () => void; sprites?: SpriteSet } = {},
+    options: { onDiskMenu?: () => void; onScreen?: (kind: "trade" | "staff" | "intel") => void; sprites?: SpriteSet } = {},
   ) {
     this.messages = new Messages(disk, strings);
+    this.world = world;
     this.cells = world.cells;
     this.state = world.state;
     this.objects = options.sprites
@@ -92,6 +94,7 @@ export class MapScene {
       spawnUnit: (x, y, advanced) => (this.objects ? this.objects.units.spawnAtYard(x, y, advanced) !== null : true),
     });
     this.controls = new Controls(disk, world, builder, strings, (n) => this.messages.push(n), () => ({ x: this.scrollX, y: this.scrollY }), options.onDiskMenu);
+    if (options.onScreen) this.controls.onScreen = options.onScreen;
     decodePicture(disk, PICTURES.main, this.screen);
     this.background = this.screen.pixels.slice();
   }

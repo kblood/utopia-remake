@@ -29,7 +29,7 @@ const BUTTONS: { x: number; y: number }[] = [
   { x: 272, y: 139 },
 ];
 const BUTTON_SIZE = 16;
-export const BUTTON = { build: 0, demolish: 2, disk: 8 } as const;
+export const BUTTON = { build: 0, demolish: 2, trade: 4, staff: 6, intel: 7, disk: 8 } as const;
 
 const INVENTION = 0x14472;
 const NAME_STRING = 0x10; // type entry +$10: string index of the building name
@@ -61,6 +61,8 @@ export class Controls {
   private page = 0;
   private wasDown = false;
   private wasRight = false;
+  // Opens a window screen for icon buttons 4 (trade), 6 (staffing) and 7 (intelligence).
+  onScreen: (kind: "trade" | "staff" | "intel") => void = () => {};
 
   constructor(
     private readonly disk: Uint8Array,
@@ -151,6 +153,12 @@ export class Controls {
     } else if (button === BUTTON.demolish) {
       this.mode = this.mode === "demolish" ? "select" : "demolish";
       this.selection = null;
+    } else if (button === BUTTON.trade) {
+      this.onScreen("trade");
+    } else if (button === BUTTON.staff) {
+      this.onScreen("staff");
+    } else if (button === BUTTON.intel) {
+      this.onScreen("intel");
     } else if (button === BUTTON.disk) {
       this.onDiskMenu();
     }
