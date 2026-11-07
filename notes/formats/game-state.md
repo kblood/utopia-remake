@@ -25,10 +25,13 @@ Conventions: all values big-endian, `$` = hex, "word" = u16, "long" = u32. `T[i]
 | $39D42-$3B466 | entity lists (3.8) [V] |
 | $3B466-$3D3A6 | 1000 object records x 8 bytes [V] |
 | $3D3A6-$3F188 | per-cell flag bytes, 75 rows x $66 (102) [V] |
-| $3F256-$42D8A | map cells, 75 rows x $CC bytes (102 words) [V] |
+| $3F256-$42E19 | map rows, 75 x $CC bytes (100 cell words + 2 pad words per row) [V] |
 
-`$866E` is entered with d0 = mode; mode 1 jumps to `$875C` (load path, skips defaults). Otherwise it zeroes
-$14234-$144CB (664 bytes) and applies the defaults of section 3.10. [V]
+`$866E` is a state-initialization routine entered with d0 = mode. Mode 1 branches to `$875C`, which resets
+system/runtime support fields and returns; it is called after the selected save's areas have been read. Other
+modes zero `$14234-$144CB` (664 bytes) and apply the defaults of section 3.10. The actual Disk.4 load flow is
+the `$938D = 2` handler in `$87DC`: it reads the selected slot's area A/B extents into `$39E3A` and `$13034`,
+then runs post-load initialization. [V; traced in `game-proper.md` section 6]
 
 ---
 
@@ -62,18 +65,18 @@ Disk.2 scenario header = sector $3C0; 10 records of $40 bytes at +10; record wor
 | $13146 | long | security (job pool 8) | V |
 | $1314A | long | total population | V |
 | $1314E,$13156 | long | trade: tradable units / related, used by market code | H |
-| $13152 | 6 longs | goods stock array, index 0..5 (index 5 unused by weights) | V |
+| $13152 | 5 longs | goods stock array, index 0..4; total goods weight is the separate long at $13166 | V |
 | $13166 | long | total stored goods weight | V |
 | $1316A-$131E1 | 12 x 10 bytes | market table (see 6.9) | V |
 | $131E2-$13445 | 34 x 18 | object-type table (section 7.1) | V |
-| $13446-$13457 | $FF fill | | V |
-| $13458-$13469 | 18 bytes | scenario-specific text field (not documented) | - |
-| $1346A.. | various | scenario-specific numeric records; $13456 (alien record, 5.8), $13467 (read by $48EC and $E642), $1346A (read by meteor $11676) | H |
-| $134B6-$13562 | | per-scenario tables (differ between scenarios) | - |
+| $13446-$13455 | $FF fill | | V |
+| $13456-$13475 | 32 bytes | alien record (section 5.8); +$11 at $13467 is copied into spawned enemy +$A by $48EC and also read by $E642 (that reader's meaning is unresolved) | V |
+| $13476-$135B5 | 5 x 8 x 8 bytes | wave entries by alien level; eight entries per level, eight bytes per entry ($117EE) | V |
+| $134B6-$13562 | | another per-scenario table view; overlaps the wave-entry address range above | - |
 | $135B6 | long | spent last month (shown on finance screen) | V |
 | $135BA | long | money (Gr); clamped to 9,999,999 for display | V |
 | $135BE | long | research grant remaining (decrements by 100 monthly, message 101 when it hits 0) | V |
-| $135C2 | | related to marker/view state ($87DC/$8B02/$7E52) | H |
+| $135C2 | word | scenario index saved in the Disk.2 block at offset $58E; Disk.4 load indexes $8F96 + index*$40 | V |
 | $135C4/$135C5 | bytes | x,y of a map position (read by $3EDC, $C5BE) | H |
 | $13658.. $13E63 | | 9 repeating $5A-stride tables that differ per scenario (graphics/animation) | H |
 | $13EE6 | byte | flag read by $C5BE/$DA94/$E530 (written by $E530) | H |
@@ -124,7 +127,7 @@ Required staff = count(+$C) * 10; pool 6 uses *20. [V]
 | $142C6 | quality of life % (clamped 10..98) | V |
 | $142CA | construction spend this month (copied to $135B6 monthly) | V |
 | $142CE | crime level (signed), written by $10BC8 | V |
-| $144EC | morale, signed long, units 1/100 %, range +-10000, default 5000 | V |
+| $144EC | morale, signed long, units 1/100 %, default 5000; no enforced range | V |
 | $144F0 | pollution counter (default 50), reduced by research | V |
 | $144F4 | per-capita tax per month (default 10) | V |
 | $144F8 | tax chosen for next year (default 10); applied at year change | V |
@@ -174,10 +177,12 @@ Required staff = count(+$C) * 10; pool 6 uses *20. [V]
 | $1459F | day of month 1..28 (wraps at $1D to 1), default $1C | V |
 | $145A0 | month 0..11, default 5 | V |
 | $145A1 | weekday 0..6 | V |
-| $142A6 | year (long) | V |
+| $142A6 | elapsed-year counter (long; new-game clear leaves 0 in 2090; increments at each January rollover) | V |
 | $145A2 | difficulty 0 / $14 / $1E (default $1E) | V |
 | $144C1 | pending periodic bits: 0 daily, 1 weekly, 2 monthly, 3 yearly, 4 special | V |
 | $144C9 | frame sub-tick 0..8 | V |
+
+VBL handler `$2C34`: when `$156A8` bit 4 is clear, decrement `$14590` unless `$156A9` pause bit 2 is set. A decrement to zero reloads `$5A`, sets `$156A8` bit 7 (queued day), and skips the special test. Otherwise, if the resulting `$14590` is exactly `$2D`, `$2CA2` sets `$144C1` bit 4. The special test also runs while paused, so a paused countdown held at `$2D` re-sets the same bit. `$99D0` is its only clear; this is a single latched bit, so multiple unconsumed events coalesce. `$156A8` bit 4 freezes the whole timer block during dialogs and the build menu. [V: Disk.1 disassembly; one bounded RAM-staged live Gun A cycle is documented in `enemies.md` section 6; modal/pause gun behavior has not been captured in the running original.]
 
 ### 3.7 Statistics flow (VERIFIED copy mechanics, meaning H)
 `$A010` monthly: $142F2..$142FA -> $142E2.. (this month); accumulate into $14316..; `$A096` yearly: $14316.. ->
@@ -194,6 +199,8 @@ $14302.. and zero $1431A/$14326; `$99C4` copies $14376->$1436A etc. before month
 | alien sprite | $144A8 | | 1 | | V |
 | meteor | $1449C | | 1 | | V |
 
+Special sprite animation fields (static Disk.1 trace, `$333A` at `$35C8..$35F8`): when `$144A8` is nonzero and pause bit 2 of `$156A9` is clear, the main-loop pass reads word `$144A4`, increments its low byte, wraps low-byte `$0B` to word zero, stores the word, and writes table `$11718[index]` to alien `+$5` (`$144AD`). The table bytes are `00 01 02 03 02 03 02 03 02 01 00`; the index advances once per `$333A` pass and is not visibility-gated (the later `$3694` call builds the draw entry). `$144A5` is the low byte of the word `$144A4`, not meteor `+$9`; the meteor record occupies `$1449C..$144A3`. The counter is not reset when `$11476` creates the alien. The captured values at frames 23716/20/25/30 (`$144A4` = 5/6/7/8; alien `+$5` = 3/2/3/2) match the traced transition. A nonzero high byte in `$144A4` is not covered by the capture; table lookup uses the full word and such a value is outside the validated animation range. The remake draws the active alien record (type `$13` at `$144A8`) on the map from these bytes through a read-only adapter (`src/game/alien-sprite.ts`); `$3694` statically confirms signed pixel offsets at `+3`/`+4` and the frame-selected window-edge checks (map-rendering.md 7.2); drawing writes nothing. Active `$144A8` / `$1449C` records in a Disk.4 image are accepted by `validateSpecialSlots` only inside the traced domain (alien: type `$13`, on-map cell, `$144A4` 0..10, frame 0..3; meteor: type `$15`, on-map cell, frame 0, countdown 4..120 step 4) and otherwise refused as `special-state`; accepted records are hydrated inertly by `Aliens` and drawn, other bytes (meteor `+7`) are preserved uninterpreted (static trace and synthetic tests only). The meteor record (`$1449C`, type `$15`) is drawn the same way (`src/game/meteor-sprite.ts`, read-only, polled at draw time; map-rendering.md 7.2): `+1`/`+2` cell, `+3`/`+4` signed offsets, `+5` frame, `+6` a signed byte that is both the countdown and the drawing lift (`$78` at creation, -4 per unpaused pass, impact at 0), `+7` not read by the inspected draw path (static trace, no emulator comparison). Creation writes `+3..+7` = 0 before `+6` = `$78`. Not resolved: the original's paused-meteor control-flow anomaly and visual parity.
+
 Unit record fields (own units, from $333A/$38E2/$11AE6): +0 type, +1 x, +2 y, +3/+4 sub-cell offsets, +5 direction 0..7,
 +6/+7 velocity, +8 hit points, +9 mode, +A tech level, +B/+C target x,y, +D/+E fuel/counter, +$10..$12 recent directions,
 +$14/$16 pointer to the cell flag byte. [V for positions and use, H for fine names.]
@@ -206,15 +213,20 @@ Map cell word: low 10 bits tile id, $0400 animated, $0800 and $8000 resource fla
 $7F = special marker tile (7.3). [V]
 
 ### 3.9 System flag bytes
-$156A8: bit0 day tick pending, bit2 screen-busy, bit3, bit5; $156A9: bit2 pause (skips $99C4), bit4, bit5, bit6 enemy
-ground moves, bit7 own units move; $156AA: bit2 (suppress unit bonus in QoL), bit3 game over, bit4/bit5 QoL >=80/>=90
-announced, bit7 strike. $156AB: draw-mode byte ($15 while drawing text, then 1). [V]
+$156A8: bit7 queued day (set at `$2C8E`, cleared by `$564A`), bit4 freezes the VBL timer block during dialogs/build menu; bit2 screen-busy; bit0 is set by each VBL at `$2C58` and cleared by UI paths, with its remaining role not fully mapped; bits3/5/6 are partly used. `$156A9`: bit2 pause (skips `$99C4`), bit4, bit5, bit6 enemy
+ground moves, bit7 own units move; `$156AA`: bit0 is set by `$866E` then cleared by `$80A6` on ordinary game start (runtime meaning otherwise unmapped), bit1 attack-wave pending, bit2 no-unit-bonus (blocks event 9), bit3 game over, bit4/bit5 QoL >=80/>=90
+announced, bit7 Tutorial mode (set by `$8114`; skips daily events/eclipses and affects QoL). $156AB: draw-mode byte ($15 while drawing text, then 1). [V]
 
 ### 3.10 Defaults set by $866E [V]
 $144CC: 6 longs of 100; $144E4/$144E8 = $2F, $144E6/$144EA = $21 (view origin); $144EC = 5000; $144F0 = 50;
 $144F4 = $144F8 = 10; eight 10-byte marker slots at $14540 with byte +2 = $FF; $14590 = 90, $14591 = 1, $14592 = 1;
 date "28/06/2090" (day $1C, month 5, weekday 0, difficulty $1E); $14634/$14636 = $FFFF; $15698 = $FF;
 $156A8 = $94, $156A9 = 2, $156AA = 1, $156AB = 1.
+
+The game image's initialized bytes outside the `$866E` reset range include `$1453E=2`, marker ids 1..8 at `$14540+10n`,
+`$145A3=1`, and weapon table `$145A4..$145A9 = 00 02 03 04 03 01`. A fresh `GameState` recreates these image defaults;
+`GameState.fromSnapshot` does not apply them and remains byte-exact. On the ordinary map exit `$802C` clears `$156A8` bits 2
+and 4 but leaves bit 7 queued, so the first `$4D1C` consumes a day before the first VBL wait (game-proper.md, fresh entry).
 
 ---
 
@@ -223,17 +235,18 @@ $156A8 = $94, $156A9 = 2, $156AA = 1, $156AB = 1.
 - VBL decrements $14590 (90 frames, about 1.8 s PAL); at 0 it sets bit7 of $156A8 (the original code tests the byte;
   see game-proper.md) and `$4D1C` calls `$564A`. [V]
 - `$564A`: day++ (wrap to 1 at $1D); weekday++ mod 7; sets $144C1 bit0 (daily); weekday wrap sets bit1 (weekly); day wrap sets
-  bit2 (monthly) and month++ mod 12; month wrap sets bit3 (yearly) and year++ ($142A6). Date string updated with
-  digit-increment helper `$571E`. [V] Days per month = 28, months = 12, so year = 336 days.
-- `$99C4` (main loop, skipped when $156A9 bit2 set) performs the work in 5.1. [V]
+  bit2 (monthly) and month++ mod 12; month wrap sets bit3 (yearly) and year++ ($142A6). The displayed date string at
+  `$14594` is incremented independently by digit helper `$571E`, so its initial year 2090 is separate from the elapsed
+  counter. [V] Days per month = 28, months = 12, so year = 336 days.
+- `$99C4` (main loop, skipped when $156A9 bit2 set) performs the work in 5.1. The preceding `$4D1C` call to `$564A` has no pause guard: a queued date still advances while paused, and the resulting `$144C1` period bits remain for `$99C4` to consume after resume. [V: caller/routine control flow; synthetic regression only, no pause capture]
 
 ---
 
 ## 5. Periodic simulation
 
 ### 5.1 Order inside $99C4 [V]
-1. bit4: `$11D34` (a0=$13248, d1=$1F, d7=$1310E).
-2. Daily: if day==1 `$A8E8`; `$11D34` (a0=$1325A, d1=$F, d7=$13112); `$ACE2` ship fuel; `$B086` game over; $144BD countdown;
+1. Clear pending `$144C1` bit 4; if set, `$11D34` (a0=$13248 = the +$C total word of T[5] (row start $1323C), the DBRA budget, not a row base; d1=$1F, d7=$1310E; Gun A).
+2. Daily: if day==1 `$A8E8`; `$11D34` (a0=$1325A = T[6]+$C, d1=$F, d7=$13112); `$ACE2` ship fuel; `$B086` game over; $144BD countdown;
    $15698 message timers; `$10E1E` event scheduler; `$AF12` alien intelligence.
 3. Weekly: `$7000` construction countdown; `$4798`; `$10FCA` eclipse; `$12510`; `$127A0`; $144B2--.
 4. Monthly: `$9B20` = `$A86A` (trade income), `$A802` (market walk), `$9E3A`, `$9E98` (food), `$9DBA` (housing), `$9CDA` (air/finance),
@@ -304,7 +317,7 @@ spend counter -> $135B6. Yearly: tax $144F4 = $144F8; if the new rate exceeded t
 NOTE: the sign looks inverted for a tax rise (morale rises); possibly an original quirk. [V code, H intent]
 
 ### 5.11 Morale (`$A246`, `$A270`) [V]
-`$A246(d0)`: m = $144EC; d2 = 100 - |m|/100; m += d2*d0/100.
+`$A246(d0)`: `m = signedLong($144EC)`; `f = signedWord(100 - trunc(abs(m)/100))`; `delta = trunc(signedWord(d0) * f / 100)`; `$144EC = m + delta` (long addition). The equations assume both `DIVS.W` quotients fit signed words; extreme values take the 68000 division-overflow path. Divisions truncate toward zero. There is no clamp; the signed-word factor can reach zero near +/-10000 and reverse sign outside that region. This is not a proven global bound on morale. See `original-rng-callers.md` section 6.3 for the RNG implications.
 `$A270` monthly: sports T[32].C: min(count,5)*100; grant/10 if $135BE != 0; -500 if Command Centre count 0; tax table $B178[rate]
 (rate 0..20: +500 step -50, 0 at 10 and 11, then -50..-450); virus $144B7 * -100; if m < 0, m += 1.
 
@@ -386,10 +399,12 @@ Bytes: +0 =0 (1 on the five special entries), +1 = 1 (4 on specials), +2 build t
 ### 7.2 Object records ($3B466, 8 bytes, 1000 slots) [V]
 +0 word tile id (0 = free slot); +2 byte copy of T +1 (or target-tile low part during construction); +3 byte
 active flag ($FF active, 0 offline, from T +3); +4 x; +5 y; +6 byte state counter; +7 byte.
+Occupancy is by tile word only (0 = free). `$142C2` counts used records, and several routines use it as a budget over non-empty records rather than as a physical slot index: `$72C0` scans the object array in slot order and stops after examining that many occupied records. Thus a sparse record above that counted prefix can be invisible to coordinate-based building lookup even when its tile word is nonzero. Ordinary placement allocates the first free slot; demolition frees records in place. Disk.4 restore (`World.fromSnapshot`) preserves every saved physical slot, including sparse or inconsistent states.
 Construction site: word $32, word +2 = target tile, +4/+5 = x,y, +6 = weeks remaining (from T +2), decremented by `$7000` weekly;
 at 0 `$703A` converts to the real building, returns the construction colonists, increments T +$A and +$C.
 Mine (tile $60) +6 = count of the 3x3 neighbouring cells with flag $8000 (richness 0..9); fuel type (tile $3E) +6 = count of
-cells with flag $0800; tiles $0F/$1F: +6 = $FF or the x coordinate (random phase).
+cells with flag $0800; solar tiles $0F/$1F set +6 to 1 when `$2E00` reads `$DFF006` bit 0 as set, otherwise `$FF` (static
+trace `$6E3A-$6E56`). This phase byte is unrelated to x, which remains at +4; exact raster parity in a live startup is unverified.
 Placing: check funds, take T+4 colonists from free (`$6BF4`, `$6C92`), subtract cost T+6 from money, add to $142CA.
 Demolish (`$7372`): construction sites removable; ground clearing tiles $61, $94-$9B, $38 ($9E result); others msg 88;
 stored-type buildings reduce +E proportionally; farm tiles $41/$42 return 10 workers; warehouse tile $44 reduces stocks and
@@ -418,9 +433,12 @@ are UI handlers on the same state; only `$CC8E`/`$D0D8` (trade) and `$6BA2` (bui
 ---
 
 ## 9. Save format (Disk.4)
-Record +$10 = area A, 73 sectors (37376 bytes) at $39E3A: entity lists, object records, flag map, map cells
-(covers through $42D8A, with slack to $4303A). Record +$14 = area B, 11 sectors ($1600 bytes) = $13034..$14633, i.e. the
+Record +$10 = area A, 73 sectors (37376 bytes) at $39E3A: entity lists, object records, flag map, map rows
+(through $42E19 including the final row's two pad words, with slack to $4303A). Record +$14 = area B, 11 sectors ($1600 bytes) = $13034..$14633, i.e. the
 scenario block followed by the variable block verbatim. [V extents, H slack]
+The original load handler `$87DC` mode 2 copies the saved word `$1453E` into the disk-check request at `$8D00`; `$8A5A` compares it with the supplied scenario disk's header word at `+8`. It then reads `$135C2` as the scenario index and selects `$8F96 + index*$40` (`$888A-$88AA`). The supplied Disk.2 scenario blocks store their own index at offset `$58E`, which loads at `$135C2`. The loader writes `$8F96 + index*$40` to `$1453A` before loading selected scenario resources; this pointer is inside area B and changes the runtime state copy, not the input file. These are static Disk.1/Disk.2 findings. The remake activation uses the saved values as authoritative; map matching is advisory only when the saved index is invalid.
+Observation 2026-11-06 (Copperline, memory read after a UI "SAVE COMPLETE", slot 0 `REFRUN`): header record extents A 0-72, B 74-84; area A/B bytes captured from `$39E3A`/`$13034`. Object count word read 20, other entity counts 0. One capture only, not a persisted Disk.4; see [game-proper.md](game-proper.md) section 6.
+Status: `src/data/disk4-entities.ts` reads the section 3.8 lists from a decoded save as fixed slot arrays (raw bytes plus the documented fields only; read-only, synthetic tests, not wired). It records two static findings: the `+$14` long of every ship-list record is the per-cell flag-byte pointer (`$387E`/`$49E8` -> `$497E`, VERIFIED statically; later updates untraced), and a type 17 record has a 24-bit enemy-record address in `+$D..+$F` (no class/fuel; building-screens.md 3.6). Details in game-proper.md.
 
 ---
 
