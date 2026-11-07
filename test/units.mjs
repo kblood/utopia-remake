@@ -17,6 +17,7 @@ if (!fs.existsSync(disk1Path) || !fs.existsSync(disk2Path)) {
 const { readScenarioRecords, loadMap, MAP_WIDTH, MAP_HEIGHT } = await import("../dist/data/scenario.js");
 const { loadSprites, SPRITE_TYPES } = await import("../dist/data/sprites.js");
 const { UnitSystem, UNIT_BASIC, UNIT_ADVANCED, NO_TARGET } = await import("../dist/game/units.js");
+const { cellFlagIndex } = await import("../dist/game/cell-flags.js");
 const { ObjectLayer } = await import("../dist/game/objects.js");
 const { Screen } = await import("../dist/gfx/screen.js");
 
@@ -111,7 +112,7 @@ function stepsToArrive(sys, unit, limit = 5000) {
   const marked = [];
   for (let i = 0; i < cells.length; i++) if (cells[i] & OCCUPIED) marked.push(i);
   check("only the unit's cell stays reserved", marked.length === 1 && marked[0] === u.y * MAP_WIDTH + u.x);
-  check("flag byte follows", sys.flags[u.y * MAP_WIDTH + u.x] === 4 && sys.flags[b.y * MAP_WIDTH + b.x] === 0);
+  check("flag byte follows", sys.flags[cellFlagIndex(u.x, u.y)] === 4 && sys.flags[cellFlagIndex(b.x, b.y)] === 0);
 
   // A straight order uses a single direction.
   const dirs = [];
@@ -283,15 +284,15 @@ function stepsToArrive(sys, unit, limit = 5000) {
   edge.drawAfterCell(s4, 47, 33, 7, 2);
   check("a unit moving out of the last column is hidden", s4.pixels.every((v) => v === 0));
 
-  // Effects: created with frame 4, freed after it counts below 0 (one pass = 2 frames here).
+  // Effects: created with frame 4, freed after it counts below 0. ObjectLayer.update() is one main-loop pass.
   const fx = new ObjectLayer(set, [], cells, () => {});
   fx.spawnEffect(0x12, 50, 40);
-  let frames = 0;
-  while (fx.effects.length > 0 && frames < 100) {
+  let passes = 0;
+  while (fx.pool.count > 0 && passes < 100) {
     fx.update();
-    frames++;
+    passes++;
   }
-  check("an effect lives 5 passes", frames === 10, `${frames} frames`);
+  check("an effect lives 5 passes", passes === 5, `${passes} passes`);
 
   // Neighbour tiles in front of a moving unit are drawn first, and only once.
   const flat = [{ rows: 15, planes: new Uint8Array(24 * 15) }];
@@ -301,9 +302,11 @@ function stepsToArrive(sys, unit, limit = 5000) {
   const m = nb.units.spawn(UNIT_BASIC, 49, 36, 3);
   m.dx = 2;
   m.dy = 2;
-  nb.drawAfterCell(new Screen(), 47, 33, 2, 3);
+  const nbPass = nb.beginFrame(47, 33); // the frame pass owns the marks (the layer keeps no per-frame state)
+  nbPass.drawAfterCell(new Screen(), 2, 3);
   check("facing 3 draws (vx+1,vy), (vx,vy+1), (vx+1,vy+1) in advance", calls.length === 3, `${calls.length}`);
-  check("each is skipped by the cell loop later, once", nb.claimed(3, 3) && !nb.claimed(3, 3) && nb.claimed(2, 4) && nb.claimed(3, 4));
+  check("each is skipped by the cell loop later, once", nbPass.claimed(3, 3) && !nbPass.claimed(3, 3) && nbPass.claimed(2, 4) && nbPass.claimed(3, 4));
+  check("the layer itself holds no marks: a fresh pass of the same frame claims nothing", !nb.beginFrame(47, 33).claimed(3, 3));
   const standing = new ObjectLayer(set, flat, cells2, (t, x, y) => calls.push([x, y]));
   calls.length = 0;
   standing.units.spawn(UNIT_BASIC, 49, 36, 3);

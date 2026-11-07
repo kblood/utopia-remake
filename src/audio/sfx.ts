@@ -8,13 +8,14 @@
 //
 // Layers:
 //  - parseSfxBank / renderEffect: pure decoding and mixing, DOM free (used by the tests).
-//  - SfxScheduler: the 50 Hz channel/timer model of $11B4 + the vertical-blank queue at $1264, DOM free.
+//  - SfxScheduler (sfx-scheduler.ts): the 50 Hz channel/timer/ownership model of $11B4 + the vertical-blank starter at $1264, DOM free.
 //  - createSfx: WebAudio output, shares the AudioContext of the music (webaudio.ts).
 
 import { SECTOR_SIZE } from "../data/picture.js";
 import { PAL_CLOCK } from "./modplayer.js";
 import { TRACKS } from "./tracks.js";
-import { sharedAudioContext } from "./webaudio.js";
+import { SfxScheduler, type MusicPair, type SfxVoice } from "./sfx-scheduler.js";
+import { sharedAudioContext, sharedPaulaInput } from "./webaudio.js";
 
 /** Effect ids = index in the descriptor table at $1490 of the game image. */
 export const SFX = {
@@ -163,94 +164,41 @@ export function renderEffect(effect: SfxEffect, options: RenderOptions): { left:
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Channel model of $11B4 / $1264
+// Channel model of $11B4 / $1264: src/audio/sfx-scheduler.ts (pure, frame-stepped, event based)
 
-export interface SfxVoice {
-  effectId: number;
-  /** Amiga channel 0..3. */
-  channel: number;
-  /** Frame (tick) in which the voice starts; the VBL handler starts at most one queued voice per frame. */
-  startFrame: number;
-  /** Frame in which the channel is switched off again (`startFrame + frames - 1`). */
-  endFrame: number;
-  volume: number;
-}
-
-/**
- * The game's allocation rules, in frames of the 50 Hz vertical blank (`$11B4`, `$1264`):
- *  - a request picks the channel and goes into a one-entry queue per channel; the VBL handler starts it in the
- *    next frame, one new voice per frame (lowest channel first);
- *  - "busy" means the channel timer is non-zero, which is only the case once a voice has really started, so two
- *    requests in the same frame get the same channel and the second replaces the first (the double alert at
- *    `$117AE`/`$117C0` is therefore a single alert);
- *  - while music plays, only the two channels named by the track's flags word may be used (first one preferred);
- *    if both are busy the request is dropped. Without music all four channels are candidates, lowest first.
- */
-export class SfxScheduler {
-  private queue: (SfxVoice | null)[] = [null, null, null, null];
-  private active: (SfxVoice | null)[] = [null, null, null, null];
-  private lastStart = -1;
-
-  constructor(private readonly bank: SfxBank) {}
-
-  /**
-   * Request effect `id` during frame `frame`. `musicChannels` = the pair from the playing track's flags word, or
-   * null when no music plays. Returns the queued voice, or null when the request is dropped or disabled.
-   * `replaced` receives a voice that this request overwrote in the queue.
-   */
-  request(id: number, frame: number, musicChannels: readonly [number, number] | null, volume?: number, replaced?: (v: SfxVoice) => void): SfxVoice | null {
-    const effect = this.bank.effects[id];
-    if (!effect) return null;
-    this.settle(frame);
-    const candidates = musicChannels ?? [0, 1, 2, 3];
-    const channel = candidates.find((c) => this.active[c] === null);
-    if (channel === undefined) return null;
-    const old = this.queue[channel];
-    if (old) {
-      replaced?.(old);
-      this.queue[channel] = null;
-    }
-    let startFrame = Math.max(frame + 1, this.lastStart + 1);
-    if (old) startFrame = old.startFrame; // takes over the pending slot
-    const voice: SfxVoice = {
-      effectId: id,
-      channel,
-      startFrame,
-      endFrame: startFrame + effect.frames - 1,
-      volume: Math.max(0, Math.min(64, volume ?? effect.volume)),
-    };
-    this.queue[channel] = voice;
-    this.lastStart = Math.max(this.lastStart, startFrame);
-    return voice;
-  }
-
-  /** Whether `channel` has a voice that has started and not yet ended at `frame` (timer non-zero). */
-  busy(channel: number, frame: number): boolean {
-    this.settle(frame);
-    return this.active[channel] !== null;
-  }
-
-  /** Move queued voices whose start frame has come to the active list and retire finished ones. */
-  private settle(frame: number): void {
-    for (let c = 0; c < 4; c++) {
-      const a = this.active[c];
-      if (a && a.endFrame <= frame) this.active[c] = null;
-      const q = this.queue[c];
-      if (q && q.startFrame <= frame) {
-        this.queue[c] = null;
-        if (q.endFrame > frame) this.active[c] = q;
-      }
-    }
-  }
-}
+export { SfxScheduler, SFX_CHANNELS } from "./sfx-scheduler.js";
+export type { SfxVoice, SfxEvent, SfxTimingBank, VoiceStatus, MusicPair } from "./sfx-scheduler.js";
 
 // ---------------------------------------------------------------------------------------------------------------
 // WebAudio output
 
-export interface SfxMusicLink {
-  /** Index of the playing track or -1 (see Music.current). */
+/** A music state change as `Music.onChange` reports it (structurally the same as `MusicChange` in music.ts). */
+export interface SfxMusicChange {
+  /** The original wrote DMACON `$F` at this moment (`$1062` off, the track loader `$110A`, stop): all effect sounds stop, their timers go on. */
+  readonly dmaOff: boolean;
+  /** The music-active bit after the change. */
+  readonly active: boolean;
+  /** The selected track after the change, or -1. */
   readonly current: number;
+}
+
+export interface SfxMusicLink {
+  /** Index of the selected track or -1 (see Music.current); a paused track stays selected. */
+  readonly current: number;
+  /** Music-active bit (see Music.active): only while it is set do the effects share the track's two channels. */
+  readonly active: boolean;
   setChannelMuted(channel: number, muted: boolean): void;
+  /**
+   * Optional: be told of every music state change. Without it the state is only sampled at each `play`, so a change that
+   * leaves the channel pair as it was (a reload of a track with the same pair) cannot be seen.
+   */
+  onChange?(listener: (change: SfxMusicChange) => void): () => void;
+  /**
+   * Optional: audio timeline tick. Called at the start of every rendered block with the AudioContext time of that block
+   * (also while the music is paused); the effect model advances with it, so a module voice is handed back on the audio clock
+   * instead of a wall-clock timer. Without it the model only advances at API calls and `sync()`.
+   */
+  onBlock?(listener: (audioTime: number) => void): () => void;
 }
 
 export interface SfxOptions {
@@ -270,13 +218,20 @@ export interface Sfx {
    * Call from a user-gesture handler the first time so the browser lets audio start.
    */
   play(id: number, volume?: number): void;
-  /** The "effects on/off" switch of the original's music menu (default on). */
+  /**
+   * The "effects on/off" switch of the original's music menu (default on). Switching off stops every sounding effect at
+   * once and clears the channel timers (`$10BC`); entries that were queued but not started are held and start when the
+   * effects are switched on again.
+   */
   setEnabled(enabled: boolean): void;
   readonly enabled: boolean;
   /** Master volume 0..1. */
   setVolume(volume: number): void;
   /** Call from a gesture handler to make sure the AudioContext is running. */
   resume(): void;
+  /** Advance the channel model to the audio clock and apply module ownership (called automatically by the music's block tick and by every other call). */
+  sync(): void;
+  /** Stop every effect, cancel everything that is scheduled, give the module its voices back and detach from the music. Later calls do nothing. */
   dispose(): void;
 }
 
@@ -287,21 +242,45 @@ export function musicChannels(track: number): [number, number] | null {
   return [(entry.flags >> 8) & 3, entry.flags & 3];
 }
 
+/**
+ * The channel restriction `$11B4` applies: tests bit 1 of `$1581` (music active), not the loaded track `$1580`. Active music
+ * gives the track's pair; inactive music (never started, or switched off with `$1062`) and no link at all give null = all four
+ * channels are candidates, even when a track is still selected.
+ */
+export function effectChannelsFor(link: Pick<SfxMusicLink, "current" | "active"> | undefined): [number, number] | null {
+  return link !== undefined && link.active && link.current >= 0 ? musicChannels(link.current) : null;
+}
+
+function samePair(a: MusicPair, b: MusicPair): boolean {
+  return a === b || (a !== null && b !== null && a[0] === b[0] && a[1] === b[1]);
+}
+
+/**
+ * WebAudio projection of the channel model (`SfxScheduler`). The model owns all state; this layer holds exactly one
+ * cancellable `AudioBufferSourceNode` per queued or sounding voice and changes it only in answer to model events, so there are
+ * no wall-clock timers and nothing that can fire after a voice was replaced, cut, disabled or disposed. Time is the
+ * AudioContext clock (frames of 1/50 s); a suspended context stops the clock, the nodes and the module's blocks together.
+ */
 export function createSfx(disk1: Uint8Array, _disk2?: Uint8Array, options: SfxOptions = {}): Sfx {
   const bank = parseSfxBank(disk1);
-  const scheduler = new SfxScheduler(bank);
-  let enabled = true;
+  const engine = new SfxScheduler(bank);
+  const link = options.music;
   let volume = Math.max(0, Math.min(1, options.volume ?? 1));
   let master: GainNode | null = null;
+  let disposed = false;
+  /** Newest block time seen (ScriptProcessor `playbackTime`): the model runs on the timeline the module is rendered on. */
+  let blockTime = 0;
   const buffers = new Map<string, AudioBuffer>();
-  const pending = new Map<SfxVoice, AudioBufferSourceNode>();
-  const muteCount = [0, 0, 0, 0];
+  const nodes = new Map<SfxVoice, AudioBufferSourceNode>();
+  /** Mute state this layer last pushed into the link, per channel. */
+  const pushed = [false, false, false, false];
+  const detach: (() => void)[] = [];
 
   const output = (ctx: AudioContext): GainNode => {
     if (!master) {
       master = ctx.createGain();
       master.gain.value = volume;
-      master.connect(ctx.destination);
+      master.connect(sharedPaulaInput(ctx));
     }
     return master;
   };
@@ -320,58 +299,115 @@ export function createSfx(disk1: Uint8Array, _disk2?: Uint8Array, options: SfxOp
     return b;
   };
 
+  const frameOf = (ctx: AudioContext): number => Math.floor(Math.max(ctx.currentTime, blockTime) * SFX_FRAME_RATE + 1e-6);
+
+  /** Stop and forget the node of `voice` (a node that was never started or already ended is fine). */
+  const silence = (voice: SfxVoice): void => {
+    const node = nodes.get(voice);
+    if (!node) return;
+    nodes.delete(voice);
+    node.onended = null;
+    try {
+      node.stop();
+    } catch {
+      /* already ended */
+    }
+    try {
+      node.disconnect();
+    } catch {
+      /* already disconnected */
+    }
+  };
+
+  /** (Re)schedule the node of `voice` at its start frame. */
+  const schedule = (ctx: AudioContext, voice: SfxVoice): void => {
+    silence(voice);
+    const node = ctx.createBufferSource();
+    node.buffer = buffer(ctx, bank.effects[voice.effectId], voice);
+    node.connect(output(ctx));
+    node.onended = () => {
+      if (nodes.get(voice) === node) nodes.delete(voice);
+      node.disconnect();
+    };
+    nodes.set(voice, node);
+    node.start(Math.max(ctx.currentTime, voice.startFrame / SFX_FRAME_RATE));
+  };
+
+  /** Mirror the model's module-ownership words into the music (only what changed). */
+  const syncModule = (): void => {
+    if (!link) return;
+    for (let ch = 0; ch < 4; ch++) {
+      const mute = !engine.moduleEnabled(ch);
+      if (mute === pushed[ch]) continue;
+      pushed[ch] = mute;
+      link.setChannelMuted(ch, mute);
+    }
+  };
+
+  /** Apply the model's pending events to the audio graph, then the module ownership. */
+  const flush = (ctx: AudioContext | null): void => {
+    for (const e of engine.take()) {
+      if (e.type === "queued") {
+        if (ctx) schedule(ctx, e.voice);
+      } else if (e.type === "drop" || e.type === "cut") {
+        silence(e.voice);
+      } else if (e.type === "end" && e.reason !== "expired") {
+        silence(e.voice);
+      }
+    }
+    syncModule();
+  };
+
+  /** Advance to the audio clock; `time` is a block time from the music (optional). */
+  const pump = (time?: number): void => {
+    if (disposed) return;
+    const ctx = sharedAudioContext();
+    if (!ctx) return;
+    if (time !== undefined && time > blockTime) blockTime = time;
+    engine.advanceTo(frameOf(ctx));
+    flush(ctx);
+  };
+
+  /** Without a change hook the music state is sampled; a pair that differs from the model's is a switch-off or a reload. */
+  const observeMusic = (frame: number): void => {
+    const pair = effectChannelsFor(link);
+    if (samePair(pair, engine.music)) return;
+    engine.musicChanged(frame, pair, engine.music !== null);
+  };
+
+  if (link?.onChange) {
+    detach.push(
+      link.onChange((change) => {
+        if (disposed) return;
+        const ctx = sharedAudioContext();
+        if (!ctx) return;
+        const pair = change.active && change.current >= 0 ? musicChannels(change.current) : null;
+        engine.musicChanged(frameOf(ctx), pair, change.dmaOff);
+        flush(ctx);
+      }),
+    );
+  }
+  if (link?.onBlock) detach.push(link.onBlock((time) => pump(time)));
+
   const sfx: Sfx = {
     count: SFX_COUNT,
     get enabled() {
-      return enabled;
+      return engine.enabled;
     },
     play(id, vol) {
-      if (!enabled) return;
+      if (disposed || !engine.enabled) return;
       const ctx = sharedAudioContext();
       if (!ctx || !bank.effects[id]) return;
-      const now = ctx.currentTime;
-      const frame = Math.floor(now * SFX_FRAME_RATE);
-      const music = options.music && options.music.current >= 0 ? musicChannels(options.music.current) : null;
-      const voice = scheduler.request(id, frame, music, vol, (old) => {
-        const node = pending.get(old);
-        if (node) {
-          try {
-            node.stop();
-            node.disconnect();
-          } catch {
-            /* already ended */
-          }
-          pending.delete(old);
-        }
-      });
-      if (!voice) return;
-      const effect = bank.effects[id];
-      const node = ctx.createBufferSource();
-      node.buffer = buffer(ctx, effect, voice);
-      node.connect(output(ctx));
-      const when = Math.max(now, voice.startFrame / SFX_FRAME_RATE);
-      node.start(when);
-      pending.set(voice, node);
-      const link = options.music;
-      if (link && music) {
-        // the original silences the module's voice on that channel while the effect owns it
-        const ch = voice.channel;
-        const delay = (when - now) * 1000;
-        const length = effectSeconds(effect) * 1000;
-        setTimeout(() => {
-          if (muteCount[ch]++ === 0) link.setChannelMuted(ch, true);
-        }, delay);
-        setTimeout(() => {
-          if (--muteCount[ch] === 0) link.setChannelMuted(ch, false);
-        }, delay + length);
-      }
-      node.onended = () => {
-        pending.delete(voice);
-        node.disconnect();
-      };
+      const frame = frameOf(ctx);
+      observeMusic(frame);
+      engine.request(id, frame, effectChannelsFor(link), vol);
+      flush(ctx);
     },
-    setEnabled(e) {
-      enabled = e;
+    setEnabled(enabled) {
+      if (disposed) return;
+      const ctx = sharedAudioContext();
+      engine.setEnabled(ctx ? frameOf(ctx) : engine.frame, enabled);
+      flush(ctx);
     },
     setVolume(v) {
       volume = Math.max(0, Math.min(1, v));
@@ -381,16 +417,24 @@ export function createSfx(disk1: Uint8Array, _disk2?: Uint8Array, options: SfxOp
       const ctx = sharedAudioContext();
       if (ctx && ctx.state === "suspended") void ctx.resume().catch(() => undefined);
     },
+    sync() {
+      pump();
+    },
     dispose() {
-      for (const node of pending.values()) {
-        try {
-          node.stop();
-          node.disconnect();
-        } catch {
-          /* ignore */
+      if (disposed) return;
+      disposed = true;
+      for (const off of detach.splice(0)) off();
+      engine.dispose();
+      engine.take();
+      for (const voice of [...nodes.keys()]) silence(voice);
+      // the module gets every voice back; the mute state outlives nothing that is torn down here
+      if (link) {
+        for (let ch = 0; ch < 4; ch++) {
+          if (!pushed[ch]) continue;
+          pushed[ch] = false;
+          link.setChannelMuted(ch, false);
         }
       }
-      pending.clear();
       buffers.clear();
       master?.disconnect();
       master = null;

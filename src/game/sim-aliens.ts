@@ -6,6 +6,7 @@
 
 import { MAP_WIDTH, MAP_HEIGHT, TILE_ID_MASK } from "../data/scenario.js";
 import { divsQ, divuQ, mulu, s16, s8 } from "./sim-math.js";
+import { A } from "./state.js";
 import { SYS } from "./sim.js";
 import type { Sim } from "./sim.js";
 
@@ -24,23 +25,33 @@ const bytesLeft = (r: number, limit: number): boolean => ((r - limit) & 0x80) !=
 export interface EnemySpawn {
   air: boolean; // type >= $19 spawns in the air layer
   type: number; // entry byte +0
+  level?: number; // raw wave level copied to enemy record +$A by the original allocator
   x: number;
   y: number;
   dir: number; // group byte +$91
   entry: number[]; // the 8 wave-entry bytes (hit points +1, +3 -> $F, +4 count, +5 -> $13, +6/+7 -> $E/$14)
+  /**
+   * "wave": made by the alien spawner $1187C. $48EC / $48B6 then check the count word before scanning for a free slot
+   * and set the map-word occupancy bit only (flag byte and +$16 come with the first movement claim). Absent: a direct
+   * caller stages the enemy with all marks on its cell. See EnemySystem.spawn.
+   */
+  origin?: "wave";
 }
 
 export class Aliens {
   // $144A8 alien sprite (type 19) and $1449C meteor (type 21, timer in +6).
-  alien: { x: number; y: number } | null = null;
-  meteor: { x: number; y: number; timer: number } | null = null;
+  // These objects are hydrated from and kept in sync with the original's state records.
+  private alienValue: { x: number; y: number } | null = null;
+  private meteorValue: { x: number; y: number; timer: number } | null = null;
   private groupIndex = 0; // $156B2
   private cursor = 0x80; // $12A94
 
   constructor(private readonly sim: Sim) {
     // $6EFC: the builder keeps up to 10 marker-tile ($7F) cells in $14524 / $144A6.
     const s = sim.state;
-    if (s.word(0x144a6) === 0) {
+    // On a save snapshot this table and count are saved bytes. Do not rebuild them from the map
+    // during detached construction; the original post-load path is a separate, not-yet-ported step.
+    if (sim.initialization === "new-game" && s.word(0x144a6) === 0) {
       let n = 0;
       for (let y = 0; y < MAP_HEIGHT && n < 10; y++) {
         for (let x = 0; x < MAP_WIDTH && n < 10; x++) {
@@ -52,10 +63,47 @@ export class Aliens {
       }
       s.setWord(0x144a6, n);
     }
+
+    // Snapshot construction is inert: special sprites already live in the captured state image.
+    // Hydrate their runtime handles from those bytes without clearing or normalizing any fields.
+    if (s.byte(0x144a8) === 0x13) this.alienValue = { x: s.byte(0x144a9), y: s.byte(0x144aa) };
+    if (s.byte(0x1449c) === 0x15) this.meteorValue = { x: s.byte(0x1449d), y: s.byte(0x1449e), timer: s.byte(0x144a2) };
   }
 
   private get s() {
     return this.sim.state;
+  }
+
+  get alien(): { x: number; y: number } | null { return this.alienValue; }
+  set alien(value: { x: number; y: number } | null) {
+    this.alienValue = value;
+    this.s.setByte(0x144a8, value ? 0x13 : 0);
+    if (value) {
+      this.s.setByte(0x144a9, value.x);
+      this.s.setByte(0x144aa, value.y);
+    }
+  }
+
+  get meteor(): { x: number; y: number; timer: number } | null { return this.meteorValue; }
+  set meteor(value: { x: number; y: number; timer: number } | null) {
+    this.meteorValue = value;
+    this.s.setByte(0x1449c, value ? 0x15 : 0);
+    if (value) {
+      this.s.setByte(0x1449d, value.x);
+      this.s.setByte(0x1449e, value.y);
+      this.s.setByte(0x144a2, value.timer);
+    }
+  }
+
+  /** Remake-save access: the spawner's round-robin group ($156B2) and queue cursor ($12A94). */
+  get spawner(): { groupIndex: number; cursor: number } {
+    return { groupIndex: this.groupIndex, cursor: this.cursor };
+  }
+
+  /** Remake-save access: puts the spawner position back. The caller has range-checked it (0..15, 0..$80). */
+  restoreSpawner(groupIndex: number, cursor: number): void {
+    this.groupIndex = groupIndex;
+    this.cursor = cursor;
   }
 
   // Write a ticker pair (countdown 6, value) and announce an intelligence report (message $157).
@@ -82,18 +130,51 @@ export class Aliens {
     const n = s.word(0x144a6);
     if (n === 0) return;
     const i = this.sim.roll(n);
-    this.alien = { x: s.byte(0x14524 + 2 * i), y: s.byte(0x14525 + 2 * i) };
-    this.sim.effect("alienAppear", this.alien.x, this.alien.y);
+    const alien = { x: s.byte(0x14524 + 2 * i), y: s.byte(0x14525 + 2 * i) };
+    this.alien = alien;
+    s.setByte(0x144ad, 0);
+    this.sim.effect("alienAppear", alien.x, alien.y);
+  }
+
+  /**
+   * `$157B8 -> $11476`: the first boot-menu exit clears the apparition, then chooses one of the
+   * scenario's marker coordinates with one range-`$144A6` draw. This startup path has no sound/effect.
+   */
+  initializeScenarioAppearance(): void {
+    this.alien = null;
+    const n = this.s.word(0x144a6);
+    if (n === 0) return;
+    const i = this.sim.roll(n);
+    const alien = { x: this.s.byte(0x14524 + 2 * i), y: this.s.byte(0x14525 + 2 * i) };
+    this.alien = alien;
+    this.s.setByte(0x144ad, 0);
+  }
+
+  /**
+   * $35C8-$35F8 in the pass worker: when the alien record is active and pause bit 2 is clear,
+   * advance the byte index in $144A4 modulo 11 and copy table $11718[index] to alien +$5.
+   * The low byte $144A5 is part of this word; it is not a meteor-record field.
+   */
+  alienFrameStep(): void {
+    if (!this.alien || this.s.byte(0x144a8) === 0 || this.sim.paused) return;
+    let index = this.s.word(0x144a4);
+    const next = ((index & 0xff) + 1) & 0xff; // ADDQ.B #1,D0 preserves the high byte
+    if (next === 0x0b) index = 0; // MOVEQ #0,D0 on the wrap branch
+    else index = (index & 0xff00) | next;
+    this.s.setWord(0x144a4, index);
+    const frame = [0, 1, 2, 3, 2, 3, 2, 3, 2, 1, 0][index];
+    // The original indexes the full word. Out-of-table legacy/corrupt values are not normalized here.
+    if (frame !== undefined) this.s.setByte(0x144ad, frame);
   }
 
   // ---- event 8 and the meteor ($1160E, $11676) --------------------------------------------------
 
-  // From year 3 on (word compare, always true with the calendar), unless invention bit 8 is known and no meteor
+  // From elapsed year 3 on ($142A6 word compare), unless invention bit 8 is known and no meteor
   // is on its way: the meteor falls on a random building cell and hits after 30 main-loop passes.
   eventMeteor(chance: number): void {
     const s = this.s;
     const sim = this.sim;
-    if (s16(s.long(0x142a6) & 0xffff) < 3) return;
+    if (s16(s.long(A.year) & 0xffff) < 3) return;
     if (sim.roll(100) >= chance) return;
     if (s.long(0x14472) & 0x100) return;
     if (this.meteor) return;
@@ -101,6 +182,12 @@ export class Aliens {
     if (!spot) return;
     sim.effect("focus", spot[0], spot[1]);
     this.meteor = { x: spot[0], y: spot[1], timer: 0x78 };
+    s.setByte(0x1449c, 0x15);
+    s.setByte(0x1449d, spot[0]);
+    s.setByte(0x1449e, spot[1]);
+    s.setByte(0x1449f, 0);
+    s.setLong(0x144a0, 0);
+    s.setByte(0x144a2, 0x78);
     sim.effect("meteorFall", spot[0], spot[1]);
     sim.msg(0x182);
   }
@@ -108,8 +195,9 @@ export class Aliens {
   // Call once per main-loop pass (not while paused): timer -4, impact at 0 ($3626-$3640).
   meteorStep(): void {
     const m = this.meteor;
-    if (!m) return;
+    if (!m || this.s.byte(0x1449c) === 0) return;
     m.timer = (m.timer - 4) & 0xff;
+    this.s.setByte(0x144a2, m.timer);
     if (m.timer !== 0) return;
     this.meteor = null;
     this.impact(m.x, m.y);
@@ -211,7 +299,13 @@ export class Aliens {
     s.setByte(REC + 0x18, this.clampMin(after, s.byte(REC + 0x10)));
   }
 
-  // $117EE: queue copies of the wave entries of the alien's level into a random spawn group.
+  // $117EE: queue copies of the wave entries of the alien's level into a random spawn group. The group (0..15) and the
+  // first entry (0..7) are Sim RNG draws ($2DCC); the +/-2 jitter of each entry's count takes its sign from $2E00,
+  // which reads the beam position ($DFF006), NOT from the generator: `Sim.rasterParity()` (sim-hardware.ts, a
+  // seeded approximation). The sign mapping is statically traced from Disk.1: $2E00 `moveq #0,d2; move.b $DFF006,d2;
+  // andi.b #1,d2; tst.b d2; rts` returns the bit with Z set for 0, and the caller $11840 `moveq #2,d3; jsr $2E00;
+  // beq $1184C; neg.b d3` therefore uses parity 0 = +2 and parity 1 = -2. Only the raster timing of the bit stays
+  // approximate (a seeded stand-in, not the original beam position).
   private launchWave(): void {
     const s = this.s;
     const sim = this.sim;
@@ -225,7 +319,7 @@ export class Aliens {
     for (let k = 0; k < 8; k++) {
       const type = s.byte(entry);
       if (type !== 0) {
-        let n = sim.roll(2) !== 0 ? -2 : 2;
+        let n = sim.rasterParity() !== 0 ? -2 : 2;
         n = s8(n + s.byte(entry + 4));
         for (let i = 0; i < n; i++) {
           let at = group + 0x10;
@@ -241,9 +335,21 @@ export class Aliens {
     }
   }
 
-  // $1187C, once per main-loop pass: the next group (round robin over 16) tries up to six queued entries and puts
-  // them on free cells of its spawn list. Ground entries (type < $19) need a cell without unit/blocked flags,
-  // air entries a cell without the air flag; `spawnEnemy` creates the unit (returns false when its list is full).
+  // $1187C, once per main-loop pass, AFTER the unit layer and the alien frame / meteor (static trace of $333A): the
+  // group at `groupIndex` (round robin over 16, advanced once per call whatever happens below) tries up to six queued
+  // entries, walking the queue cursor ($12A94, a byte offset into the 32-long queue) down by $14 per try with wrap at
+  // $80. Ground entries (type < $19) need a spawn cell without unit/blocked flags (map word $5000), air entries a cell
+  // without the air flag ($2000). Per entry:
+  //   - an empty queue cell is skipped (the try is used up, the cursor stays moved);
+  //   - the eight spawn cells are tried in order; when ALL EIGHT are blocked the whole processing step ends there
+  //     (static trace: no further entry is looked at in this call; the entry stays queued, the cursor stays at the
+  //     selected slot and the group index still advances);
+  //   - the first free cell calls `spawnEnemy` ($48EC / $48B6 with `origin: "wave"`: count word 60 / 30 first, then the
+  //     first free fixed slot, map-word mark only). A refusal (full list) leaves the entry queued and moves on to the
+  //     next queue try (static trace: the allocator returns -1 and the caller continues its bounded scan);
+  //   - a created enemy marks the cell in the map word (air $2000, ground $4000, idempotent with the hook), counts in
+  //     $142A4 / $142A2, empties the queue cell and decrements the group's count byte.
+  // The step also ends once the group's count reaches 0.
   spawnStep(): void {
     const s = this.s;
     const sim = this.sim;
@@ -263,15 +369,17 @@ export class Aliens {
         const air = type >= 0x19;
         let spawned = false;
         let failed = false;
+        let free = false; // at least one of the eight spawn cells was usable
         for (let c = 0; c < 8 && !spawned && !failed; c++) {
           const x = s.byte(group + 2 * c);
           const y = s.byte(group + 2 * c + 1);
           const idx = y * MAP_WIDTH + x;
           const w = cells[idx];
           if (air ? (w & 0x2000) !== 0 : (w & 0x5000) !== 0) continue;
+          free = true;
           const bytes: number[] = [];
           for (let i = 0; i < 8; i++) bytes.push(s.byte(entry + i));
-          if (!sim.spawnEnemy({ air, type, x, y, dir, entry: bytes })) {
+          if (!sim.spawnEnemy({ air, type, level: s.byte(REC + 0x11), x, y, dir, entry: bytes, origin: "wave" })) {
             failed = true;
             break;
           }
@@ -280,6 +388,7 @@ export class Aliens {
           s.setWord(counter, s.word(counter) + 1);
           spawned = true;
         }
+        if (!free) break; // all eight cells blocked: this processing step ends
         if (spawned) {
           s.setLong(group + 0x10 + cursor, 0);
           s.setByte(group + 0x90, s.byte(group + 0x90) - 1);
@@ -310,7 +419,7 @@ export class Aliens {
   }
 
   // Event 13 ($ADA6, once a month): the funds decay, the level is recomputed, the ticker counts down, and one of
-  // five reports (each one-shot, flagged by the first byte of its table at $13EE6 + $2A * k) may come in.
+  // five one-shot reports may come in; the final repeatable report can then increase alien strength.
   eventIntelStep(): void {
     const s = this.s;
     const sim = this.sim;
@@ -337,6 +446,7 @@ export class Aliens {
       { base: 0x13f10, slot: SLOTS + 2 },
       { base: 0x13f3a, slot: SLOTS + 4 },
       { base: 0x13f64, slot: SLOTS + 6 },
+      { base: 0x13fb8, slot: SLOTS + 10 },
     ];
     for (let k = 0; k < stages.length; k++) {
       const { base, slot } = stages[k];
@@ -346,7 +456,7 @@ export class Aliens {
       s.setByte(base, 0xff);
       return;
     }
-    // last stage ($AEAC): repeatable; the alien grows stronger by +$19
+    // Repeatable stage ($AECA/$AEDE), after the five one-shot reports: alien grows stronger by +$19.
     if (!bytesLeft(sim.roll(100), s.byte(0x141b3))) return;
     const base = 0x13fb8 + 0x2a;
     if (!bytesLeft(sim.roll(100), s.byte(base + idx))) return;

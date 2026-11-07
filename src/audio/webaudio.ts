@@ -13,6 +13,8 @@ function contextConstructor(): AudioContextCtor | undefined {
 }
 
 let shared: AudioContext | null = null;
+let paulaBus: { ctx: AudioContext; input: GainNode; dry: GainNode; wet: GainNode } | null = null;
+let paulaLedFilterOn = false;
 
 /**
  * The one AudioContext used by music and sound effects (created lazily, never closed). Returns null when this
@@ -26,11 +28,48 @@ export function sharedAudioContext(): AudioContext | null {
   return shared;
 }
 
+/** Shared music/SFX output bus with the guest-controlled A1200 LED-filter approximation. */
+function sharedPaulaBus(ctx: AudioContext): GainNode {
+  if (paulaBus?.ctx === ctx) return paulaBus.input;
+  const input = ctx.createGain();
+  const dry = ctx.createGain();
+  const wet = ctx.createGain();
+  const stages: IIRFilterNode[] = [];
+  const alpha = 1 - Math.exp((-2 * Math.PI * 5500) / ctx.sampleRate);
+  for (let i = 0; i < 3; i++) stages.push(ctx.createIIRFilter([alpha], [1, -(1 - alpha)]));
+  input.connect(dry);
+  input.connect(stages[0]);
+  stages[0].connect(stages[1]);
+  stages[1].connect(stages[2]);
+  stages[2].connect(wet);
+  dry.connect(ctx.destination);
+  wet.connect(ctx.destination);
+  paulaBus = { ctx, input, dry, wet };
+  setPaulaLedFilter(paulaLedFilterOn);
+  return input;
+}
+
+/** Connect another Paula voice (for example an SFX node) to the same filtered master output. */
+export function sharedPaulaInput(ctx: AudioContext): GainNode {
+  return sharedPaulaBus(ctx);
+}
+
+/** Guest writes to CIA-A PRA bit 1: clear engages the LED filter, set bypasses it. */
+export function setPaulaLedFilter(enabled: boolean): void {
+  paulaLedFilterOn = enabled;
+  const bus = paulaBus;
+  if (!bus) return;
+  const now = bus.ctx.currentTime;
+  bus.dry.gain.setValueAtTime(enabled ? 0 : 1, now);
+  bus.wet.gain.setValueAtTime(enabled ? 1 : 0, now);
+}
+
 export class WebAudioSink {
   private ctx: AudioContext | null = null;
   private node: ScriptProcessorNode | null = null;
   private gain: GainNode | null = null;
   private player: ModPlayer | null = null;
+  private blockListener: ((audioTime: number) => void) | null = null;
 
   /** True when this environment has WebAudio at all (false in Node tests). */
   static get supported(): boolean {
@@ -47,9 +86,15 @@ export class WebAudioSink {
     const ctx = sharedAudioContext();
     if (!ctx) return null;
     const gain = ctx.createGain();
-    gain.connect(ctx.destination);
+    gain.connect(sharedPaulaBus(ctx));
     const node = ctx.createScriptProcessor(2048, 0, 2);
     node.onaudioprocess = (event) => {
+      // audio timeline tick: runs before the block is rendered, also while no player is attached (silence); a listener may
+      // detach or replace the player (a fade that has finished stops the music here)
+      if (this.blockListener) {
+        const t = event.playbackTime;
+        this.blockListener(typeof t === "number" && t > 0 ? t : ctx.currentTime);
+      }
       const out = event.outputBuffer;
       const l = out.getChannelData(0);
       const r = out.getChannelData(1);
@@ -66,6 +111,24 @@ export class WebAudioSink {
     this.node = node;
     this.gain = gain;
     return ctx;
+  }
+
+  /** True once the audio graph exists, i.e. blocks are (or will be, once the context runs) pulled. */
+  get live(): boolean {
+    return this.node !== null;
+  }
+
+  /** The AudioContext clock in seconds (0 before the context exists). */
+  get currentTime(): number {
+    return this.ctx?.currentTime ?? 0;
+  }
+
+  /**
+   * Called at the start of every rendered block with the AudioContext time of the block (`playbackTime`, or `currentTime` when
+   * the browser does not report it). One listener; null removes it. It is the sink's only clock: no wall-clock timers.
+   */
+  setBlockListener(listener: ((audioTime: number) => void) | null): void {
+    this.blockListener = listener;
   }
 
   /** Attach the player to render (null = silence). Its sample rate must equal `sampleRate`. */
@@ -98,6 +161,7 @@ export class WebAudioSink {
 
   dispose(): void {
     this.player = null;
+    this.blockListener = null;
     if (this.node) {
       this.node.onaudioprocess = null;
       this.node.disconnect();

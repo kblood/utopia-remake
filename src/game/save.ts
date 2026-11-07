@@ -1,19 +1,101 @@
-// Saved games. The original writes two areas to Disk.4 (notes/formats/game-proper.md, save
-// record): A = object list and map, B = the state block. A browser cannot write to the user's
-// disk image, so the remake keeps its own copy of the same data in localStorage: slot 0-7,
-// each holding the state image, the map cells, the object records and the scenario index.
+// The remake's own saved games in localStorage (slots 0-7). The original writes two areas to Disk.4
+// (notes/formats/game-proper.md); a browser cannot write the player's disk image, so the remake keeps ITS OWN record
+// here. It is not the Disk.4 record and not compatible with it (no import, no export). What a save holds and what it
+// leaves out is listed in notes/formats/remake-save.md; the schema and the validation live in save-session.ts.
+//
+// Stored text = JSON { format, version, ...fields } with the four binary parts as base64 (the map words as explicit
+// little-endian bytes, independent of the host). Reading never throws and never returns a half-valid object: every
+// failure is a typed `SlotError`, and a save that reads back is a complete, validated `SessionSave`.
+//
+// Compatibility of old slots (version 2 stored the absolute calendar year; versions 3+ store elapsed years;
+// version-less saves contain only state, map words, object bytes,
+// sysFlags and scroll):
+//   - an old save made while NO unit, ship or flying object stood on the map is migrated (units, enemies, ships and
+//     flags start empty, which is what that moment was) and marked `legacy`;
+//   - an old save with a ground/air mark in the map words or any own ship cannot be completed (the units behind the marks
+//     were never stored) and is rejected as "legacy-incomplete" instead of loading an inconsistent world;
+//   - version 2 and version-less saves convert their absolute `$142A6` year to elapsed years;
+//   - versions 2 and 3 have no solar-phase RNG state; versions 2..4 have no hardware-approximation state;
+//   - versions 2..5 never stored the effect list: a session with an object layer migrates to an EMPTY pool (a lossy
+//     compatibility assumption, reported as `effectsAssumedEmpty`; continuation is not claimed exact), one without to null;
+//   - versions 6 and 7 stored the effects as a DENSE list (`effects`, at most 30 records); version 8 stores the 30 fixed slots
+//     (`effectSlots`, null = free) plus the durable flag `effectSlotsAssumed`. A non-empty dense list keeps ALL records, in
+//     slots 0..n-1 in list order, but the original slot numbers cannot be recovered: that is reported as `effectSlotsAssumed`
+//     (slot label `FX SLOT UNK`), is written into the next save (version 8 persists the flag) and is cleared by the live pool
+//     only when it drains. Continuation is not claimed exact. An empty dense list converts cleanly (30 free slots, no warning);
+//   - versions 2..6 never stored the raw +$16 flag pointer of the enemy slots (version 7 does, free slots included): a session
+//     with an enemy system derives occupied pointers from saved reservations where possible (an outbound aircraft with
+//     reserve -1/-1 reconstructs its off-map next-cell pointer from x/y/direction; other unresolvable tails use 0), and
+//     assumes every free slot is 0. This is reported as `enemyPointersAssumed` because stale freed-slot values are lost;
+//   - versions 2..8 derive the old regular loop phase from `vbls` and have no pending modal-return pass; version 9 stores both.
+//   - a version other than 2..9 is rejected as "unsupported-version".
 
-import type { Sim } from "./sim.js";
-import type { World } from "./world.js";
+import { MAP_HEIGHT, MAP_WIDTH } from "../data/scenario.js";
+import { CELL_FLAG_BYTES, cellFlagPointer } from "./cell-flags.js";
+import { DEFAULT_VBL_PER_PASS } from "./main-loop.js";
+import { DIR_STEP } from "./units.js";
+import { MAX_EFFECTS } from "./effect-pool.js";
+import { SESSION_VERSION, validateEffectRecord, validateSession, type SessionSave } from "./save-session.js";
+import { START_YEAR, STATE_BASE, STATE_BYTES } from "./state.js";
+import { OBJECT_COUNT_ADDRESS, OBJECT_SIZE, OBJECT_SLOTS } from "./world.js";
 
 export const SAVE_SLOTS = 8;
 const PREFIX = "utopia-remake-save-";
+const FORMAT = "utopia-remake-session";
 
-export interface SaveSummary {
-  slot: number;
-  scenario: number;
-  date: string;
+export type SlotErrorCode =
+  /** The slot holds nothing. */
+  | "empty"
+  /** No localStorage in this environment. */
+  | "no-storage"
+  /** Not JSON, not base64 or not the expected shape of any known version. */
+  | "corrupt"
+  /** A `version` this build does not know. */
+  | "unsupported-version"
+  /** Well-formed, but a field fails validation (see `message`). */
+  | "invalid"
+  /** An old (pre-version-2) save that cannot be completed. */
+  | "legacy-incomplete"
+  /** Slot number outside 0..SAVE_SLOTS-1. */
+  | "bad-slot"
+  /** The storage refused the write (quota, private mode). */
+  | "write-failed";
+
+export interface SlotError {
+  readonly code: SlotErrorCode;
+  readonly message: string;
 }
+
+export type ReadResult =
+  | {
+      readonly ok: true;
+      readonly save: SessionSave;
+      readonly legacy: boolean;
+      /**
+       * True for a version 2..5 save that had an object layer: those versions never stored the effect list, so the decoded
+       * save carries an EMPTY pool as a lossy compatibility assumption. The original pool may have held explosions (which
+       * only affect the occupancy outcome of a combat explosion when the pool is full), so continuation is not exact.
+       */
+      readonly effectsAssumedEmpty: boolean;
+      /**
+       * True when the effect records' slot numbers are an assumption: a non-empty dense effect list of a version 6 or 7 save was
+       * placed in slots 0..n-1 (all records kept, original slot identity unrecoverable), or a version 8 save carries the flag
+       * on from such a migration. Continuation is not exact until the pool drains.
+       */
+      readonly effectSlotsAssumed: boolean;
+      /**
+       * True for a version 2..6 save that had an enemy system: those versions never stored the raw +$16 pointers, so the decoded
+       * save derives occupied slots' pointers from their reservation cells and assumes 0 for free slots (the stale pointers
+       * of freed slots are unknown). Continuation is not exact. Always false for version 7 and for saves without enemies.
+       */
+      readonly enemyPointersAssumed: boolean;
+    }
+  | { readonly ok: false; readonly error: SlotError };
+export type WriteResult = { readonly ok: true } | { readonly ok: false; readonly error: SlotError };
+
+const err = (code: SlotErrorCode, message: string): { ok: false; error: SlotError } => ({ ok: false, error: { code, message } });
+
+// ---- base64 -------------------------------------------------------------------------------------------------------------
 
 function toBase64(bytes: Uint8Array): string {
   let text = "";
@@ -21,10 +103,32 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(text);
 }
 
-function fromBase64(text: string): Uint8Array {
-  const raw = atob(text);
-  const out = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+/** Decodes standard base64; null for anything else (never throws). */
+function fromBase64(text: unknown): Uint8Array | null {
+  if (typeof text !== "string" || text.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return null;
+  try {
+    const raw = atob(text);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Map words as explicit little-endian bytes. */
+function cellsToBytes(cells: Uint16Array): Uint8Array {
+  const out = new Uint8Array(cells.length * 2);
+  const view = new DataView(out.buffer);
+  for (let i = 0; i < cells.length; i++) view.setUint16(i * 2, cells[i], true);
+  return out;
+}
+
+function cellsFromBytes(bytes: Uint8Array): Uint16Array | null {
+  if (bytes.length !== MAP_WIDTH * MAP_HEIGHT * 2) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = new Uint16Array(MAP_WIDTH * MAP_HEIGHT);
+  for (let i = 0; i < out.length; i++) out[i] = view.getUint16(i * 2, true);
   return out;
 }
 
@@ -36,85 +140,295 @@ function storage(): Storage | null {
   }
 }
 
-export interface SaveData {
-  scenario: number;
-  state: Uint8Array;
-  cells: Uint16Array;
-  objects: Uint8Array;
-  sysFlags: number;
-  scrollX: number;
-  scrollY: number;
+// ---- text <-> SessionSave -------------------------------------------------------------------------------------------------
+
+/** The current versioned text of a save. The caller validates the save first (`writeSlot` does). */
+export function encodeSave(save: SessionSave): string {
+  return JSON.stringify({
+    format: FORMAT,
+    version: SESSION_VERSION,
+    ...save,
+    state: toBase64(save.state),
+    cells: toBase64(cellsToBytes(save.cells)),
+    cellFlags: toBase64(save.cellFlags),
+    objects: toBase64(save.objects),
+  });
 }
 
-export function captureGame(world: World, sim: Sim, scenario: number, scrollX: number, scrollY: number): SaveData {
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Older remake saves stored the displayed calendar year at `$142A6`; convert it to elapsed years in place. */
+function convertAbsoluteYear(state: Uint8Array, source: string): SlotError | null {
+  if (state.length !== STATE_BYTES) return { code: "corrupt", message: `${source}: state image has the wrong length` };
+  const view = new DataView(state.buffer, state.byteOffset, state.byteLength);
+  const offset = 0x142a6 - STATE_BASE;
+  const year = view.getUint32(offset);
+  if (year < START_YEAR) return { code: "invalid", message: `${source}: $142A6 year ${year} is below the old save baseline ${START_YEAR}` };
+  view.setUint32(offset, year - START_YEAR);
+  return null;
+}
+
+/** Legacy (version-less) slot -> a session with empty units, or a typed refusal. */
+function migrateLegacy(j: Record<string, unknown>): ReadResult {
+  const state = fromBase64(j.state);
+  const cellBytes = fromBase64(j.cells);
+  const objects = fromBase64(j.objects);
+  if (!state || !cellBytes || !objects) return err("corrupt", "Old save: a binary part is not valid base64");
+  const cells = cellsFromBytes(cellBytes);
+  if (!cells || state.length !== STATE_BYTES || objects.length !== OBJECT_SLOTS * OBJECT_SIZE) return err("corrupt", "Old save: a binary part has the wrong length");
+  const yearError = convertAbsoluteYear(state, "Old save");
+  if (yearError) return { ok: false, error: yearError };
+  const ships = (state[0x1429e - STATE_BASE] << 8) | state[0x1429e - STATE_BASE + 1];
+  let marked = false;
+  for (let i = 0; i < cells.length && !marked; i++) marked = (cells[i] & 0x6000) !== 0; // bit 14 ground-layer mark, bit 13 air mark
+  if (ships !== 0 || marked) {
+    return err("legacy-incomplete", "Old save made while own units, ships or flying objects were on the map: they were never stored, so it cannot be loaded without an inconsistent map");
+  }
+  const count = (state[OBJECT_COUNT_ADDRESS - STATE_BASE] << 8) | state[OBJECT_COUNT_ADDRESS - STATE_BASE + 1];
+  const save: SessionSave = {
+    scenario: j.scenario as number,
+    scroll: { x: j.scrollX as number, y: j.scrollY as number },
+    state,
+    cells,
+    cellFlags: new Uint8Array(CELL_FLAG_BYTES),
+    objects,
+    world: { objectCount: count, solarPhaseRng: null },
+    sim: {
+      sysFlags: j.sysFlags as number,
+      paused: false,
+      dayQueued: false,
+      rng: null,
+      hardware: null,
+      fuelWarned: false,
+      lights: [0, 0, 0, 0],
+      aliens: { alien: null, meteor: null, groupIndex: 0, cursor: 0x80 },
+    },
+    loop: { vblPerPass: DEFAULT_VBL_PER_PASS, vbls: 0, passes: 0, phase: 0, immediatePass: false },
+    passClock: null,
+    markers: null,
+    tanks: null,
+    enemies: null,
+    ships: new Array(40).fill(null),
+    effectSlots: null, // like tanks and markers: no object layer in the migrated session
+    effectSlotsAssumed: false,
+  };
+  const bad = validateSession(save);
+  if (bad) return err("invalid", `Old save: ${bad.message}`);
+  return { ok: true, save, legacy: true, effectsAssumedEmpty: false, effectSlotsAssumed: false, enemyPointersAssumed: false };
+}
+
+/**
+ * Versions 2..6 stored no raw +$16 pointers. Returns `enemies` completed with them (occupied slot = saved reservation; an
+ * outbound air unit with reserve -1/-1 reconstructs its off-map next-cell address from x/y/direction; free or otherwise
+ * unresolvable tails = 0), or a typed error when an occupied reservation is malformed. A section that is not the expected
+ * 60 / 30 slot arrays is returned unchanged for `validateSession` to report. Pure: the parsed JSON is not mutated.
+ */
+function migrateEnemyPointers(enemies: unknown, version: number): { readonly enemies: unknown } | SlotError {
+  if (!isObject(enemies) || !Array.isArray(enemies.ground) || enemies.ground.length !== 60 || !Array.isArray(enemies.air) || enemies.air.length !== 30) return { enemies };
+  const derive = (list: readonly unknown[], name: string, air: boolean): number[] | SlotError => {
+    const out: number[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (!isObject(e)) { out.push(0); continue; }
+      const { reserveX: x, reserveY: y } = e;
+      if (typeof x === "number" && typeof y === "number" && Number.isInteger(x) && Number.isInteger(y) && x >= 0 && y >= 0 && x < MAP_WIDTH && y < MAP_HEIGHT) {
+        out.push(cellFlagPointer(x, y));
+        continue;
+      }
+      // In the old runtime an aircraft stores the pointer of its NEXT cell when a step begins. If that cell is
+      // outside the map, reserveX/Y become -1/-1 while the aircraft remains alive until the next pass. Reconstruct
+      // that raw pointer from its saved cell and direction; the migration is still labelled assumed because the old
+      // save did not store the long itself. Ground records with no playable reservation have no recoverable target.
+      if (x === -1 && y === -1) {
+        const px = e.x, py = e.y, dir = e.dir;
+        if (air && typeof px === "number" && typeof py === "number" && typeof dir === "number" &&
+          Number.isInteger(px) && Number.isInteger(py) && px >= 0 && py >= 0 && px < MAP_WIDTH && py < MAP_HEIGHT &&
+          Number.isInteger(dir) && dir >= 0 && dir < DIR_STEP.length) {
+          const [dx, dy] = DIR_STEP[dir];
+          out.push(cellFlagPointer(px + dx, py + dy));
+        } else {
+          out.push(0);
+        }
+        continue;
+      }
+      {
+        return { code: "invalid", message: `enemies.${name}[${i}].reserveX: a version-${version} save must hold a map cell here` };
+      }
+    }
+    return out;
+  };
+  const groundPointers = derive(enemies.ground, "ground", false);
+  if (!Array.isArray(groundPointers)) return groundPointers;
+  const airPointers = derive(enemies.air, "air", true);
+  if (!Array.isArray(airPointers)) return airPointers;
+  return { enemies: { ...enemies, groundPointers, airPointers } };
+}
+
+/**
+ * Versions 6 and 7 stored the effects as a dense list (`effects`: null without an object layer, else at most 30 records in list
+ * order). Converts it to the 30 fixed slots (records in slots 0..n-1 in list order, the rest free) and says whether the slot
+ * numbers are therefore an assumption (any record present). Applies the version-8 record rules to every record first; the
+ * error path keeps the old `effects` / `effects[i]...` names. Pure.
+ */
+function migrateDenseEffects(effects: unknown, hasObjectLayer: boolean): { readonly slots: unknown[] | null; readonly assumed: boolean } | SlotError {
+  if (effects === null || effects === undefined) {
+    if (hasObjectLayer) return { code: "invalid", message: "effects: a session with an object layer has an effect list (possibly empty)" };
+    return { slots: null, assumed: false };
+  }
+  if (!Array.isArray(effects) || effects.length > MAX_EFFECTS) return { code: "invalid", message: `effects: must be null or an array of at most ${MAX_EFFECTS} effects` };
+  if (!hasObjectLayer) return { code: "invalid", message: "effects: effects belong to the object layer, which a session without tanks does not have" };
+  for (let i = 0; i < effects.length; i++) {
+    const bad = validateEffectRecord(effects[i], `effects[${i}]`);
+    if (bad) return { code: "invalid", message: bad.message };
+  }
+  const slots: unknown[] = new Array<unknown>(MAX_EFFECTS).fill(null);
+  effects.forEach((e, i) => { slots[i] = e; });
+  return { slots, assumed: effects.length > 0 };
+}
+
+/** Parses and fully validates stored text. Never throws; returns the first problem as a typed error. */
+export function decodeSave(text: string | null): ReadResult {
+  if (!text) return err("empty", "Empty slot");
+  let j: unknown;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    return err("corrupt", "The slot does not hold JSON");
+  }
+  if (!isObject(j)) return err("corrupt", "The slot does not hold a save object");
+  if (!("version" in j)) {
+    if (typeof j.scenario === "number" && typeof j.state === "string" && typeof j.cells === "string" && typeof j.objects === "string" && typeof j.sysFlags === "number") return migrateLegacy(j);
+    return err("corrupt", `The slot holds neither a version-${SESSION_VERSION}, version-8, version-7, version-6, version-5, version-4, version-3, version-2 nor an old save`);
+  }
+  if (![2, 3, 4, 5, 6, 7, 8, SESSION_VERSION].includes(j.version as number)) return err("unsupported-version", `Save version ${String(j.version)} is not supported (this build reads versions 2 through ${SESSION_VERSION})`);
+  const version = j.version as number;
+  if (j.format !== FORMAT) return err("corrupt", `Unknown save format ${String(j.format)}`);
+  const state = fromBase64(j.state);
+  const cellBytes = fromBase64(j.cells);
+  const cellFlags = fromBase64(j.cellFlags);
+  const objects = fromBase64(j.objects);
+  if (!state || !cellBytes || !cellFlags || !objects) return err("corrupt", "A binary part is not valid base64");
+  if (version === 2) {
+    const yearError = convertAbsoluteYear(state, "Version-2 save");
+    if (yearError) return { ok: false, error: yearError };
+  }
+  const cells = cellsFromBytes(cellBytes);
+  if (!cells) return err("invalid", `cells: must be exactly ${MAP_WIDTH * MAP_HEIGHT * 2} bytes`);
+  const { format: _format, version: _version, effects: legacyEffects, ...rest } = j;
+  void _format;
+  void _version;
+  const world = isObject(rest.world) ? { ...rest.world, solarPhaseRng: version >= 4 ? rest.world.solarPhaseRng : null } : rest.world;
+  const sim = isObject(rest.sim) ? { ...rest.sim, hardware: version >= 5 && "hardware" in rest.sim ? rest.sim.hardware : null } : rest.sim;
+  // Version 9 records scheduler state explicitly because a build-menu return can queue a pass before the normal phase.
+  // Earlier saves used the regular modulo cadence; derive that phase and clear the new one-shot flag.
+  const loop = isObject(rest.loop) && version < 9 && Number.isSafeInteger(rest.loop.vblPerPass) && Number.isSafeInteger(rest.loop.vbls)
+    ? { ...rest.loop, phase: (rest.loop.vbls as number) % (rest.loop.vblPerPass as number), immediatePass: false }
+    : rest.loop;
+  // Versions 2..5 never stored effects: a session with an object layer (tanks present) gets an empty pool, one without
+  // none (null), exactly like the other object-layer parts. Versions 6 and 7 carry a dense `effects` list that converts to the
+  // fixed slots with an assumed slot identity (see migrateDenseEffects); version 8 carries `effectSlots` and the durable
+  // `effectSlotsAssumed` itself (validateSession checks them). A stray `effects` key in version 8 is not part of the schema and is dropped.
+  let effectSlots: unknown = rest.effectSlots;
+  let effectSlotsAssumed: unknown = rest.effectSlotsAssumed;
+  if (version < 8) {
+    if (version >= 6) {
+      const dense = migrateDenseEffects(legacyEffects, rest.tanks !== null && rest.tanks !== undefined);
+      if ("code" in dense) return { ok: false, error: dense };
+      effectSlots = dense.slots;
+      effectSlotsAssumed = dense.assumed;
+    } else {
+      effectSlots = rest.tanks === null ? null : new Array<unknown>(MAX_EFFECTS).fill(null);
+      effectSlotsAssumed = false;
+    }
+  }
+  // Versions 2..6 never stored raw per-slot +$16 pointers: derive what can be reconstructed and flag the lossy migration.
+  // Version 7 must carry its own arrays (validateSession checks counts, unsigned-long values and agreement with the records).
+  let enemies = rest.enemies;
+  if (version < 7 && rest.enemies !== null && rest.enemies !== undefined) {
+    const migrated = migrateEnemyPointers(rest.enemies, version);
+    if ("code" in migrated) return { ok: false, error: migrated };
+    enemies = migrated.enemies;
+  }
+  const save = { ...rest, world, sim, loop, state, cells, cellFlags, objects, effectSlots, effectSlotsAssumed, enemies };
+  const bad = validateSession(save);
+  if (bad) return err("invalid", bad.message);
   return {
-    scenario,
-    state: world.state.snapshot(),
-    cells: world.cells.slice(),
-    objects: world.objects.slice(),
-    sysFlags: sim.sysFlags,
-    scrollX,
-    scrollY,
+    ok: true, save: save as unknown as SessionSave, legacy: false, effectsAssumedEmpty: version < 6 && effectSlots !== null,
+    effectSlotsAssumed: (save as unknown as SessionSave).effectSlotsAssumed,
+    enemyPointersAssumed: version < 7 && (save as unknown as SessionSave).enemies !== null,
   };
 }
 
-export function applyGame(data: SaveData, world: World, sim: Sim): void {
-  world.state.restore(data.state);
-  world.cells.set(data.cells);
-  world.objects.set(data.objects);
-  sim.sysFlags = data.sysFlags;
+// ---- slots ------------------------------------------------------------------------------------------------------------------
+
+function slotKey(slot: number): string | null {
+  return Number.isInteger(slot) && slot >= 0 && slot < SAVE_SLOTS ? PREFIX + slot : null;
 }
 
-export function writeSlot(slot: number, data: SaveData): boolean {
+/** Writes a validated save into a slot. A save that fails validation, or a write the storage refuses, leaves the slot as it was. */
+export function writeSlot(slot: number, save: SessionSave): WriteResult {
+  const key = slotKey(slot);
+  if (key === null) return err("bad-slot", `Slot ${slot} is outside 0..${SAVE_SLOTS - 1}`);
+  const bad = validateSession(save);
+  if (bad) return err("invalid", bad.message);
   const store = storage();
-  if (!store) return false;
-  const body = JSON.stringify({
-    scenario: data.scenario,
-    sysFlags: data.sysFlags,
-    scrollX: data.scrollX,
-    scrollY: data.scrollY,
-    state: toBase64(data.state),
-    cells: toBase64(new Uint8Array(data.cells.buffer, data.cells.byteOffset, data.cells.byteLength)),
-    objects: toBase64(data.objects),
-  });
+  if (!store) return err("no-storage", "No localStorage here");
+  const body = encodeSave(save);
+  const check = decodeSave(body);
+  if (!check.ok) return check;
   try {
-    store.setItem(PREFIX + slot, body);
-    return true;
+    store.setItem(key, body);
   } catch {
-    return false;
+    return err("write-failed", "The browser refused to store the save (quota or private mode)");
   }
+  return { ok: true };
 }
 
-export function readSlot(slot: number): SaveData | null {
+export function readSlot(slot: number): ReadResult {
+  const key = slotKey(slot);
+  if (key === null) return err("bad-slot", `Slot ${slot} is outside 0..${SAVE_SLOTS - 1}`);
   const store = storage();
-  const text = store?.getItem(PREFIX + slot);
-  if (!text) return null;
+  if (!store) return err("no-storage", "No localStorage here");
+  let text: string | null;
   try {
-    const j = JSON.parse(text);
-    const cellBytes = fromBase64(j.cells);
+    text = store.getItem(key);
+  } catch {
+    return err("no-storage", "localStorage cannot be read");
+  }
+  return decodeSave(text);
+}
+
+export type SlotSummary =
+  | { readonly slot: number; readonly status: "ok"; readonly scenario: number; readonly date: string; readonly legacy: boolean; readonly effectsAssumedEmpty: boolean; readonly effectSlotsAssumed: boolean; readonly enemyPointersAssumed: boolean }
+  | { readonly slot: number; readonly status: "unusable"; readonly error: SlotError }
+  /** localStorage is missing or cannot be read: the slot's content is unknown, which is not the same as empty. */
+  | { readonly slot: number; readonly status: "unavailable"; readonly error: SlotError };
+
+/** Per slot: null = empty, a summary of the usable save, why the stored text cannot be used, or that the storage itself is unavailable. */
+export function slotSummaries(): (SlotSummary | null)[] {
+  return Array.from({ length: SAVE_SLOTS }, (_, slot): SlotSummary | null => {
+    const read = readSlot(slot);
+    if (!read.ok) return read.error.code === "empty" ? null : { slot, status: read.error.code === "no-storage" ? "unavailable" : "unusable", error: read.error };
+    const state = read.save.state;
+    const view = new DataView(state.buffer, state.byteOffset, state.byteLength);
+    const day = state[0x1459f - STATE_BASE];
+    const month = state[0x145a0 - STATE_BASE] + 1;
+    const year = START_YEAR + view.getUint32(0x142a6 - STATE_BASE);
     return {
-      scenario: j.scenario,
-      sysFlags: j.sysFlags,
-      scrollX: j.scrollX,
-      scrollY: j.scrollY,
-      state: fromBase64(j.state),
-      cells: new Uint16Array(cellBytes.buffer, cellBytes.byteOffset, cellBytes.byteLength / 2),
-      objects: fromBase64(j.objects),
+      slot, status: "ok", scenario: read.save.scenario, date: `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`,
+      legacy: read.legacy, effectsAssumedEmpty: read.effectsAssumedEmpty, effectSlotsAssumed: read.effectSlotsAssumed, enemyPointersAssumed: read.enemyPointersAssumed,
     };
-  } catch {
-    return null;
-  }
+  });
 }
 
-export function slotSummaries(): (SaveSummary | null)[] {
-  return Array.from({ length: SAVE_SLOTS }, (_, slot) => {
-    const data = readSlot(slot);
-    if (!data) return null;
-    const view = new DataView(data.state.buffer, data.state.byteOffset);
-    const base = 0x13034;
-    const day = data.state[0x1459f - base];
-    const month = data.state[0x145a0 - base] + 1;
-    const year = view.getUint32(0x142a6 - base);
-    return { slot, scenario: data.scenario, date: `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}` };
-  });
+/**
+ * The short warning a slot label appends (including its leading space; "" for none), kept short because the whole label
+ * "SLOT n  dd/mm/yyyy" + warning must fit the menu's 31 columns (at most 12 characters here). An assumed (empty) effect pool,
+ * assumed effect SLOT numbers and/or assumed enemy-slot pointers mean the continuation is not exact; a version-less save is just "V1".
+ */
+export function slotWarning(summary: { readonly legacy: boolean; readonly effectsAssumedEmpty: boolean; readonly effectSlotsAssumed?: boolean; readonly enemyPointersAssumed: boolean }): string {
+  if (summary.effectsAssumedEmpty) return summary.enemyPointersAssumed ? " FX/PTR UNK" : " FX UNKNOWN";
+  if (summary.effectSlotsAssumed) return summary.enemyPointersAssumed ? " FX/PTR UNK" : " FX SLOT UNK";
+  if (summary.enemyPointersAssumed) return " PTR UNKNOWN";
+  return summary.legacy ? " V1" : "";
 }

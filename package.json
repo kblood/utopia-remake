@@ -7,7 +7,11 @@
   "scripts": {
     "build": "tsc",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
-    "test": "node test/sim.mjs && node test/aliens.mjs && node test/build.mjs && node test/music.mjs && node test/sfx.mjs && node test/save.mjs && node test/units.mjs && node test/screens.mjs && node test/buildings.mjs && node test/overview.mjs && node test/construction.mjs && node test/enemies.mjs && node test/orders.mjs"
+    "test": "node test/profile-input.mjs && node test/sim.mjs && node test/original-rng.mjs && node test/aliens.mjs && node test/invasion-lifecycle.mjs && node test/invasion-contract.mjs && node test/build.mjs && node test/build-menu.mjs && node test/music.mjs && node test/music-select.mjs && node test/disk-menu.mjs && node test/music-pause.mjs && node test/game-music.mjs && node test/sfx.mjs && node test/audio-ownership.mjs && node test/pointer.mjs && node test/save.mjs && node test/units.mjs && node test/draw-list.mjs && node test/alien-sprite.mjs && node test/meteor-sprite.mjs && node test/map-loop.mjs && node test/map-background.mjs && node test/screens.mjs && node test/button-sound.mjs && node test/command-buttons.mjs && node test/buildings.mjs && node test/overview.mjs && node test/construction.mjs && node test/enemies.mjs && node test/orders.mjs && node test/tank-lifecycle.mjs && node test/tank-original-compare.mjs && node test/production-original-compare.mjs && node test/disk4.mjs && node test/disk4-state.mjs && node test/disk4-entities.mjs && node test/disk4-load.mjs && node test/disk4-scenario.mjs && node test/disk4-enemies.mjs && node test/disk4-crusher.mjs && node test/disk4-ships.mjs && node test/disk4-fleet.mjs && node test/missile-runtime.mjs && node test/xpk-mash.mjs && node test/disk4-scene.mjs && node test/checkpoint.mjs && node test/area-blast.mjs",
+    "test:disk-menu": "node test/disk-menu.mjs",
+    "test:original-rng": "node test/original-rng.mjs",
+    "test:audio-ownership": "node test/audio-ownership.mjs",
+    "compare:invasion": "node test/invasion-original-compare.mjs"
   },
   "devDependencies": {
     "typescript": "5.9.3"

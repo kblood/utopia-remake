@@ -5,6 +5,7 @@
 // logic: notes/formats/screens.md section 8.
 
 import { COLOR, drawGameText } from "../../data/gamefont.js";
+import { SFX } from "../../audio/sfx.js";
 import { decodePicture, type SectorRange } from "../../data/picture.js";
 import { MAP_HEIGHT, MAP_WIDTH } from "../../data/scenario.js";
 import { Screen, SCREEN_WIDTH, type Rgb } from "../../gfx/screen.js";
@@ -240,7 +241,17 @@ export function clampScroll(x: number, y: number): { x: number; y: number } {
 
 // A click on the overview map ($F2D4-$F2E0): the clicked cell becomes the middle of the 8 x 8 view.
 export function scrollForClick(px: number, py: number): { x: number; y: number } {
-  return clampScroll(((Math.max(px, MAP_X) - MAP_X) >> 1) - 4, ((Math.max(py, MAP_Y) - MAP_Y) >> 1) - 4);
+  const axis = (pixel: number, origin: number, max: number): number => {
+    // `$F2D4-$F2E0` uses SUBQ.W, LSR.W, SUBQ.W before `$FB1E` clamps the result as a signed word.
+    // Preserve the 16-bit underflow: pixels in the 8-pixel top/left margin become a large positive
+    // scroll request and therefore clamp to the far edge, rather than to zero.
+    const delta = (Math.trunc(pixel) - origin) & 0xffff;
+    const shifted = delta >>> 1;
+    const word = (shifted - 4) & 0xffff;
+    const signed = word >= 0x8000 ? word - 0x10000 : word;
+    return Math.max(0, Math.min(max, signed));
+  };
+  return { x: axis(px, MAP_X, MAX_SCROLL_X), y: axis(py, MAP_Y, MAX_SCROLL_Y) };
 }
 
 interface OverviewAssets {
@@ -362,6 +373,7 @@ export class OverviewScreen implements ScreenScene {
     if (p.pressedEdge) {
       const b = this.buttonAt(p.x, p.y);
       if (b >= 0) {
+        this.ctx.sound?.(SFX.CLICK); // $F29C -> $5756 requests id 4 on the press edge.
         this.pressed = b; // $5756: shown flipped until released
       } else if (p.x >= PREVIEW_HIT.x0 && p.x < PREVIEW_HIT.x1 && p.y >= PREVIEW_HIT.y0 && p.y < PREVIEW_HIT.y1) {
         // $F3B2: the clicked preview cell gets (or loses) a marker pin through $311E, no message shown.

@@ -49,6 +49,8 @@ export class GameStrings {
   placeholder(index: number): number {
     if (index < 0 || index >= STRING_COUNT) return -1;
     const at = (this.data[index * 2] << 8) | this.data[index * 2 + 1];
-    return this.data[at] < 0x20 ? this.data[at] : -1;
+    const prefix = this.data[at];
+    if (prefix < 0x20) return prefix;
+    return prefix >= 0x8b && prefix <= 0x96 && this.data[at + 1] >= 0x20 ? prefix : -1;
   }
 }

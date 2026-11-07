@@ -2,7 +2,12 @@
 // start of a game ($6D78). Layouts: notes/formats/game-state.md, sections 7.1-7.3.
 
 import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK } from "../data/scenario.js";
-import { GameState } from "./state.js";
+import { CELL_FLAG_BYTES } from "./cell-flags.js";
+import { createRng, type SeededRng } from "./sim-math.js";
+import { GameState, type SnapshotError, type SnapshotResult } from "./state.js";
+
+// The flag array layout (102-byte rows) lives in cell-flags.ts; re-exported for existing importers.
+export { CELL_FLAG_BYTES, CELL_FLAG_ROW_BYTES } from "./cell-flags.js";
 
 export const TYPE_TABLE = 0x131e2;
 export const TYPE_SIZE = 18;
@@ -30,18 +35,132 @@ const TILE_MINE = 0x60;
 const TILE_FUEL = 0x3e;
 const TILE_MARKER = 0x7f;
 
+/** Word in the variable block: number of used object records ("saved count"). */
+export const OBJECT_COUNT_ADDRESS = 0x142c2;
+
+/** The map and object parts of a saved game, as World.fromSnapshot takes them (all copied, nothing interpreted). */
+export interface WorldSnapshot {
+  /** MAP_WIDTH * MAP_HEIGHT cell words, row-major, tile id and flag bits exactly as stored. */
+  readonly cells: Uint16Array;
+  /** CELL_FLAG_BYTES per-cell flag bytes ($3D3A6, 102-byte rows) exactly as stored. */
+  readonly cellFlags: Uint8Array;
+  /** OBJECT_SLOTS * OBJECT_SIZE bytes: every record slot exactly as stored, free slots (tile word 0) included. */
+  readonly objects: Uint8Array;
+}
+
+/** Optional fresh-world inputs used by deterministic trace replay; omitted in normal play. */
+export interface WorldOptions {
+  /** Seed for the remake's solar-phase stream, including phases requested after initial map construction. */
+  readonly solarPhaseSeed?: number;
+  /** One-shot override for solar phases consumed while `$6D78` builds records; called before the first map pass. */
+  readonly startupSolarPhase?: () => boolean;
+}
+
+// Module-private marker: selects the constructor overload that adopts saved world data.
+const FROM_SNAPSHOT: unique symbol = Symbol("World.fromSnapshot");
+
 export class World {
+  /** Remake-only approximation for the original's beam-position solar phase bit. Saved separately from Sim RNG. */
+  private readonly solarPhaseRng: SeededRng;
   readonly cells: Uint16Array;
   readonly objects = new Uint8Array(OBJECT_SLOTS * OBJECT_SIZE);
+  /**
+   * Number of used object records as the original's count word ($142C2) saw it when the world was
+   * created: buildObjects() sets it to the records it made, fromSnapshot() to the saved count word.
+   * It is NOT kept current by building, demolishing or construction, and used records are NOT a
+   * dense prefix: construction takes the first free slot and demolition frees a slot in place.
+   * Never use it as a loop bound over `objects`; scan all OBJECT_SLOTS (a slot is free when its tile
+   * word is 0) and use the state word at OBJECT_COUNT_ADDRESS for the live count.
+   */
   objectCount = 0;
   warehouseCapacity = 0;
+  /**
+   * The original's per-cell flag bytes ($3D3A6, CELL_FLAG_BYTES = 75 rows x 102, index y * 102 + x; see
+   * cell-flags.ts). Always a real buffer: all zero for a world built from a scenario, a copy of the saved
+   * bytes (padding columns included) for World.fromSnapshot. The runtime flag users (UnitSystem,
+   * EnemySystem, the building screens) share THIS buffer and only touch bits of playable cells; map words
+   * stay in `cells` with their own 100-wide indexing.
+   */
+  readonly cellFlags: Uint8Array;
+  private readonly startupSolarPhase: (() => boolean) | undefined;
 
+  constructor(state: GameState, cells: Uint16Array, options?: WorldOptions);
+  /** Internal: adopts validated saved data; use World.fromSnapshot. */
+  constructor(state: GameState, cells: Uint16Array, marker: typeof FROM_SNAPSHOT, saved: WorldSnapshot);
   constructor(
     readonly state: GameState,
     cells: Uint16Array,
+    markerOrOptions?: typeof FROM_SNAPSHOT | WorldOptions,
+    saved?: WorldSnapshot,
   ) {
+    const marker = markerOrOptions === FROM_SNAPSHOT ? FROM_SNAPSHOT : undefined;
+    const options = marker ? undefined : markerOrOptions as WorldOptions | undefined;
+    const seed = options?.solarPhaseSeed;
+    if (seed !== undefined && (!Number.isInteger(seed) || seed < 0 || seed > 0xffff_ffff)) {
+      throw new RangeError("World: solarPhaseSeed must be an unsigned 32-bit integer");
+    }
+    // A snapshot/restored world must not consume host randomness while a load is being prepared.
+    this.solarPhaseRng = createRng(marker === FROM_SNAPSHOT ? 0 : seed ?? Math.floor(Math.random() * 0x1_0000_0000));
+    this.startupSolarPhase = options?.startupSolarPhase;
     this.cells = cells.slice();
-    this.buildObjects();
+    if (marker === FROM_SNAPSHOT && saved) {
+      // Adopt as stored: no buildObjects, no solar-tile normalisation, no random phases, no type
+      // counters or warehouse capacity touched. warehouseCapacity stays 0 so that Sim does not
+      // overwrite the saved capacity word.
+      this.objects.set(saved.objects);
+      this.cellFlags = saved.cellFlags.slice();
+      this.objectCount = state.word(OBJECT_COUNT_ADDRESS);
+    } else {
+      this.cellFlags = new Uint8Array(CELL_FLAG_BYTES);
+      this.buildObjects();
+    }
+  }
+
+  /** Current serializable state for future solar-building phase rolls. */
+  get solarPhaseRngState(): number {
+    return this.solarPhaseRng.getState();
+  }
+
+  /** Restore the remake's solar phase stream; callers validate before committing a session. */
+  restoreSolarPhaseRngState(value: number): void {
+    this.solarPhaseRng.setState(value);
+  }
+
+  /** $2E00 is approximated by a separate serializable random stream, not the Sim RNG. */
+  nextSolarPhase(): boolean {
+    return this.solarPhaseRng(2) === 0;
+  }
+
+  /**
+   * Builds a world from a saved game over an already restored state, without the new-game builder:
+   * all map cells, all per-cell flag bytes and all OBJECT_SLOTS records are copied byte for byte,
+   * keeping every record in its original slot (free slots stay free, nothing is compacted) and the
+   * saved count word of `state` ($142C2) as is. No defaults are applied, no counters are recomputed
+   * and no randomness is used. Pure: `state` is only read, inputs are copied, and a bad input yields
+   * a typed error and no object.
+   */
+  static fromSnapshot(state: GameState, saved: WorldSnapshot): SnapshotResult<World> {
+    const fail = (code: SnapshotError["code"], message: string): SnapshotResult<World> => ({ ok: false, error: { code, message } });
+    if (!(state instanceof GameState)) return fail("not-bytes", "World.fromSnapshot needs a GameState");
+    if (typeof saved !== "object" || saved === null) return fail("not-bytes", "World.fromSnapshot needs { cells, cellFlags, objects }");
+    if (!(saved.cells instanceof Uint16Array)) return fail("not-bytes", "Map cells must be a Uint16Array");
+    if (!(saved.cellFlags instanceof Uint8Array) || !(saved.objects instanceof Uint8Array)) {
+      return fail("not-bytes", "Cell flags and object records must be Uint8Arrays");
+    }
+    if (saved.cells.length !== MAP_WIDTH * MAP_HEIGHT) {
+      return fail("map-size", `Map has ${saved.cells.length} cells, expected exactly ${MAP_WIDTH * MAP_HEIGHT}`);
+    }
+    if (saved.cellFlags.length !== CELL_FLAG_BYTES) {
+      return fail("flags-size", `Cell flags are ${saved.cellFlags.length} bytes, expected exactly ${CELL_FLAG_BYTES}`);
+    }
+    if (saved.objects.length !== OBJECT_SLOTS * OBJECT_SIZE) {
+      return fail("object-size", `Object records are ${saved.objects.length} bytes, expected exactly ${OBJECT_SLOTS * OBJECT_SIZE}`);
+    }
+    const count = state.word(OBJECT_COUNT_ADDRESS);
+    if (count > OBJECT_SLOTS) {
+      return fail("object-count", `Saved object count (word at $${OBJECT_COUNT_ADDRESS.toString(16).toUpperCase()}) is ${count}, maximum is ${OBJECT_SLOTS}`);
+    }
+    return { ok: true, value: new World(state, saved.cells, FROM_SNAPSHOT, saved) };
   }
 
   cell(x: number, y: number): number {
@@ -116,12 +235,13 @@ export class World {
         if (tile === TILE_MINE) this.objects[at + 6] = this.countFlag(x, y, FLAG_RICHNESS);
         if (tile === TILE_FUEL) this.objects[at + 6] = this.countFlag(x, y, FLAG_FUEL);
         if (tile === 0x0f || tile === 0x1f) {
-          // Solar-type tiles: the map cell is normalised and the record gets a random phase.
+          // Solar-type tiles: the map cell is normalised and the record gets a beam-phase approximation.
           view.setUint16(at, tile);
           this.cells[y * MAP_WIDTH + x] = (this.cell(x, y) & CELL_FLAGS) | (this.cell(x, y) & 0x300) | tile;
           this.objects[at + 2] = 0;
           this.objects[at + 7] = 0;
-          this.objects[at + 6] = Math.random() < 0.5 ? 0xff : 1;
+          const phase = this.startupSolarPhase ? this.startupSolarPhase() : this.nextSolarPhase();
+          this.objects[at + 6] = phase ? 0xff : 1;
         }
         s.setWord(t + T.total, s.word(t + T.total) + 1);
         slot++;

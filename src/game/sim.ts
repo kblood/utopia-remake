@@ -8,7 +8,8 @@ import { Fleet, type EffectKind } from "./sim-ships.js";
 import { Aliens, type EnemySpawn } from "./sim-aliens.js";
 import { Alerts, LIGHT } from "./sim-alerts.js";
 import { OBJECT_SLOTS, T, type World } from "./world.js";
-import { createRng, divsQ, divuQ, divuReg, mulu, muls, s16, s8, type Rng } from "./sim-math.js";
+import { createRng, divsQ, divuQ, divuReg, mulu, muls, s16, s8, type Rng, type SeededRng } from "./sim-math.js";
+import { createHardware, isSeededHardware, type HardwareSource, type HardwareState } from "./sim-hardware.js";
 import { GOOD_WEIGHT, JOB_POOL_TYPES, POWER_TYPES, RESEARCH_BITS, RESEARCH_INDEX, RESEARCH_SCALE, RESEARCH_THRESHOLD, STARVATION_LEVEL, TAX_MORALE, TAX_QOL } from "./sim-tables.js";
 
 // Variable-block addresses used by the simulation (game-state.md section 3).
@@ -86,7 +87,7 @@ const TY = {
 } as const;
 
 // Bits of the system flag byte $156AA (kept in Sim.sysFlags).
-export const SYS = { attackPending: 0x02, noUnitBonus: 0x04, gameOver: 0x08, qol80: 0x10, qol90: 0x20, eclipse: 0x40, attack: 0x80 } as const;
+export const SYS = { attackPending: 0x02, noUnitBonus: 0x04, gameOver: 0x08, qol80: 0x10, qol90: 0x20, eclipse: 0x40, tutorialMode: 0x80 } as const;
 
 const TILE_MINE = 0x60;
 const TILE_FUEL = 0x3e;
@@ -106,8 +107,16 @@ export interface Offer {
   price: number; // Gr per colonist (colonists) or total fine (scientists)
 }
 
+/** The cells `$75A8` lists at `$7C28` for a demolished building (1 or 4 cells, origin first). */
+export type DemolishFootprint = ReadonlyArray<readonly [number, number]>;
+
 export interface SimOptions {
   rng?: Rng;
+  /**
+   * Stand-in for the two hardware reads of the original ($BFE801 CIA TOD for the enemy attack gate, `$2E00` beam parity
+   * for the wave jitter sign). Default: a seeded `createHardware()`. Never draws from `rng`. See sim-hardware.ts.
+   */
+  hardware?: HardwareSource;
   // Answer of the original's two-button dialog $DECC: true = first button (accept the Earth
   // request: buy the colonists / hand over the scientists), false = second button.
   decide?: (offer: Offer) => boolean;
@@ -124,8 +133,12 @@ export interface SimOptions {
   // $4692: remove the first unit from the map; returns its type (9 or 10), or null when none exists.
   // Without a unit layer a unit of the type with a non-zero count is chosen.
   destroyUnit?: () => number | null;
-  // $7372: knock down the building at a cell (used by the mine collapse event).
-  demolishAt?: (x: number, y: number) => void;
+  // $7372: knock down the building at a cell. A demolition is NOT a blast by itself: the mine collapse event calls `$7372`
+  // alone (no counter, no `$1237C`), while `Sim.bomb` (`$12332`) demolishes and then blasts. A hook that can report the
+  // footprint returns the cells `$75A8` listed (`[]` when nothing was a building: ground, construction site, refusal) and
+  // `bomb` blasts exactly those. A void/invalid report is unknown, so no blast is presented rather than inventing a cell.
+  // The third argument models `$156A9` bit 4, which `$12332` sets only around `$7372` so occupied vents can be demolished.
+  demolishAt?: (x: number, y: number, bombing?: boolean) => DemolishFootprint | void;
   // When true an Earth offer waits in `pending` (and time stops) until resolveOffer() is called,
   // instead of asking `decide`.
   interactive?: boolean;
@@ -139,66 +152,225 @@ export interface SimOptions {
   defectUnit?: () => { x: number; y: number } | null;
   // $12510: heal every own ground unit by `amount` hit points (type maximum from UNIT_INIT).
   repairUnits?: (amount: number) => void;
+  /** `$11D34` gun A, consumed from pending-period bit 4 at the start of `$99C4`. */
+  gunA?: () => void;
+  /** `$11D34` gun B, consumed in the daily branch before `$ACE2`. */
+  gunB?: () => void;
 }
+
+export type SimInitialization = "new-game" | "snapshot";
 
 export class Sim {
   readonly state: GameState;
   readonly messages: number[] = []; // string-table indices shown through $5A8C / $551A
   readonly events: SimEvent[] = [];
-  sysFlags = 0x01; // $156AA default
+  // `$866E` writes $01 during initialization, then ordinary game-start routine `$80A6` clears bit 0 before play.
+  // Model the runtime value; snapshot restoration replaces it with the saved session value.
+  sysFlags = 0;
   paused = false; // $156A9 bit 2
 
   private readonly rng: Rng;
-  private readonly decide: (offer: Offer) => boolean;
+  private readonly hardware: HardwareSource;
+  private decide: (offer: Offer) => boolean;
 
   private onWeek: (() => void) | undefined;
   private centreHook: ((slot: number) => void) | undefined;
   private dayHook: (() => void) | undefined;
   private spawnUnit: (x: number, y: number, advanced: boolean) => boolean;
-  private readonly interactive: boolean;
-  private demolishAt: (x: number, y: number) => void;
+  private interactive: boolean;
+  private demolishAt: (x: number, y: number, bombing?: boolean) => DemolishFootprint | void;
   private destroyUnit: () => number | null;
   private effectHook: ((kind: EffectKind, x: number, y: number) => void) | undefined;
   private spawnEnemyHook: (spawn: EnemySpawn) => boolean;
   private defectHook: () => { x: number; y: number } | null;
   private repairHook: ((amount: number) => void) | undefined;
+  private gunAHook: (() => void) | undefined;
+  private gunBHook: (() => void) | undefined;
   // Own spaceships and the ship yard ($AC04, $4060, $ACE2, ...), alien/meteor/intelligence code.
   readonly fleet: Fleet;
   readonly aliens: Aliens;
   // Warning lights and the view bookmark ($15634.., $144BD, $144E8).
   readonly alerts: Alerts;
   pending: { offer: Offer; apply: (accepted: boolean) => void } | null = null;
+  private scenarioStartInitialized = false;
 
   constructor(
     readonly world: World,
     options: SimOptions = {},
+    readonly initialization: SimInitialization = "new-game",
   ) {
     this.state = world.state;
     this.rng = options.rng ?? createRng(0x55746f70);
+    this.hardware = options.hardware ?? createHardware();
     this.decide = options.decide ?? (() => false);
     this.onWeek = options.onWeek;
     this.centreHook = options.centreChanged;
     this.dayHook = options.onDay;
     this.spawnUnit = options.spawnUnit ?? (() => true);
     this.interactive = options.interactive ?? false;
-    this.demolishAt = options.demolishAt ?? (() => {});
+    this.demolishAt = options.demolishAt ?? (() => []);
     this.destroyUnit = options.destroyUnit ?? (() => (this.s.long(0x14254) > 0 ? 9 : this.s.long(0x14258) > 0 ? 10 : null));
     this.effectHook = options.effect;
-    this.spawnEnemyHook = options.spawnEnemy ?? (() => true);
+    // Without a unit layer only the count-word compare of $48EC / $48B6 can be answered (60 ground, 30 air).
+    this.spawnEnemyHook = options.spawnEnemy ?? ((spawn) => this.state.word(spawn.air ? 0x142a4 : 0x142a2) < (spawn.air ? 30 : 60));
     this.defectHook = options.defectUnit ?? (() => ({ x: -1, y: -1 }));
     this.repairHook = options.repairUnits;
-    if (this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
+    this.gunAHook = options.gunA;
+    this.gunBHook = options.gunB;
+    // New games need a capacity fallback. A saved snapshot must stay byte-for-byte intact while
+    // its detached runtime graph is assembled; a later activation path can decide when to resume.
+    if (initialization === "new-game" && this.state.long(V.capacity) === 0) this.state.setLong(V.capacity, world.warehouseCapacity);
     this.fleet = new Fleet(this);
     this.aliens = new Aliens(this);
     this.alerts = new Alerts(this.state);
   }
 
-  // Called once per main-loop pass ($333A cadence, 2 video frames; not while paused): the meteor countdown
-  // ($3626) and the alien spawner ($1187C). Not part of tick() because the unit layer owns the pass clock.
+  /**
+   * Remake-save access (save-session.ts): the 32-bit state of the port's own generator, or null when a custom `rng`
+   * without `getState` was supplied (then the sequence cannot be saved).
+   */
+  get rngState(): number | null {
+    const rng = this.rng as Partial<SeededRng>;
+    return typeof rng.getState === "function" ? rng.getState() : null;
+  }
+
+  /** Continues the generator at a saved state. False (and nothing changed) when this Sim's generator has no `setState`. */
+  restoreRngState(value: number): boolean {
+    const rng = this.rng as Partial<SeededRng>;
+    if (typeof rng.setState !== "function") return false;
+    rng.setState(value);
+    return true;
+  }
+
+  /**
+   * Remake-save access: the two stream counters of the default hardware approximation, or null when a custom
+   * `hardware` stub without `getState` / `setState` was injected (then nothing about it can be saved).
+   */
+  get hardwareState(): HardwareState | null {
+    return isSeededHardware(this.hardware) ? this.hardware.getState() : null;
+  }
+
+  /** Continues the approximation streams at a saved state. False (nothing changed) for an injected stub without `setState`. */
+  restoreHardwareState(state: HardwareState): boolean {
+    if (!isSeededHardware(this.hardware)) return false;
+    this.hardware.setState(state);
+    return true;
+  }
+
+  /** `$BFE801` read (CIA TOD low byte), 0..255. Remake approximation, no Sim RNG draw. */
+  todLow(): number {
+    return this.hardware.todLow() & 0xff;
+  }
+
+  /** `$2E00` read (one beam-position bit), 0 or 1. Remake approximation, no Sim RNG draw. */
+  rasterParity(): number {
+    return this.hardware.rasterParity() & 1;
+  }
+
+  /** Construct simulation helpers over saved state without running constructor-time new-game writes. */
+  static fromSnapshot(world: World, options: SimOptions = {}): Sim {
+    return new Sim(world, options, "snapshot");
+  }
+
+  /**
+   * Models the ordinary fresh-scenario exit into the game proper. `$866E` leaves one day queued
+   * (`$156A8` bit 7), consumed by the first `$4D1C`; only the first boot-menu exit calls `$11476`
+   * to create the marker apparition. Detached snapshots never run this initialization.
+   */
+  initializeScenarioStart(initialAlien: boolean): void {
+    if (this.initialization !== "new-game" || this.scenarioStartInitialized) return;
+    this.scenarioStartInitialized = true;
+    this.dayQueued = true;
+    if (initialAlien) this.aliens.initializeScenarioAppearance();
+  }
+
+  /**
+   * Replaces the runtime callbacks of an existing Sim (for example one built by `Sim.fromSnapshot` before a scene
+   * existed): every key that is present overwrites the old callback, absent keys keep theirs. `interactive: true`
+   * turns Earth offers into a pending dialog from the next offer on. The random generator (`rng`), the saved state,
+   * the world, the Fleet / Aliens / Alerts helpers, `sysFlags`, `paused`, `pending` and the event queue are NOT
+   * touched and nothing is called. `decide` is the non-interactive answer of the $DECC dialog.
+   */
+  bindRuntimeHooks(hooks: Omit<SimOptions, "rng" | "hardware">): void {
+    if (hooks.decide !== undefined) this.decide = hooks.decide;
+    if (hooks.onWeek !== undefined) this.onWeek = hooks.onWeek;
+    if (hooks.centreChanged !== undefined) this.centreHook = hooks.centreChanged;
+    if (hooks.onDay !== undefined) this.dayHook = hooks.onDay;
+    if (hooks.spawnUnit !== undefined) this.spawnUnit = hooks.spawnUnit;
+    if (hooks.interactive !== undefined) this.interactive = hooks.interactive;
+    if (hooks.demolishAt !== undefined) this.demolishAt = hooks.demolishAt;
+    if (hooks.destroyUnit !== undefined) this.destroyUnit = hooks.destroyUnit;
+    if (hooks.effect !== undefined) this.effectHook = hooks.effect;
+    if (hooks.spawnEnemy !== undefined) this.spawnEnemyHook = hooks.spawnEnemy;
+    if (hooks.defectUnit !== undefined) this.defectHook = hooks.defectUnit;
+    if (hooks.repairUnits !== undefined) this.repairHook = hooks.repairUnits;
+    if (hooks.gunA !== undefined) this.gunAHook = hooks.gunA;
+    if (hooks.gunB !== undefined) this.gunBHook = hooks.gunB;
+  }
+
+  // The alien half of one main-loop pass, called AFTER the unit layer ($333A order, static trace): own tanks, ships,
+  // enemy ground, enemy air, effects, then the alien frame ($35C8), the meteor countdown ($3626), (the draw sort is
+  // modelled by the renderer, ObjectLayer.drawList, not by a simulation step) and last the spawner $1187C. Not while paused or while an offer is pending. Not part of tick() of the unit
+  // layer because that owns the pass clock; MapScene calls `ObjectLayer.update()` first and this second.
   pass(): void {
     if (this.paused || this.pending) return;
+    this.aliens.alienFrameStep();
     this.aliens.meteorStep();
     this.aliens.spawnStep();
+  }
+
+  /** True while a day change ($14590 ran out) waits for the next main-loop pass to be consumed ($156A8 bit 7). */
+  dayQueued = false;
+
+  /**
+   * VBL half of the original loop: decrement `$14590` unless paused, queue a day at zero, and set the special-period
+   * bit whenever the resulting countdown is `$2D`. The special check is outside the pause branch in `$2C34`, so a
+   * paused countdown already at `$2D` still queues gun A. Dialogs and the build menu freeze the whole timer block
+   * (`$156A8` bit 4), represented by `modal` / `pending`.
+   */
+  countFrame(modal = false): void {
+    if (modal || this.pending) return;
+    if (!this.paused && this.state.countFrame()) this.dayQueued = true;
+    if (this.state.byte(A.frameCountdown) === 0x2d) {
+      this.state.setByte(A.pending, this.state.byte(A.pending) | PERIOD.special);
+    }
+  }
+
+  /**
+   * Combined date + periodic phase for headless callers. The original caller draws first, advances the queued date
+   * (`$4D48/$4D1C`), waits for VBL, then runs `$99C4`. MapScene separates those phases around its redraw; this combined
+   * method preserves date-before-worker semantics for callers without a renderer.
+   */
+  periodicPass(): void {
+    if (this.pending) return;
+    this.advanceQueuedDay();
+    this.runAfterVblWait();
+  }
+
+  /** `$4D1C` date work after drawing and before the VBL wait; MapScene separates this from `$99C4`. */
+  advanceQueuedDay(): void {
+    // The original calls `$564A` unconditionally from `$4D1C`, even while paused. Pause gates `$99C4` periodic
+    // simulation work, not the queued calendar step; its pending daily/weekly/monthly bits wait until resume.
+    if (this.pending || !this.dayQueued) return;
+    this.dayQueued = false;
+    this.state.advanceDay();
+  }
+
+  /** `$99C4`, after the outer-loop VBL wait. Kept separate so MapScene can draw before periodic side effects. */
+  runAfterVblWait(): void {
+    if (this.pending) return;
+    this.run();
+  }
+
+  /**
+   * Combined headless form of the sim's share of one pass: `pass()` (alien frame, meteor, spawner), then date and
+   * periodic work. A caller that owns a unit layer steps it before calling this. MapScene separates date and periodic
+   * work around the redraw. Nothing runs while an offer is pending.
+   */
+  loopPass(): void {
+    if (this.pending) return;
+    this.pass();
+    this.periodicPass();
   }
 
   // Hooks used by Fleet / Aliens.
@@ -215,22 +387,29 @@ export class Sim {
   repairUnits(amount: number): void {
     this.repairHook?.(amount);
   }
-  // $12332: bomb a building cell: demolish, damage counter $1346A++ (always), explosion.
+  // $12332: bomb a building cell: demolish ($7372, which lists the footprint cells at $7C28), damage counter $1346A++
+  // (always, even when nothing was demolished), then one `$1237C` blast per listed cell in list order. The blast is the
+  // `explosion` effect: the host applies the visible-window, volume and 30-slot pool rules of `$1237C` once per cell.
+  // Without a footprint report, no cell is presented: the original only calls `$1237C` for cells explicitly listed by `$7372`.
   bomb(x: number, y: number): void {
-    this.demolishAt(x, y);
+    const footprint = this.demolishAt(x, y, true);
     this.state.setWord(0x1346a, this.state.word(0x1346a) + 1);
-    this.effect("explosion", x, y);
+    const cells: DemolishFootprint = Array.isArray(footprint) ? footprint : [];
+    for (const [cx, cy] of cells) this.effect("explosion", cx, cy);
   }
 
   get gameOver(): boolean {
     return (this.sysFlags & SYS.gameOver) !== 0;
   }
 
-  // One video frame: advances the frame countdown and runs whatever became due.
+  // Combined one-call form kept for headless callers: one VBL followed by one main-loop pass in the traced order
+  // (alien phase, then date advance and `$99C4`). The map scene instead calls `countFrame()` per video update and the
+  // two halves at its configured pass cadence.
   tick(): void {
     if (this.pending) return;
-    this.state.tickFrame();
-    this.run();
+    this.countFrame();
+    this.pass();
+    this.periodicPass();
   }
 
   // $99C4: consume the pending period bits in the original's order.
@@ -243,7 +422,7 @@ export class Sim {
       s.setByte(A.pending, pending & ~b);
       return true;
     };
-    bit(PERIOD.special); // $11D34 (gun animation) is not ported
+    if (bit(PERIOD.special)) this.gunAHook?.(); // $99D0..$99E8: Gun A is the first periodic step.
     if (bit(PERIOD.daily)) this.daily();
     if (this.gameOver) return;
     if (bit(PERIOD.weekly)) this.weekly();
@@ -326,9 +505,10 @@ export class Sim {
 
   // ---- daily -----------------------------------------------------------------------------
 
-  // $99C4 daily branch. $11D34 (gun turret AI) is not ported.
+  // $99C4 daily branch: QoL, Gun B ($9A06..$9A14), then $ACE2 missile handling.
   private daily(): void {
     if (this.s.byte(A.day) === 1) this.qualityOfLife();
+    this.gunBHook?.();
     this.fleet.dailyFuel(); // $ACE2
     this.checkGameOver();
     this.alerts.daily(); // $144BD countdown
@@ -410,7 +590,7 @@ export class Sim {
   // $10FCA
   private eclipseWeekly(): void {
     const s = this.s;
-    if (this.sysFlags & SYS.attack) return;
+    if (this.sysFlags & SYS.tutorialMode) return;
     if (s.byte(V.eclipse) !== 0) {
       s.setByte(V.eclipse, s.byte(V.eclipse) - 1);
       if (s.byte(V.eclipse) !== 0) return;
@@ -430,10 +610,12 @@ export class Sim {
   // One event slot per day (k = $144BF, reset monthly); chance bytes at $13118+k.
   private eventScheduler(): void {
     const s = this.s;
-    if (this.sysFlags & SYS.attack) return;
+    if (this.sysFlags & SYS.tutorialMode) return;
     const k = s.byte(V.eventIndex);
     const chance = s.byte(0x13118 + k);
-    if (chance !== 0) this.runEvent(k, chance);
+    // Event 9 (attack wave, day-event slot 9 in the monthly index cycle) ignores the chance table (static trace): it reads its own tables
+    // ($13456 record, intelligence countdown). Every other event is skipped when its chance byte is 0.
+    if (chance !== 0 || k === 9) this.runEvent(k, chance);
     s.setByte(V.eventIndex, k + 1);
   }
 
@@ -571,7 +753,7 @@ export class Sim {
     if (mines === 0) return;
     let skip = this.roll(mines);
     const o = this.world.objects;
-    for (let slot = 0; slot < this.world.objectCount; slot++) {
+    for (let slot = 0; slot < OBJECT_SLOTS; slot++) {
       const at = slot * 8;
       if (((o[at] << 8) | o[at + 1]) !== TILE_MINE) continue;
       if (skip-- > 0) continue;
@@ -739,8 +921,7 @@ export class Sim {
     s.setByte(0x144bc, (s.byte(0x144bc) - 1) & 0xff);
     const spot = this.randomBuilding();
     if (!spot) return 0;
-    this.demolishAt(spot[0], spot[1]); // $12332: the building is bombed
-    s.setWord(0x1346a, s.word(0x1346a) + 1);
+    this.bomb(spot[0], spot[1]); // $10D60: `$12332` (demolish, counter, blast per footprint cell)
     this.applyMorale(-500);
     return 0x119;
   }
@@ -1001,7 +1182,10 @@ export class Sim {
         d1 = s16(reg & 0xffff);
       } else {
         const remainder = (reg >>> 16) & 0xff;
-        const r = this.roll(pct);
+        // The remainder of the divide by 100 is a percentage of one colonist, so the roll is 0..99 (observed: every
+        // $9C80 draw in the 01/11/2090 capture has range 100 while the death percent is 1-2; a roll below `pct` would
+        // kill a colonist for every fraction). Evidence: notes/formats/sim-port.md "Monthly RNG tape".
+        const r = this.roll(100);
         d1 = ((remainder - r) & 0x80) !== 0 ? 0 : 1;
         if (d1 === 0) continue;
       }
@@ -1212,7 +1396,7 @@ export class Sim {
     if (per === 0) return;
     const objects = this.world.objects;
     let left = yards;
-    for (let slot = 0; slot < this.world.objectCount && left > 0; slot++) {
+    for (let slot = 0; slot < OBJECT_SLOTS && left > 0; slot++) {
       const at = slot * 8;
       if (((objects[at] << 8) | objects[at + 1]) !== 0x45) continue;
       left--;
@@ -1249,7 +1433,6 @@ export class Sim {
 
   // $A360: production. Pool 5 (workshop) makes good 4, pool 0 turns good 1 into good 3,
   // mines (pool 2) yield good 2 and ore, the fuel plant (pool 1) fills the tanks.
-  // $AC04 (ship yard) is not ported.
   private production(): void {
     const s = this.s;
     for (let i = 0; i < 6; i++) s.setLong(0x143a6 + 4 * i, 0);
@@ -1501,7 +1684,7 @@ export class Sim {
     q -= mulu(weights, pollution);
     let qol = divsQ(q, 100) + 0x37;
     if (qol > 0x62) qol = 0x62;
-    if (this.sysFlags & SYS.attack) qol = s16(qol - 0x1e);
+    if (this.sysFlags & SYS.tutorialMode) qol = s16(qol - 0x1e);
     if (qol < 0x0a) qol = 0x0a;
     s.setLong(A.qualityOfLife, qol);
     if (((qol & 0xff) - 0x50) & 0x80) return;

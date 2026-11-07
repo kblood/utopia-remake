@@ -101,11 +101,11 @@ Labels (normal): `$124` at (99,47), `$125` at (73,69), the third at (73,96). Hig
 (`$13290`) at (182,69), 4 digits.
 Button 8 with a target runs `$49E8`: needs a free slot in the ship list (`$3A75E`, max 40, stride `$18`, count
 `$1429E`); none -> message `$12B` and the window closes. Otherwise it creates a ship of type `$11` (missile) with
-`$381E`, copies the target position into its +`$B`/+`$C` and the target pointer into +`$D`/+`$E`, removes the
+`$381E`. In the daily ship step `$ACE2`, a type `$11` record does `move.l $C(a6),d2; andi.l #$FFFFFF,d2`: the effective 24-bit enemy-record address is bytes +`$D..+$F` (+$C, the saved target y, is the masked-away top byte of that long). It refreshes target x/y (+$B/+C) from the pointed record +1/+2, and is destroyed if that record type byte is zero. [V] A missile therefore has no class (+$D) or fuel word (+$E/+$F): those bytes are the pointer. `$49E8` stores a separate own-cell flag pointer at +$14 (`$497E`: `$3D3A6 + y*$66 + x`). The same `$497E` call + store of `a4` at +$14 is made by the ordinary-ship creation `$387E` (before `$381E`), so +$14 is the per-cell flag-byte pointer for every ship-list record. [V, static]. Whether it is updated while a ship moves or lands is not traced. `$49E8` removes the
 launcher (record word cleared, word `$142C2` -= 1, T.A -= 1, T.C -= 1 when record +3 != 0, its cell becomes tile `$9E`
 rubble, one cell, with the flag byte) and closes with a sound. The missile then flies in the daily step `$ACE2` (section 5).
 The port has no enemy model: `BuildingHooks.findTarget` / `launchMissile` provide it; without them a launcher
-never has a target.
+never has a target. The port's `launchMissile` stores the slot identity of the target (`Fleet.createMissile`, not `createShip`; ship-control.md 5d) and returns false when the ship list is full, which is when this screen says `$12B`.
 
 ### 3.7 Ship yard `$D7D6` (T[27] `$133D4`, tile `$36`) - VERIFIED
 If word `$133F8` (T[29].C, online command centres) = 0: message `$B3`, nothing else. Otherwise the yard record's

@@ -3,12 +3,14 @@
 // Game data is read from the user's folder at runtime and is never bundled.
 
 import { detectProfile } from "./data/detect.js";
+import { summariseInputErrors } from "./data/profile-input.js";
+import { startFromFiles } from "./startup.js";
 import { createMusic } from "./audio/music.js";
 import { createSfx } from "./audio/sfx.js";
 import { Game } from "./game/game.js";
 import type { Input } from "./game/intro.js";
 import type { Screen } from "./gfx/screen.js";
-import { drawPointer, POINTER_ARROW, readPointer } from "./gfx/pointer.js";
+import { drawPointer, POINTER_ARROW, POINTER_CELL_HOVER, readPointer } from "./gfx/pointer.js";
 
 const WIDTH = 320;
 const HEIGHT = 256;
@@ -48,23 +50,40 @@ function drawPlaceholder(ctx: CanvasRenderingContext2D): void {
 
 const FRAME_MS = 20; // 50 Hz, like the original PAL display
 
-async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, files: File[]): Promise<void> {
-  const disk1 = files.find((f) => f.name.toLowerCase() === "disk.1");
-  if (!disk1) return;
-  const disk2 = files.find((f) => f.name.toLowerCase() === "disk.2");
-  if (!disk2) return;
-  const disk = new Uint8Array(await disk1.arrayBuffer());
-  const scenarioDisk = new Uint8Array(await disk2.arrayBuffer());
-  const pointer = readPointer(disk, POINTER_ARROW);
-  const music = createMusic(disk, scenarioDisk);
-  const sfx = createSfx(disk, scenarioDisk, { music });
+async function runGame(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  files: File[],
+  status: HTMLElement,
+): Promise<boolean> {
+  // Recognise, read and validate the files first; music, sound and Game are only constructed on valid input.
+  // Disk.4 (save seed) is optional: when present it is only offered through the disk menu as an
+  // experimental continuation source; it is read, never written.
+  const started = await startFromFiles(
+    files.map((f) => ({ name: f.name, size: f.size, read: async () => new Uint8Array(await f.arrayBuffer()) })),
+    {
+      createMusic: (disk1, disk2) => createMusic(disk1, disk2),
+      createSfx: (disk1, disk2, music) => createSfx(disk1, disk2, { music }),
+      createGame: (disk1, disk2, music, sfx) => new Game(disk1, disk2, music, sfx),
+    },
+  );
+  if (!started.ok) {
+    status.textContent = `Ugyldige spilfiler: ${summariseInputErrors(started.errors)}`;
+    return false;
+  }
+  const { music, sfx, game } = started;
+  const disk = started.input.disk1;
+  const disk4 = started.input.disk4;
+  if (disk4) game.setDisk4(disk4.bytes, disk4.name);
+  if (started.warnings.length > 0) status.textContent += ` (${started.warnings.map((w) => w.message).join(" ")})`;
+  const pointerArrow = readPointer(disk, POINTER_ARROW);
+  const pointerCellHover = readPointer(disk, POINTER_CELL_HOVER);
   const wake = (): void => {
     music.resume();
     sfx.resume();
   };
   canvas.addEventListener("mousedown", wake);
   window.addEventListener("keydown", wake);
-  const game = new Game(disk, scenarioDisk, music, sfx);
 
   const input: Input = { leftButton: false, rightButton: false, pointerX: 0, pointerY: 0, keys: [] };
   window.addEventListener("keydown", (e) => {
@@ -106,26 +125,43 @@ async function runGame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement,
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
     const rgba = active.toRgba();
-    if (game.pointerVisible) drawPointer(pointer, active, rgba, input.pointerX, input.pointerY);
+    if (game.pointerVisible) {
+      const point = game.pointerPoint(input.pointerX, input.pointerY);
+      drawPointer(game.pointerUsesCellHover ? pointerCellHover : pointerArrow, active, rgba, point.x, point.y);
+    }
     ctx.putImageData(new ImageData(rgba, 320, 200), 0, 0);
     requestAnimationFrame(step);
   };
   requestAnimationFrame(step);
+  return true;
 }
 
 function setupPicker(status: HTMLElement, ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
   const input = getElement("folder", HTMLInputElement);
+  let started = false;
 
   input.addEventListener("change", () => {
+    if (started) return;
     const picked = Array.from(input.files ?? []);
-    const summary = picked.map((f) => ({ name: f.name, size: f.size }));
-    const result = detectProfile(summary);
+    const result = detectProfile(picked.map((f) => ({ name: f.name, size: f.size })));
 
+    // Recognition by name and size only; runGame then validates the bytes before anything is constructed.
     if (result.profile) {
       status.textContent = `Fundet: ${result.profile.label}`;
-      runGame(ctx, canvas, picked).catch((err) => {
-        status.textContent = `Fejl ved titelbillede: ${err instanceof Error ? err.message : String(err)}`;
-      });
+      started = true;
+      input.disabled = true;
+      const reopen = (): void => {
+        started = false;
+        input.disabled = false;
+      };
+      runGame(ctx, canvas, picked, status)
+        .then((ok) => {
+          if (!ok) reopen();
+        })
+        .catch((err) => {
+          reopen();
+          status.textContent = `Fejl ved titelbillede: ${err instanceof Error ? err.message : String(err)}`;
+        });
     } else {
       status.textContent = `Mangler eller forkerte filer: ${result.missing.join(", ")}`;
     }

@@ -7,6 +7,11 @@ import type { ObjectLayer } from "../objects.js";
 import type { Sim } from "../sim.js";
 import type { World } from "../world.js";
 
+export interface IntelligenceAssets {
+  portraits: Uint8Array;
+  text: Uint8Array;
+}
+
 export interface ScreenScene {
   // One call per video frame. "close" = the screen was left (the map scene continues).
   update(input: Input): "running" | "close";
@@ -16,8 +21,8 @@ export interface ScreenScene {
   draw(screen: Screen): void;
 }
 
-// Positions (map cells) of the unit classes the overview map colours besides the own ground units, which
-// it takes from `ScreenContext.objects`. The port does not simulate these yet; pass them when it does.
+// Positions (map cells) of the unit classes the overview map colours besides own ground units, which it
+// reads from `ScreenContext.objects`. `Game.screenContext()` supplies these from the live EnemySystem.
 export interface Cell {
   x: number;
   y: number;
@@ -35,6 +40,7 @@ export interface ScreenContext {
   world: World;
   sim: Sim;
   strings: GameStrings;
+  intelligence?: IntelligenceAssets;
   // Optional message line / log hook ($551A / $5A8C string indices), for refusals the
   // original reports on the map screen. The scene closes at once when it does so.
   say?: (index: number) => void;
@@ -46,6 +52,10 @@ export interface ScreenContext {
   objects?: ObjectLayer;
   // Extra unit classes for the overview map (ships, enemy ground units and aircraft).
   otherUnits?: () => Partial<OverviewUnits>;
+  // Sound hook (SFX id, see audio/sfx.ts). PanelScene and OverviewScreen call it once with SFX.CLICK when a
+  // button is pressed ($5756/$5948 request id 4; release routines $57FA/$59C8 are silent). PanelScene stays silent while a
+  // number entry is open ($5110 never reaches $5756). Absent = silent.
+  sound?: (id: number) => void;
 }
 
 export type ScreenKind = "f1" | "f2" | "f3" | "f4" | "f5" | "f6" | "trade" | "market" | "staff" | "intel" | "overview" | "council";

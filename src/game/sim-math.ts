@@ -38,14 +38,28 @@ export function divsQ(num: number, den: number): number {
 // Random numbers: rng(range) returns 0..range-1, like the original $2DCC (d2 = range).
 export type Rng = (range: number) => number;
 
-export function createRng(seed: number): Rng {
+/**
+ * The port's own generator (not the original's $2DCC state, which is not modelled): one 32-bit counter. `getState` /
+ * `setState` exist so a remake save can continue the exact sequence; a custom `Rng` given to `Sim` has neither.
+ */
+export interface SeededRng extends Rng {
+  getState(): number;
+  setState(value: number): void;
+}
+
+export function createRng(seed: number): SeededRng {
   let a = seed >>> 0;
-  return (range: number): number => {
+  const rng = ((range: number): number => {
     a = (a + 0x6d2b79f5) >>> 0;
     let t = a;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     const r = ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     return range > 0 ? Math.floor(r * range) : 0;
+  }) as SeededRng;
+  rng.getState = () => a;
+  rng.setState = (value: number) => {
+    a = value >>> 0;
   };
+  return rng;
 }

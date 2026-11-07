@@ -6,7 +6,7 @@ import { unpackLz } from "../data/unpack.js";
 import { ModSong, parseMod } from "./modplayer.js";
 
 export interface TrackEntry extends SectorRange {
-  /** Flags word of the game's load table at $14E8 (meaning not fully known). */
+  /** Flags word of the game's load table at $14E8: high and low byte are the two Paula channels sound effects may take while this track plays (notes/formats/sfx.md). */
   flags: number;
 }
 

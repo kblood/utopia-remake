@@ -16,6 +16,9 @@ const LOG_IDLE_FRAMES = 500;
 const LOG_LINE_HEIGHT = 9;
 const LOG_PROTECT_DAYS = 10; // $5AF0: a new entry cannot be scrolled out for ten game days
 
+/** What the observer is told for `pushText` (a pre-patched line with no string-table index). */
+export const PATCHED_TEXT_MESSAGE = -1;
+
 // String indices the original shows in the log panel rather than on the message line.
 const LOG_INDICES = new Set([
   82, 98, 99, 101, 108, 109, 110, 141, 143, 148, 149, 150, 179, 197, 198, 199, 200, 215, 218, 219, 221, 223, 238, 239, 265, 285, 299, 300, 343, 390,
@@ -33,18 +36,36 @@ export class Messages {
   private entries: LogEntry[] = [];
   private logIdle = 0;
 
+  /**
+   * Passive observer of every message request (the runtime checkpoint recorder installs it; nothing else does).
+   * It is told the string-table index of each `push`, and `PATCHED_TEXT_MESSAGE` for `pushText`, before the
+   * message is handled; it must not call back into this object. It never changes what is shown.
+   */
+  observer: ((index: number) => void) | null = null;
+
   constructor(
     private readonly disk: Uint8Array,
     private readonly strings: GameStrings,
   ) {}
 
+  /** Read-only timers and log shape for observers: no text, no string-table content. */
+  inspect(): { lineFramesLeft: number; logIdleFrames: number; log: { lineCount: number; protectDays: number }[] } {
+    return {
+      lineFramesLeft: this.lineLeft,
+      logIdleFrames: this.logIdle,
+      log: this.entries.map((e) => ({ lineCount: e.lines.length, protectDays: e.protect })),
+    };
+  }
+
   // A message line with already patched text (e.g. the marker pin number).
   pushText(text: number[]): void {
+    this.observer?.(PATCHED_TEXT_MESSAGE);
     this.lineText = text;
     this.lineLeft = LINE_FRAMES;
   }
 
   push(index: number): void {
+    this.observer?.(index);
     const text = this.strings.get(index);
     if (text.length === 0) return;
     if (!LOG_INDICES.has(index)) {

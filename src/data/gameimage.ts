@@ -36,6 +36,23 @@ export function readInventionText(disk1: Uint8Array, bit: number): number {
   return (disk1[at] << 8) | disk1[at + 1];
 }
 
+const MUSIC_LABELS = 0x1530; // ten 8-byte NUL-terminated entries drawn by the music-select list ($1006)
+const MUSIC_LABEL_COUNT = 10;
+const MUSIC_LABEL_BYTES = 8;
+
+// The ten row labels of the music-select list, as raw text codes (no terminator). Rows 0-3 name the four tracks;
+// rows 4-9 are blank (spaces) in the game image. Read at run time from the user's Disk.1, never stored.
+export function readMusicLabels(disk1: Uint8Array): number[][] {
+  const rows: number[][] = [];
+  for (let i = 0; i < MUSIC_LABEL_COUNT; i++) {
+    const at = imageOffset(MUSIC_LABELS) + MUSIC_LABEL_BYTES * i;
+    const row: number[] = [];
+    for (let k = 0; k < MUSIC_LABEL_BYTES && disk1[at + k] !== 0; k++) row.push(disk1[at + k]);
+    rows.push(row);
+  }
+  return rows;
+}
+
 const LIGHT_TABLE = 0x15628; // four 16-byte entries: long, long = image address, word x, word y, flag byte, toggle byte
 const LIGHT_ROWS = 16;
 

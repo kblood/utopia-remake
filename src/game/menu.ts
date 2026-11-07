@@ -1,6 +1,7 @@
-// A plain list menu drawn with the game's own font over the main-screen picture. Used for the
-// scenario choice and the disk menu (save / load / new scenario / back). The original's disk
-// menu (`$7EF6`, modes in game-proper.md) has its own artwork; this one only keeps its choices.
+// A plain list menu drawn with the game's own font over the main-screen picture. REMAKE presentation, not original screens: the
+// scenario choice, the remake submenu (remake save / load / new scenario / Disk.4), the slot lists and the error pages. The
+// original's disk menu (`$7EF6`, picture + icons) is `disk-menu.ts`; its save-disk family, which needs floppies, has no
+// counterpart on these pages other than the choices they keep.
 
 import { COLOR, drawGameText } from "../data/gamefont.js";
 import { decodePicture, PICTURES } from "../data/picture.js";
@@ -20,6 +21,7 @@ export interface MenuEntry {
 export class MenuScene {
   readonly screen = new Screen();
   private wasDown = true; // ignore the click that opened the menu
+  private wasRight = true; // ... also a right click that is still held (the disk menu opens the remake submenu with one)
   private hover = -1;
 
   constructor(
@@ -56,6 +58,8 @@ export class MenuScene {
   update(input: Input): number | null {
     const pressed = input.leftButton && !this.wasDown;
     this.wasDown = input.leftButton;
+    const rightPressed = input.rightButton && !this.wasRight;
+    this.wasRight = input.rightButton;
     const row = Math.floor((input.pointerY - (TOP + 16)) / ROW);
     const inside = input.pointerX >= LEFT && input.pointerX < LEFT + WIDTH && row >= 0 && row < this.entries.length;
     const hover = inside ? row : -1;
@@ -63,7 +67,7 @@ export class MenuScene {
       this.hover = hover;
       this.draw();
     }
-    if (input.rightButton) return -1;
+    if (rightPressed) return -1;
     if (pressed && inside && this.entries[row].enabled !== false) return row;
     return null;
   }

@@ -214,7 +214,9 @@ check("sound ids used by the orders exist", typeof SFX.CLICK === "number" && typ
   const { x, y } = freeArea(env.world);
   const unit = env.units.spawn(9, x + 3, y + 3);
   const ship = newShip(env, x + 5, y + 5);
-  const missile = env.sim.fleet.createShip(17, x + 7, y + 7, 0);
+  env.enemies.spawn({ air: false, type: 22, x: x + 10, y: y + 10, dir: 0, entry: [0, 6, 0, 3, 0, 5, 50, 0] });
+  env.enemies.launchMissile({ x: x + 7, y: y + 7 }, env.enemies.findTarget(20, x + 7, y + 7)); // createShip no longer makes missiles
+  const missile = env.sim.fleet.ships.find((r) => r.type === 17);
   const layer = { units: env.units, pickables: () => [{ x: 100, y: 100, ref: unit }, { x: 300, y: 100, ref: ship }, { x: 150, y: 50, ref: missile }] };
   const ships = env.sim.fleet.ships;
   const p1 = pickObject(layer, ships, 0, 0, 0, 0, { x: x + 3, y: y + 3 });

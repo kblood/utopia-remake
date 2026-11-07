@@ -55,7 +55,7 @@ check("s16", s16(0xffff) === -1);
 // --- date chain ---------------------------------------------------------------------------
 {
   const { state } = fresh();
-  check("start date", state.dateText() === "28/06/2090");
+  check("new-game $142A6 is zero elapsed years while the displayed date starts in 2090", state.dateText() === "28/06/2090" && state.long(A.year) === 0);
   const seen = { daily: 0, weekly: 0, monthly: 0, yearly: 0 };
   const dates = [];
   const frames = 336 * 90;
@@ -74,7 +74,7 @@ check("s16", s16(0xffff) === -1);
   check("48 weeks per year", seen.weekly === 48);
   check("12 months, 1 year", seen.monthly === 12 && seen.yearly === 1);
   check("first month roll is 01/07/2090", dates[0] === "01/07/2090");
-  check("year rolls to 2091 at 01/01/2091", dates[6] === "01/01/2091" && state.long(A.year) === 2091);
+  check("year rolls to 2091 at 01/01/2091 while $142A6 counts elapsed years", dates[6] === "01/01/2091" && state.long(A.year) === 1);
 }
 
 // --- first month: income = pop * tax (+ grant) ------------------------------------------------
@@ -245,6 +245,45 @@ for (let sc = 0; sc < records.length; sc++) {
   check("tank yard: counter restarts", world.objects[at + 6] === 0);
 }
 
+// --- tank yard: observed staffing/ore trace (notes/formats/building.md, 2026-11-06) -------------------------------
+// Staged as two separate monthly calls of `tankYard()` ($A620) under hand-set preconditions. The original observation
+// is one scenario (index unidentified): yard staffed to 10 (`$143EA + 4*4` = `$143FA`), good-1 stock `$13156` 10 -> 0,
+// yard progress (+6) 10, no tank, and later the message "Tank Yards require more ore". The original's call timing,
+// the month in which the message appeared and everything about ore supply beyond the empty good-1 stock are NOT
+// asserted; this only pins that the existing remake path produces the same end values.
+{
+  const spawned = [];
+  const { state, world } = fresh(0, 5);
+  const sim = new Sim(world, { rng: createRng(5), spawnUnit: (x, y, adv) => (spawned.push([x, y, adv]), true) });
+  const at = world.objectCount * 8;
+  world.objects.set([0, 0x45, 0, 0xff, 52, 36, 0, 0], at); // finished yard record, progress byte +6 = 0
+  world.objectCount++;
+  state.setWord(0x133f8, 1); // an active Command Centre
+  state.setByte(0x144c8, 0); // power level
+  state.setWord(0x1337a, 1); // one tank yard (T[22] total)
+  state.setLong(0x143fa, 10); // job pool 4 (tank yard) assigned = 10
+  state.setLong(0x13156, 10); // good 1 stock = 10
+  state.setLong(0x1315e, 100); // good 3 stock, must stay untouched below 20 progress
+  const tanks0 = state.word(0x1429c);
+
+  sim.tankYard();
+  check("tank yard trace: 10 workers and 10 good-1 give progress 10", world.objects[at + 6] === 10, String(world.objects[at + 6]));
+  check("tank yard trace: the good-1 stock is consumed (10 -> 0), good 3 is not touched", state.long(0x13156) === 0 && state.long(0x1315e) === 100);
+  check("tank yard trace: no tank and no ore message in the staffed month", spawned.length === 0 && state.word(0x1429c) === tanks0 && !sim.messages.includes(0x96));
+
+  // Next month with the good-1 stock empty: the existing "more ore" warning, progress unchanged, still no tank.
+  sim.tankYard();
+  check("tank yard trace: empty good-1 stock gives message $96 and no spawned tank", sim.messages.includes(0x96) && spawned.length === 0 && state.word(0x1429c) === tanks0 && world.objects[at + 6] === 10 && state.long(0x13156) === 0);
+
+  // The message index is tied to the observed text through the user's own Disk.1 string table (skipped without it).
+  const disk1Path = path.join(root, "original", "utopia-whdload", "Disk.1");
+  if (fs.existsSync(disk1Path)) {
+    const { GameStrings } = await import("../dist/data/gamestrings.js");
+    const text = String.fromCharCode(...new GameStrings(new Uint8Array(fs.readFileSync(disk1Path)), 0).get(0x96));
+    check("tank yard trace: message $96 reads as the observed 'Tank Yards require more ore'", /tank yards require more ore/i.test(text), text);
+  }
+}
+
 // --- mine collapse ($11090) -----------------------------------------------------------------------
 {
   const hit = [];
@@ -287,6 +326,19 @@ for (let sc = 0; sc < records.length; sc++) {
 
 // --- crime consequences ($10D00, $10D9E) ---------------------------------------------------------
 {
+  const { state, sim } = fresh();
+  state.setLong(A.morale, 0);
+  state.setLong(A.population, 100);
+  state.setLong(0x13146, 0); // no security workers
+  sim.rng = (range) => range === 20 ? 10 : 0;
+  sim.crimeMonthly();
+  const yearZeroCrime = state.signedLong(0x142ce);
+  state.setLong(A.year, 5);
+  sim.crimeMonthly();
+  const yearFiveCrime = state.signedLong(0x142ce);
+  check("early crime bonus uses elapsed $142A6 years (40 points at year 0, none at year 5)", yearZeroCrime === 10 && yearFiveCrime === 50, `${yearZeroCrime}/${yearFiveCrime}`);
+}
+{
   const hit = [];
   const { state, world } = fresh(0, 13);
   const sim = new Sim(world, { rng: createRng(13), demolishAt: (x, y) => hit.push([x, y]) });
@@ -303,6 +355,32 @@ for (let sc = 0; sc < records.length; sc++) {
   sim.sysFlags = 1;
   sim.eventCrime();
   check("crime 70: colony falls", sim.gameOver && sim.events.some((e) => e.kind === "announce" && e.id === 0));
+}
+
+// --- $9C80 fractional death roll: range 100, not the death percent -------------------------------------------
+// Regression for a divergence found by the optional 01/11/2090 comparison (test/production-original-compare.mjs):
+// the original draws the fractional-colonist roll with range 100 (the remainder of the divide by 100 is a percentage),
+// the port used the death percent, so with percent 1-2 every fraction killed a colonist. Synthetic, not an original replay.
+{
+  const run = (roll) => {
+    const { state, sim } = fresh();
+    const ranges = [];
+    sim.rng = (range) => { ranges.push(range); return roll; }; // test seam: the field is readonly only in TypeScript
+    for (let i = 0; i < 9; i++) state.setLong(0x143ea + 4 * i, 0);
+    state.setLong(0x143ea, 6); // pool 0: 6 assigned, percent 2 -> 12 / 100 = 0 colonists + remainder 12
+    state.setLong(0x1313a, 6); // employed
+    state.setLong(0x13136, 0); // no free colonists, so only the pool fraction is decided
+    state.setLong(A.population, 100);
+    const removed = sim.deaths(2);
+    return { ranges, removed, assigned: state.long(0x143ea), employed: state.long(0x1313a), pop: state.long(A.population) };
+  };
+  const high = run(50); // 50 > remainder 12: no death
+  check("fraction roll: range is 100, not the percent", high.ranges.length === 1 && high.ranges[0] === 100, JSON.stringify(high.ranges));
+  check("fraction roll above the remainder: nobody dies", high.removed === 0 && high.assigned === 6 && high.employed === 6 && high.pop === 100);
+  const equal = run(12); // roll <= remainder: one death
+  check("fraction roll at the remainder: one death", equal.removed === 1 && equal.assigned === 5 && equal.employed === 5 && equal.pop === 99, JSON.stringify(equal));
+  const low = run(0);
+  check("fraction roll 0: one death", low.removed === 1 && low.assigned === 5);
 }
 
 // --- determinism ------------------------------------------------------------------------------------

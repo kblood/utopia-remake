@@ -289,5 +289,162 @@ check("intel level thresholds", intelLevel(0) === 0 && intelLevel(1) === 1 && in
   check("intel screen: other clicks are ignored", state.long(0x1446a) === 6500);
 }
 
+// --- button sound ($5756/$5948 request SFX id 4 on the press; $57FA/$59C8 release are silent) ----------
+{
+  const { SFX } = await import("../dist/audio/sfx.js");
+  const press = (scene, x, y) => {
+    input.pointerX = x;
+    input.pointerY = y;
+    input.leftButton = true;
+    return scene.update(input);
+  };
+  const release = (scene) => {
+    input.leftButton = false;
+    return scene.update(input);
+  };
+  const { ctx } = fresh();
+  const played = [];
+  ctx.sound = (id) => played.push(id);
+  const scene = createScreen("f1", ctx);
+  scene.update(input); // first frame
+  const { x, y } = ui.buttonPosition(9);
+  press(scene, x + 4, y + 4);
+  check("button sound: one SFX.CLICK on the press edge", played.length === 1 && played[0] === SFX.CLICK && SFX.CLICK === 4);
+  press(scene, x + 4, y + 4); // button held: no new edge
+  check("button sound: holding the button adds nothing", played.length === 1);
+  const result = release(scene);
+  check("button sound: release is silent (and still leaves)", played.length === 1 && result === "close");
+
+  const blank = createScreen("f1", ctx);
+  blank.update(input);
+  played.length = 0;
+  press(blank, 2, 2); // outside every button
+  release(blank);
+  check("button sound: blank-area click is silent", played.length === 0);
+
+  input.rightButton = true;
+  const rightResult = blank.update(input);
+  input.rightButton = false;
+  const esc = createScreen("f1", ctx);
+  esc.update(input);
+  input.keys.push("Escape");
+  const escapeResult = esc.update(input);
+  check("button sound: right click and Escape stay silent and close", played.length === 0 && rightResult === "close" && escapeResult === "close");
+
+  const council = createScreen("f1", ctx);
+  council.setCouncilMode();
+  council.update(input);
+  const councilResult = press(council, x + 4, y + 4); // same coordinate, but council has no button column
+  release(council);
+  check("button sound: council mode (no button column) is silent and closes", played.length === 0 && councilResult === "close");
+
+  const quiet = fresh().ctx; // no sound hook: unchanged behaviour
+  const silent = createScreen("f1", quiet);
+  silent.update(input);
+  check("button sound: absent hook is harmless", clickButton(silent, 9) === "close");
+
+  // $5110 (number entry) reads keys only and never reaches $5730/$5756: a button press while one is open is silent.
+  const staff = createScreen("staff", ctx);
+  staff.update(input);
+  played.length = 0;
+  click(staff, 100, rowY(40, 1)); // opens the number entry (not a button)
+  check("button sound: opening a number entry from a row click is silent", played.length === 0);
+  press(staff, x + 4, y + 4);
+  check("button sound: a button press during a number entry is silent", played.length === 0);
+  release(staff);
+  const staffAfter = createScreen("staff", ctx);
+  staffAfter.update(input);
+  click(staffAfter, 100, rowY(40, 1));
+  type(staffAfter, "3");
+  played.length = 0;
+  press(staffAfter, x + 4, y + 4);
+  check("button sound: after the entry is confirmed the same button clicks again", played.length === 1 && played[0] === SFX.CLICK);
+  release(staffAfter);
+}
+
+// --- number entry ($5110) ignores the mouse -------------------------------------------------------------------
+// `$5110` never polls `$50B2`, so no press highlights a button, none leaves a release pending, and none can close the parent window
+// or start a second action (notes/formats/screens.md section 1).
+{
+  const { SFX } = await import("../dist/audio/sfx.js");
+  const { ctx } = fresh();
+  const played = [];
+  ctx.sound = (id) => played.push(id);
+  const staff = createScreen("staff", ctx);
+  staff.update(input);
+  click(staff, 100, rowY(40, 1)); // opens the entry
+  played.length = 0;
+  const exit = ui.buttonPosition(9);
+  const flipped = new Screen();
+  staff.draw(flipped);
+  const idle = flipped.pixels.slice();
+  check("number entry: clicking the exit button neither closes the window nor clicks", clickButton(staff, 9) === "running" && played.length === 0);
+  check("number entry: clicking a blank command button is silent and keeps the window", clickButton(staff, 0) === "running" && played.length === 0);
+  // A button pressed during the entry is not highlighted either.
+  input.pointerX = exit.x + 4;
+  input.pointerY = exit.y + 4;
+  input.leftButton = true;
+  staff.update(input);
+  const during = new Screen();
+  staff.draw(during);
+  check("number entry: a button pressed during the entry is not drawn pressed", during.pixels.every((p, i) => p === idle[i]));
+  // Held through the confirming Return: the release afterwards must not be taken as a deferred exit.
+  input.keys.push("5", "Enter");
+  const confirmed = staff.update(input);
+  input.leftButton = false;
+  const afterRelease = staff.update(input);
+  check("number entry: a press held across Return does not close the window on its release", confirmed === "running" && afterRelease === "running" && played.length === 0);
+  check("number entry: with the entry finished the exit button works and clicks once", clickButton(staff, 9) === "close" && played.length === 1 && played[0] === SFX.CLICK);
+
+  // A row click during the entry must not start a second entry or move the typed digits.
+  const trade = createScreen("trade", ctx);
+  trade.update(input);
+  click(trade, 100, 0x36 + 3); // retain row 0 opens an entry
+  played.length = 0;
+  click(trade, 100, 0x36 + 9 * 2 + 3);
+  type(trade, "9");
+  check("number entry: a row click during an entry is ignored", played.length === 0 && clickButton(trade, 9) === "close");
+}
+{
+  // The market opens its entry from a button release: its own buttons must not restart the entry or leave while it is open.
+  const { state, ctx } = fresh();
+  state.setWord(0x133f8, 1);
+  const scene = createScreen("market", ctx);
+  scene.update(input);
+  state.setLong(0x1443a + 8, 50);
+  clickButton(scene, 4);
+  clickButton(scene, 1); // buy: opens the entry
+  const stockBefore = state.long(0x13152 + 4);
+  check("market entry: clicking the exit button does not close the window", clickButton(scene, 9) === "running");
+  check("market entry: clicking sell does not restart the entry", clickButton(scene, 0) === "running");
+  type(scene, "3");
+  check("market entry: the original buy entry is still the one confirmed", state.long(0x13152 + 4) >= stockBefore + 3 && state.long(0x1443a + 8) === 47);
+}
+
+// --- pressed-button flip (`$57D6`: plane 3 only, colour bit 3) --------------------------------------------------------
+{
+  const { flipButtonPixels, BUTTON_FLIP } = await import("../dist/game/screens/ui.js");
+  const screen = new Screen();
+  ui.drawButtons(screen, ui.readButtonTable(0xe930));
+  const before = screen.pixels.slice();
+  ui.invertButton(screen, 9);
+  const { x, y } = ui.buttonPosition(9);
+  let exact = BUTTON_FLIP === 8;
+  let outside = true;
+  for (let i = 0; i < before.length; i++) {
+    const px = i % 320;
+    const py = Math.floor(i / 320);
+    const inside = px >= x && px < x + 16 && py >= y && py < y + 16;
+    if (inside ? screen.pixels[i] !== (before[i] ^ 8) : screen.pixels[i] !== before[i]) {
+      if (inside) exact = false;
+      else outside = false;
+    }
+  }
+  check("pressed flip: inside the 16x16 button every pixel is colour ^ 8 (plane 3 only)", exact);
+  check("pressed flip: nothing outside the button changes", outside);
+  flipButtonPixels(screen, x, y);
+  check("pressed flip: running it again ($57FA) restores the button", screen.pixels.every((p, i) => p === before[i]));
+}
+
 console.log(failed === 0 ? "all screen checks passed" : `${failed} screen check(s) FAILED`);
 process.exit(failed === 0 ? 0 : 1);

@@ -28,6 +28,25 @@ Observationer fra filerne i `original/utopia-whdload/`. Mappen er gitignored. De
 
 Tekstregionerne er udtrukket lokalt til `original/extracted/disk2-text-regions.txt` (gitignored).
 
+## Inputgrænse: genkendelse og validering (IMPLEMENTED, kun syntetiske tests)
+
+Tre adskilte niveauer. Kun den understøttede WHDLoad 1.2 (0757)-profil er implementeret; ADF/HDF/IPF og andre udgaver afvises.
+
+- **Genkendelse** (`src/data/detect.ts`): kun filnavne (versalfølsomhed ignoreres) og størrelser: `Disk.1` 970 752, `Disk.2` 983 040, `Utopia.Slave` 1 264. `disk.4` er valgfri og uden størrelseskrav (WHDLoad udvider seed-filen, og spillet starter uden den). Den tidligere kontrol, der krævede `disk.4`, var i modstrid med `src/main.ts` og er fjernet.
+- **Valideret ressourcetilgængelighed** (`src/data/profile-input.ts`, `src/startup.ts`): de indlæste bytes kontrolleres, før lyd og `Game` oprettes. `Disk.1` skal begynde med `DOS\0`. `Disk.2` skal være mindst `$3C2` sektorer, have magic `UTOPSCEN` ved sektor `$3C0`, og alle ti scenarieposters sprites-, tile-, descriptor-, map-, block-, intel- og fire tekstområder skal have `first <= last` og slutte inden for filen. Fejl returneres som typede, handlingsbare `InputError`s uden at kaste. Kontrollen læser kun filens egne bytes ved kørsel; intet indhold eller nogen hash gemmes. Ikke kontrolleret: Disk.1's interne sektortabeller og indholdet af områderne. Områdegrænsen kommer fra de verificerede loader-noter (`game-proper.md`, afsnit 6). Et område med `last < first` afvises som korrupt; hvis en ægte kopi viser sig at bruge sådan en tom post, skal reglen lempes efter en emulatorobservation.
+- **Bevist kørselskompatibilitet**: ikke opnået ved nogen af kontrollerne. En bestået validering siger kun, at de deklarerede ressourcer findes og er i bounds.
+- ADF A og ADF B er stadig ikke accepteret som input. `Disk.1`/`Disk.2`-layouts er ikke lempet; ADF A kræver et emulatorspor (dens game-image-sektorer `$14C-$208` afviger).
+
+## Originale ADF-filer (rå sektorsammenligning)
+
+De to ADF-filer, der er listet i README, er hver 901 120 bytes (1 760 sektorer). De er ikke standard OFS/FFS-volumener, som `amitools/xdftool` kan mounte (`Utopia-a.adf`: ugyldig root block; `Utopia-b.adf`: ugyldig boot block). De indeholder dog rå sektorindhold.
+
+- ADF B er byte-for-byte identisk med de første 1 760 sektorer af WHDLoad `Disk.2`; WHDLoad-filen har yderligere 80 KiB.
+- Verificeret mod den lokale ADF B og parseren: alle ti scenariers registrerede sprites-, tile-, descriptor-, map-, parameter-, intelligence- og tekstområder slutter senest ved sektor 1 588. De ligger dermed inden for ADF B's 1 760 sektorer; ingen af de deklarerede scenarioranges kræver WHDLoad-filen's sidste 160 sektorer.
+- Exhaustive sector comparison within ADF A's length: it differs from WHDLoad `Disk.1` only in sectors `$000-$059` and `$14C-$208` (279 sectors total). The whole game-image region `$14C-$208` differs; 94 542 of its 96 768 bytes differ. The intervening sectors `$05A-$14B` and all other shared sectors match byte for byte.
+- ADF A ends after sector `$6DF`. Under the current WHDLoad layout it ends partway through the music range `$618-$6EB`; German strings `$6EC-$707`, title `$70A-$728` and logo `$729-$733` are entirely beyond EOF. The current engine also reads Disk.1's boot font and language tables directly, so a recovered game-image alone would not establish ADF compatibility.
+- ADF B kan derfor fungere som kilde til de scenariodata, som den nuværende Disk.2-parser deklarerer, men den eksisterende picker/loader har endnu ingen ADF-profil. ADF A kan ikke erstatte den nuværende WHDLoad `Disk.1` endnu: dens game-image-sektorer `$14C-$208` afviger, og motoren læser tabeller fra det område. De to ADF'er er derfor ikke en verificeret drop-in-parring til browsermotoren; ADF A's variant kræver særskilt analyse.
+
 ### Disk.2 – entropikort (målt, pr. 8 000-byte blok)
 
 Blokken er valgt, fordi en bitplan i Utopias billedformat fylder 8 000 bytes. Kortet er en klassificering og ikke en dekodning.
@@ -111,7 +130,7 @@ Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er
 - De første bytes er ASCII-tekst, og resten er blandet. Teksten gengives ikke her. Der er ikke fundet en formatbeskrivelse endnu.
 - Samme startadresse som tekstregionen i Disk.2, men det er et andet data-sæt.
 
-**Konsekvens:** disk.4 er en sparsom buffer med én datablok. Næste skridt er at bestemme, hvad den 1 004 bytes store region er (tabel, kode eller grafik).
+**Konsekvens:** XPK/MASH-dekomprimeringen virker, men betydningen af den sparse region på 1 004 bytes er stadig ukendt. Den dokumenterede spil-save bruger Disk.4 som sektorområde (se `game-proper.md`, afsnit 6); den lille XPK-fil ser derfor ikke ud til at indeholde selve save-slots. Præciseret: den region er save-diskens `UTOPSAVE`-header (se `xpk-mash.md`), så "ukendt" gælder ikke længere selve headeren. `src/data/disk4.ts` parser en allerede udpakket rå Disk.4-header og udleverer områderne A/B for udfyldte slots (syntetiske tests; `src/data/xpk-mash.ts` udpakker nu MASH-frøet i TypeScript, og `parseDisk4Input` sammensætter de to, men intet af det er koblet til loaderen, og der er ingen skrivning). Et første gendannelsesfundament (`src/game/disk4-load.ts`, `GameState.fromSnapshot`, `World.fromSnapshot`; kun syntetiske tests) kan bygge en ny tilstand og verden bytte-for-bytte fra en slots område B, kort, celleflag og objektposter med eksplicit scenarieindeks; enheder, skibe og fjender gendannes ikke, og det er ikke koblet til spillet, så der er ingen fuld gendannelse. Remakens save/load bruger stadig browserens localStorage og er ikke kompatibel med Disk.4.
 
 ## Andre filer
 
@@ -121,9 +140,9 @@ Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er
 
 ## Næste skridt
 
-1. Decodér tekstdata i Disk.2 og verificér mod en WinUAE-kørsel.
-2. Find sporlayoutet i Disk.1 med RawDIC, eller udtræk sporene i WinUAE.
-3. Pak disk.4 ud i WinUAE ved at køre spillet og tage et hukommelsesdump, eller skriv en MASH-decoder.
+1. (Delvist løst) Den sparse region er `UTOPSAVE`-headeren; hvad originalen skriver i slotnavne og områder ved save er stadig uverificeret mod en kørsel.
+2. Undersøg Disk.4 save-slot dataenes faktiske opbygning og skriveforløb mod originalen, før der implementeres gendannelse/eksport. Headerparseren i `src/data/disk4.ts` dækker kun et udpakket råt billede (`parseDisk4`); `parseDisk4Input` udpakker først XPK/MASH-frøet.
+3. ADF/IPF-mounting og kompatibilitet med andre udgivelser er ikke implementeret i browsermotoren.
 
 ## Reference run: WHDLoad boot tree (verified)
 

@@ -34,7 +34,7 @@ function fresh(options = {}, { scenario = 0, fixed = 0, mutate } = {}) {
   const world = new World(state, loadMap(disk2, records[scenario]));
   mutate?.(world, state);
   const rng = fixed === null ? createRng(7) : (range) => Math.min(fixed, range - 1);
-  const sim = new Sim(world, { rng, ...options });
+  const sim = new Sim(world, { rng, hardware: { todLow: () => 0, rasterParity: () => 0 }, ...options });
   state.setByte(0x144c8, 0); // power level 0
   return { state, world, sim };
 }
@@ -200,12 +200,41 @@ function addRecord(world, tile, x, y, byte3 = 0xff) {
   check("alien appears at a marker cell", sim.aliens.alien !== null && log.some((l) => l[0] === "alienAppear"));
 }
 
+// ---- saved alien animation state ($35C8-$35F8) ---------------------------------------------------------------
+{
+  const state = new GameState(disk2, records[0].block);
+  state.setWord(0x144a6, 1);
+  state.setByte(0x144a8, 0x13);
+  state.setByte(0x144a9, 7);
+  state.setByte(0x144aa, 65);
+  state.setWord(0x144a4, 4);
+  state.setByte(0x144ad, 2);
+  const world = new World(state, loadMap(disk2, records[0]));
+  const before = state.snapshot();
+  const sim = Sim.fromSnapshot(world);
+  check("snapshot construction hydrates the active alien without changing state", sim.aliens.alien?.x === 7 && sim.aliens.alien.y === 65 && Buffer.from(state.snapshot()).equals(Buffer.from(before)));
+  sim.pass();
+  check("one pass advances alien phase $144A4/$144A5 and frame +5 from table index 5", state.word(0x144a4) === 5 && state.byte(0x144a5) === 5 && state.byte(0x144ad) === 3);
+  sim.paused = true;
+  sim.pass();
+  check("paused pass holds alien animation state", state.word(0x144a4) === 5 && state.byte(0x144ad) === 3);
+  sim.paused = false;
+  state.setWord(0x144a4, 10);
+  sim.pass();
+  check("alien phase wraps at eleven to table entry zero", state.word(0x144a4) === 0 && state.byte(0x144a5) === 0 && state.byte(0x144ad) === 0);
+}
+
 // ---- meteor (event 8, $11676) -------------------------------------------------------------------------------
 {
   const log = [];
   const bombed = [];
   const { state, world, sim } = fresh({ effect: (k, x, y) => log.push(k), demolishAt: (x, y) => bombed.push([x, y]) });
   state.setLong(0x14472, 0);
+  let draws = 0;
+  sim.rng = () => { draws++; return 0; };
+  sim.aliens.eventMeteor(100);
+  check("meteor event is gated for the first three elapsed years without consuming RNG", sim.aliens.meteor === null && draws === 0 && state.long(A.year) === 0);
+  state.setLong(A.year, 3);
   sim.aliens.eventMeteor(3);
   const m = sim.aliens.meteor;
   check("meteor starts with timer $78 and message $182", m !== null && m.timer === 0x78 && sim.messages.includes(0x182));
@@ -225,7 +254,10 @@ function addRecord(world, tile, x, y, byte3 = 0xff) {
 // ---- alien attack waves (event 9) and spawner ---------------------------------------------------------------
 {
   const spawned = [];
-  const { state, sim } = fresh({ spawnEnemy: (e) => (spawned.push(e), true) });
+  const draws = [];
+  let rasterReads = 0;
+  const { state, sim } = fresh({ spawnEnemy: (e) => (spawned.push(e), true), hardware: { todLow: () => 255, rasterParity: () => (rasterReads++, 0) } });
+  sim.rng = (range) => (draws.push(range), 0);
   state.setByte(0x141b2, 0); // no countdown
   state.setByte(0x13456 + 0x10, 5);
   state.setByte(0x13456 + 0x11, 1);
@@ -243,6 +275,7 @@ function addRecord(world, tile, x, y, byte3 = 0xff) {
   let queued = 0;
   for (let g = 0; g < 16; g++) queued += state.byte(0x135c6 + g * 0x92 + 0x90);
   check("second call queues wave entries into a group", (sim.sysFlags & SYS.attackPending) === 0 && queued === 5, `queued ${queued}`); // roll 0 = +2 -> 3 + 2
+  check("wave group/entry use Sim RNG, count jitter uses raster input without an extra RNG draw", draws.join() === "100,16,8" && rasterReads === 1, `draws ${draws.join()}, raster reads ${rasterReads}`);
   // give every group a spawn cell and run the spawner over all groups
   for (let g = 0; g < 16; g++) {
     const base = 0x135c6 + g * 0x92;
@@ -257,9 +290,54 @@ function addRecord(world, tile, x, y, byte3 = 0xff) {
   queued = 0;
   for (let g = 0; g < 16; g++) queued += state.byte(0x135c6 + g * 0x92 + 0x90);
   check("spawner creates the queued enemies (ground type 5)", spawned.length === 5 && queued === 0 && state.word(0x142a2) === 5 && spawned.every((e) => !e.air && e.type === 5), `spawned ${spawned.length}`);
+  // The hook payload carries what $48EC needs: origin "wave", the alien level $13467 (-> record +A), the group direction
+  // and the eight raw entry bytes (-> +$13..+$15 and the combat fields).
+  check("spawner payload: origin wave, level from $13467, direction from the group, raw 8-byte entry", spawned.every((e) => e.origin === "wave" && e.level === 1 && e.dir === state.byte(0x135c6 + 0x91) && e.entry.length === 8 && e.entry[0] === 5 && e.entry[4] === 3), JSON.stringify(spawned[0]));
+}
+
+// `$1187C`: when all eight cells for the selected queue entry are blocked, stop this call and keep it queued.
+{
+  const { state, sim } = fresh();
+  const group = 0x135c6;
+  const entry = 0x13476;
+  for (let i = 0; i < 0x80; i++) state.setLong(group + 0x10 + 4 * i, 0);
+  state.setByte(entry, 22);
+  state.setByte(group + 0x90, 2);
+  state.setLong(group + 0x10 + 0x6c, entry);
+  state.setLong(group + 0x10 + 0x58, entry);
+  for (let i = 0; i < 8; i++) {
+    const x = 20 + i;
+    const y = 20;
+    state.setByte(group + 2 * i, x);
+    state.setByte(group + 2 * i + 1, y);
+    sim.world.cells[y * W + x] |= 0x1000;
+  }
+  sim.aliens.spawnStep();
+  check("spawner: eight blocked cells stop the call, preserve the entry and count, and advance one group", state.byte(group + 0x90) === 2 && state.long(group + 0x10 + 0x6c) === entry && state.long(group + 0x10 + 0x58) === entry && sim.aliens.spawner.cursor === 0x6c && sim.aliens.spawner.groupIndex === 1 && state.word(0x142a2) === 0);
 }
 
 // ---- intelligence and weekly battle ---------------------------------------------------------------------------
+{
+  const rolls = [];
+  const { state, sim } = fresh({ rng: (range) => { rolls.push(range); return 0; } });
+  state.setLong(0x1446a, 30000); // remains intel level 3 after the monthly decay
+  state.setByte(0x144ca, 3);
+  for (const base of [0x13ee6, 0x13f10, 0x13f3a, 0x13f64]) state.setByte(base, 0xff);
+  state.setByte(0x13fb8, 0);
+  state.setByte(0x13fba, 100); // fifth one-shot report chance for level 3
+  state.setByte(0x141b3, 100); // following repeatable report gate
+  state.setByte(0x13fb8 + 0x2a + 2, 100); // repeatable report chance for level 3
+  state.setByte(0x13456 + 0x18, 10); // alien strength
+  state.setByte(0x13456 + 0x19, 5);  // repeatable report adds this amount
+  state.setByte(0x13456 + 0x1e, 50);
+
+  sim.aliens.eventIntelStep();
+  check("fifth one-shot intel stage writes report at $14486 and marks $13FB8", state.byte(0x14486) === 6 && state.byte(0x14487) === 0x82 && state.byte(0x13fb8) === 0xff && rolls.length === 1, `rolls=${rolls.length}`);
+  check("fifth one-shot report returns before repeatable strength increase", state.byte(0x13456 + 0x18) === 10 && rolls.length === 1);
+
+  sim.aliens.eventIntelStep();
+  check("marked fifth report is skipped and repeatable report runs afterward", state.byte(0x14488) === 6 && state.byte(0x14489) === 2 && state.byte(0x13456 + 0x18) === 15 && rolls.length === 3, `rolls=${rolls.length}`);
+}
 {
   const { state, sim } = fresh();
   state.setLong(0x1446a, 6000);

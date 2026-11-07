@@ -16,7 +16,8 @@ import type { SpriteSet } from "../../data/sprites.js";
 import type { Screen } from "../../gfx/screen.js";
 import type { GameState } from "../state.js";
 import type { Unit, UnitSystem } from "../units.js";
-import { OBJECT_SIZE, T, type World } from "../world.js";
+import { cellFlagIndex, mapIndex } from "../cell-flags.js";
+import { OBJECT_SIZE, OBJECT_SLOTS, T, type World } from "../world.js";
 import { BUTTON_TABLE, PanelScene } from "./panel.js";
 import type { ScreenContext, ScreenScene } from "./types.js";
 import { Ui, type Label } from "./ui.js";
@@ -179,10 +180,15 @@ export function findRecord(world: World, x: number, y: number): number {
     ry -= dy;
   }
   const o = world.objects;
-  for (let slot = 0; slot < world.objectCount; slot++) {
+  // `$72C0`: `$142C2 - 1` is a DBRA budget over non-empty records. A sparse
+  // record after the counted prefix is not returned by the original lookup.
+  let remaining = world.state.word(0x142c2);
+  if (remaining === 0) return -1;
+  for (let slot = 0; slot < OBJECT_SLOTS && remaining > 0; slot++) {
     const at = slot * OBJECT_SIZE;
     if (o[at] === 0 && o[at + 1] === 0) continue;
     if (o[at + 4] === rx && o[at + 5] === ry) return at;
+    remaining--;
   }
   return -1;
 }
@@ -358,7 +364,7 @@ class CommandCentreScreen extends PanelScene {
       this.a.setT(TYPE.commandCentre, T.total, count);
       if (count !== 1) {
         // Another centre was online: every centre goes offline, this one stays the only online one.
-        for (let slot = 0; slot < world.objectCount; slot++) {
+        for (let slot = 0; slot < OBJECT_SLOTS; slot++) {
           const r = slot * OBJECT_SIZE;
           if (recordTile(world, r) !== TILE.commandCentre) continue;
           o[r + 3] = 0;
@@ -549,15 +555,15 @@ export function unitNear(units: UnitSystem, x: number, y: number): Unit | null {
 // $722A: move the unit to the pin's cell. Returns the message the original shows.
 export function teleportUnit(ctx: ScreenContext, units: UnitSystem, unit: Unit, to: { x: number; y: number }): number {
   const cells = ctx.world.cells;
-  const dest = to.y * MAP_WIDTH + to.x;
+  const dest = mapIndex(to.x, to.y);
   if ((cells[dest] & TELEPORT_BLOCKERS) !== 0) return MSG.teleportBlocked;
   cells[dest] |= OCCUPIED;
-  units.flags[dest] |= OWN_UNIT_FLAG;
+  units.flags[cellFlagIndex(to.x, to.y)] |= OWN_UNIT_FLAG;
   // The original clears the marks at the unit's own (x, y), not at the cell it had reserved, and leaves the
   // pixel offset alone: a unit teleported in mid-step keeps its stale reserved cell.
-  const old = unit.y * MAP_WIDTH + unit.x;
+  const old = mapIndex(unit.x, unit.y);
   cells[old] &= ~OCCUPIED;
-  units.flags[old] &= ~OWN_UNIT_FLAG;
+  units.flags[cellFlagIndex(unit.x, unit.y)] &= ~OWN_UNIT_FLAG;
   unit.reserveX = to.x;
   unit.reserveY = to.y;
   unit.x = to.x;

@@ -22,11 +22,26 @@ disassembly; "HYPOTHESIS" = read from code only.
 - Ten 16x16 buttons, rectangles at $5E06 (x0, x1, y0, y1 words), two columns by five rows at the
   right edge. Each screen draws them from a table of ten image pointers (0 = the blank default
   image $185A2; 5 planes of 16 words each). `$58F8` / `$57FA` + `$5730` return the released button;
-  a pressed button is shown inverted (all planes complemented, `$5756`). Tables: $E930 default
+  a pressed button is shown flipped (`$5756` -> `$57D6`: ONE plane, colour ^ 8; `$57FA` flips it back on the release). Tables: $E930 default
   (blank buttons, exit icon at index 9), $EF02 trade, $EF50 market, $F118 intelligence.
 - Number entry `$5110`: `d0/d1` = x/y, `d4` = maximum digits, `d2` = width of the erased field in
   bytes; digits are echoed followed by '-', Return confirms (not when empty), Backspace deletes. The
-  text is converted by `$15CD0` (decimal, result in d1).
+  text is converted by `$15CD0` (decimal, result in d1). `$5110` reads only the key code (`$161A0`): it never polls the mouse (`$50B2`),
+  never hit-tests (`$5730`) and never calls `$5756`, so while an entry is open mouse presses do nothing (no flip, click, row selection or
+  pending release), and no button of the parent window can fire or close it. Remake: `PanelScene` ignores presses and drops a release
+  seen while `modal` (STATIC trace; `test/screens.mjs`). Not reproduced (HYPOTHESIS): a button still held when the entry ends counts as
+  a new press for the next `$50B2` when its state bit was clear.
+
+### Button lifecycle (map screen, build menu, windows)
+
+STATIC trace of `$50B2`, `$157BC`-`$158C6`, `$158CA`, `$15940`-`$15A74`, `$5756`, `$57D6`, `$57FA`, `$58F8`, `$B3E0`-`$B40C` (no emulator capture):
+
+- `$50B2` returns d0 = 0 only on a left press edge (CIA bit low while the state bit `$156A8` bit 3 was clear; also every poll while a scroll arrow holds `$156A9` bit 0) and on the release edge (CIA bit high while bit 3 was set); every other poll returns -1 and the loop skips the mouse work. The press runs `$158CA` (cell pick `$5CDA`, else `$15940`: scroll arrows `$5DAA`, then the ten buttons `$5E06`, else the warning-light bookmark `$5D70`); the release runs `$15A74`.
+- Press on a command button: `$5756` stores x, y, index in `$5DD0-$5DD4`, flips plane 3 of the 16 x 16 rectangle (once in the front buffer when `$156A8` bit 4 is set, otherwise in both buffers) and requests id 4. Nothing else happens on the press, except the pause button (button 9, image `$18462`), whose pause bit is set right after (`$159B8-$159C4`).
+- Release (`$15A74`): `$5DD4` negative -> nothing; index 9 while paused -> return, `$5DD4` kept (the pause button stays flipped); else `$57FA` flips the button back and clears `$5DD4`, then: 1 -> `$F176` (overview, also while paused); 9 -> nothing; paused -> nothing for every other index; 5 council (needs `$133F8`, else message `$B2`), 6, 8, 2, 7, 3, 0, 4 -> their routines. The pointer position at the release is not used, so a button pressed and released elsewhere still fires and a press elsewhere followed by a release over a button does not.
+- While paused (`$156A9` bit 2): cell clicks do nothing (`$158D4`), the right button does nothing (`$15F64`, no `$3EDC`, no `$15EF0`), buttons still flip and click but only overview and the pause button act; the pause press resumes silently through `$159FC` (no `$5756`, `$5DD4` = 9).
+- Remake: `Controls` keeps the recorded index (`pressedButton`), dispatches it on the left release edge, and draws the pressed button (and the pause button while paused) with `flipButtonPixels` (colour ^ 8). `test/command-buttons.mjs`, `test/build.mjs`, `test/build-menu.mjs`, `test/button-sound.mjs`, `test/map-loop.mjs`, `test/checkpoint.mjs`.
+- The disk menu (`$7EF6`) has its own variant for its nine 32 x 32 icons (`$5948` press / `$59C8` release, flip `$59A0`): section 10.
 - Result messages that contain a number (e.g. "units bought") have a first byte giving the offset
   of four filler characters; `$15C5A` writes the number there with d2 = 1000.
 
@@ -94,12 +109,20 @@ Entry: x 150, y 135, 4 digits, field 6 bytes; prompts idx 170 (buy), 171 (sell),
 ## 6. Intelligence window (icon column button 7, $E2D2) - PARTLY PORTED
 
 Windows $F100 {240,2,10,10} (picture) and $F110 {0,0,30,25}, labels $F144 (idx 287 title (78,8), 294 (6,20), 157 money (140,29)), buttons $F118; heading idx $18B + level ($144CA) at (102,20) in yellow; intelligence grant $1446A at (88,29) (6 digits), money at (178,29). Buttons 8 and 9 leave. A click with y in 29-37 opens an entry at (94,29), 5 digits; `grant += min(typed, money)`, `money -= same`, then `$AD70` sets $144CA: 0 when the grant is 0, 1 below 5000, 2 below 20000, else 3 (skipped when bit 2 of $156AA is set - meaning unknown, ignored).
-Not ported: the alien report text and portraits (`$E530`, `$E642`, images from Disk.2 at +$24 with a separate text table at $6B060), and the second frame style of `$B6CE` (the port uses the plain window frame).
+Partly ported: the intelligence grant window is implemented; the scenario report and portrait now load and render from the user's Disk.2. The static dispatch at `$E530` provides this record layout for 16 report slots (base `$13EE6`, stride `$2A`):
+
+| Offset | Meaning |
+|---|---|
+| +$00, +$02, +$04 | Up to three main Disk.1 string-table indices. `$E642` draws them, with special substitutions for `$154`, `$155`, `$15E`, and `$161-$164`. |
+| +$06, +$08, +$0A | Up to three 1-based indices into the separate localized text block loaded from the scenario record at +$28 into `$6B060`. `$E530` resolves their offsets and calls `$5A60`. |
+| +$28 | 1-based portrait index in the scenario payload loaded from record +$24 at `$2954A`; `$E612` draws it at (248,10) using `$2E5E`, 8 bytes wide by 64 rows, five planar bitplanes. |
+
+The outer dispatch checks the six category IDs in `$1449A` (values 6 down to 1) and scans the 16 event slots in reverse order. It redraws the window on each match without waiting, so the last matched slot remains displayed. `$E530` then checks the high byte at `$1447C + 2*i` and selects `$13EE6 + 0x2A*i + 4 + 12*(level-1)`, where intelligence level 4 is clamped to 3 and level 0 has no entry. It draws nonzero string fields and the optional portrait. The port mirrors the final selected slot, loads the +$24 scenario payload and selected +$28 localized text range, and draws the selected text and portrait (`src/game/screens/intel.ts`). The special substitutions for string IDs `$154`, `$155`, `$15E`, and `$161-$164` are also ported. Text context `$15678` is `{x=8, y=45, currentRow=0, maxRows=16, width=232}`; the port uses the same origin and width with `$5C30`'s wrap logic. The second frame style of `$B6CE` also remains unported (the port uses the plain window frame).
 
 ## 7. Remaining gaps
 
 - The F-key handlers in the original check nothing before opening; if the game is over or a dialog is up the caller should not open them.
-- The overview does not simulate enemy ground units, enemy aircraft or own ships (see section 8); the caller can pass them through `ScreenContext.otherUnits`.
+- The overview reads own tanks from `ObjectLayer.units` and reads live ship, enemy-ground and enemy-air positions from `EnemySystem.overview()` through `ScreenContext.otherUnits`. Section 8's overlay table is therefore active in the gameplay screen path; the arrays are copied as coordinates when the overview is rebuilt. The color and coverage rules are statically traced, with no original screenshot comparison.
 
 ## 8. Overview map (icon column button 1, $F176) and marker mode (button 3, $30FE) - `overview.ts`, `markers.ts`
 
@@ -109,7 +132,7 @@ Opening: `createScreen("overview", ctx)`. Full-screen: picture 0 of the table at
 
 Geometry (VERIFIED): the whole 100 x 75 map at 2 x 2 pixels per cell from (8,8); a 16 x 16 masked frame (image $105C4, five planes x 16 rows x 4 bytes, plane 0 is the mask) around the 8 x 8 cell view at scroll ($144E4/$144E6, clamped to $5C/$43 by $FB1E); a magnified 8 x 8 cell preview of the view at (232,75), 8 x 8 pixels per cell; a strip of eight pin images ($10A88, 8 x 8, five planes x 8 rows, 40 bytes each) at (232,151); legend text in the message panel: six string indices per layer at $FF9E (7 x 6 words, $FFFE blank), drawn at the slots $FFF2 ({index,x,y} x 6).
 
-Controls (VERIFIED): a press on a layer button shows it inverted, the release sets mode byte $144B6 = button (7 = leave) and redraws. A click on the map (x < $D1, y < $A0) centres the view on the clicked cell: scroll = ((x-8)>>1)-4, ((y-8)>>1)-4, clamped. A click in the preview (x $E8-$127, y $4A-$89) calls $311E for the clicked cell with no message. The port also closes on Escape or the right button (the original only has button 7).
+Controls (VERIFIED): a press on a layer button shows it inverted, the release sets mode byte $144B6 = button (7 = leave) and redraws. A click on the map (x < $D1, y < $A0) centres the view on the clicked cell: `$F2D4-$F2E0` does 16-bit `sub.w #8`, logical shift right, then `sub.w #4` on both coordinates; `$FB1E` clamps the signed result to x 0..$5C and y 0..$43. Thus a click in the 8-pixel top or left margin underflows to a large positive word and clamps to the far edge. The remake now preserves this word arithmetic. A click in the preview (x $E8-$127, y $4A-$89) calls $311E for the clicked cell with no message. The port also closes on Escape or the right button (the original only has button 7).
 
 Layers (colour = palette index of the overview picture; VERIFIED from $F632-$FA24, legend swatches checked against the legend table):
 - 0 buildings: rock (bit 12 set and bit 10 clear) 2, animated cells by tile id: $32 -> 9, 1-3 -> $D, $60 -> $15, $3E -> $18, $48-$4B -> 6, other -> $12; everything else 5.
@@ -125,9 +148,8 @@ Pins (VERIFIED): placed markers are drawn on the map and preview only every othe
 HYPOTHESIS / port decisions:
 - Blink period: the original counts 6000 polls of the mouse buttons ($10A84); the port toggles every 8 frames.
 - Meaning of $144C8: treated as the power state (it is only compared with 4); sim.ts uses it the same way.
-- Enemy ground units, aircraft and own ships are not simulated by the port; the overview only shows them when the caller supplies them.
-- The pressed-button flip: $57D6 complements one plane (colour ^ 8); `Ui.invertButton` used by the other screens complements all planes. Not unified.
-- A click with x < 8 on the map wraps around in the original ($F2D4 subtracts unsigned); the port clamps to 0.
+- Port integration: `Game.screenContext()` supplies `EnemySystem.overview()` for ships, enemy ground units and aircraft. `OverviewScreen.rebuild()` combines those positions with the own tanks from `ObjectLayer.units`, then applies the traced layer colors. Synthetic and local-data checks cover the renderer; no original screenshot comparison has been made.
+- The pressed-button flip: $57D6 complements one plane (colour ^ 8). `Ui.invertButton` used to complement all five planes; it now calls `flipButtonPixels` (colour ^ 8, same as the overview's `flipButton`). Static trace of the plane pointer (`$C(a6)` of the array at `$160FA`/`$16116` = plane 3); the colour effect of the flip on the palette entries is not compared with an emulator screenshot.
 
 Marker mode (button 3, $30FE, VERIFIED): not a screen. It shows message $6F and sets flag $144B3. The next left click on a map cell ($158CA, screen mode 1) calls $311E with that cell instead of selecting, and clears the flag (also when nothing can be placed). $311E: a pin already on the cell is lifted (message $72); else the lowest unused pin goes there (message $71, pin number '1'-'8' patched into the text via the placeholder byte of the string); with all eight in use nothing happens (message $70). In the port: `MarkerMode.arm()` returns 0x6F, `MarkerMode.click(layer, x, y)` returns null when not armed or the result; `markerMessageText(strings, pin)` gives the text of $71.
 
@@ -137,3 +159,13 @@ Status: traced and rendered headless; VERIFIED unless marked.
 
 Button 5 refuses with message $B2 when word $133F8 is zero (no game running); otherwise it shows picture 2 of the table at $8C8C (sectors $2F8-$327, palette from its tail) with six adviser rectangles at $1614E ({x0,x1,y0,y1} each, ended by $FFFF; order = F1..F6: colony, resources, finances, buildings, research, defence). A left press on an adviser draws a caption window ($E850, label lists via the pointers at $E858, two lines each) and his portrait (88 x 79 pixels at (224,33), sheet in sectors $328-$34B, six images of 11 x 79 bytes x 5 planes, LZ packed) and calls the matching F-key report handler; that report runs with bit 5 of $156A8 set - no button column, it waits for a left press and returns to the room. A left press outside every adviser (or Escape / right button in the port) leaves; the gameplay picture and palette are restored by the port.
 HYPOTHESIS: none beyond the portrait sheet's plane layout being the same as the other planar images (checked by the render).
+
+## 10. Disk menu (`$7E52` / `$7EF6`) - `src/game/disk-menu.ts`
+
+Status: static trace of Disk.1 plus headless tests (`test/disk-menu.mjs` also checks the byte anchors against the user's Disk.1); no emulator capture. Full handler and message trace: [music.md](music.md) "Music-select flow", click and flip: [sfx.md](sfx.md) "Disk menu".
+
+- **Screen**: picture 1 of `$8C8C` (sectors `$2CE`-`$2E4`): textured frame, a black list panel (x `$38..$88`, y `$20..$79`, ten rows of pitch 9), nine 32 x 32 icons at `$8CB4` (three columns x 160 / 208 / 256, three rows y 24 / 70 / 116) and a message area at the bottom (prompt lines y `$A3`/`$AC`, result lines y `$B5`/`$BE`, x 8). The landing page is the untouched picture; the shared list (mode 4, music select) and the messages are drawn on top of it. One `DiskMenuScene`, one Game stage (`disk`).
+- **Icons** (VERIFIED from the `$7FE4` dispatch and the handler strings, consistent with the artwork): 0 load game, 1 save game, 2 load scenario, 3 format a save disk (the four floppy handlers `$85FE`/`$856C`/`$8632`/`$8314`), 4 music on/off `$1062`, 5 exit `$802C`, 6 tutorial `$80C8`, 7 music select `$1006`, 8 effects `$10BC`.
+- **Press / release**: a left press on a rectangle (inclusive, `$5730`) flips plane 3 of its 32 x 32 area (colour ^ 8, `$59A0`, NOT the 16 x 16 `$57D6`), requests the id 4 click once and records x, y, index; the release flips back (`$59C8`, silent) and the recorded icon's handler runs wherever the pointer is. A press outside every rectangle does nothing visible; with a list open it records the row under the pointer, the row's action runs after the release (`$2E52`, `$87DC`).
+- **Messages**: `$83A2` prints result lines (y `$B5`, `$BE`) and starts the `$4E20` loop-iteration countdown after which both are erased; `$8462` prints the prompt (y `$A3`, `$AC`); closing the list (`$82B8`) clears the prompt and the rows only. The remake counts 50 frames for the countdown (HYPOTHESIS).
+- **Remake-only (not original)**: right button closes an open list, otherwise opens the REMAKE MENU page (remake save, remake load, scenario list, experimental Disk.4); icons 0-2 open remake pages (`... - REMAKE SLOTS`, the scenario list) instead of asking for floppies, icon 3 prints a remake note. These pages are `MenuScene` lists (the scenario, slot, Disk.4 and error pages the remake always had), silent, and return to the disk menu with the right button.

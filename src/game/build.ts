@@ -294,15 +294,25 @@ export class Builder {
       oy -= part >> 1;
     }
     const o = this.world.objects;
-    for (let i = 0; i < o.length; i += 8) {
+    // `$72C0` starts with `$142C2 - 1` and spends that DBRA budget only on
+    // non-empty records. Sparse records above that count are deliberately invisible.
+    let remaining = this.s.word(V.objects);
+    if (remaining === 0) return -1;
+    for (let i = 0; i < o.length && remaining > 0; i += 8) {
       if (o[i] === 0 && o[i + 1] === 0) continue;
       if (o[i + 4] === ox && o[i + 5] === oy) return i;
+      remaining--;
     }
     return -1;
   }
 
   // $7372: a left click on map cell (x, y) in demolish mode.
-  demolish(x: number, y: number): boolean {
+  //
+  // `blast`, when given, receives the cells `$75A8` writes into the `$7C28` list, which only the REAL-BUILDING path ($74D6)
+  // reaches: the record's origin, plus the other three cells of a 2x2 footprint (origin, x+1, (x+1,y+1), (x,y+1): the
+  // type's first-word size is not 1). Clearing ground, cancelling a construction site (`$74FE`) and every refusal leave it
+  // empty. `$12332` (`Sim.bomb`) calls `$1237C` once per listed cell; a plain click (`$7372` alone) never does.
+  demolish(x: number, y: number, blast?: [number, number][], bombing = false): boolean {
     const slot = this.findObject(x, y);
     const cellId = this.world.cells[this.cellIndex(x, y)] & TILE_ID_MASK;
     if (slot < 0) {
@@ -319,7 +329,7 @@ export class Builder {
     const s = this.s;
     const type = this.world.findType(tile);
     const t = this.world.typeAddress(type);
-    if (tile === 0x47 && this.cellWord(x, y) & 0x4000 && !(s.byte(0x156a9) & 0x10)) {
+    if (tile === 0x47 && this.cellWord(x, y) & 0x4000 && !bombing) {
       this.say(MSG.noGroundForVent);
       return false;
     }
@@ -348,6 +358,12 @@ export class Builder {
     s.setWord(V.objects, s.word(V.objects) - 1);
     s.setWord(t + T.active, Math.max(0, s.word(t + T.active) - 1));
     if (o[slot + 3] !== 0) s.setWord(t + T.total, Math.max(0, s.word(t + T.total) - 1));
+    if (blast) {
+      const ox = o[slot + 4];
+      const oy = o[slot + 5];
+      blast.push([ox, oy]);
+      if (s.byte(t + 1) !== 1) blast.push([ox + 1, oy], [ox + 1, oy + 1], [ox, oy + 1]); // $75A8 order
+    }
     this.writeBuilding(TILE_CLEARED, o[slot + 4], o[slot + 5], s.byte(t + 1));
     return true;
   }

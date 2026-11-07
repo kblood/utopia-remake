@@ -3,20 +3,23 @@
 // ship mode machine ($42BE, $4526), missiles, the two kinds of gun ($11D34), the unit bookkeeping of $4692 /
 // $46CC / $11C30 / $11C5C, defecting tanks, weekly repairs and the overview feed. Notes: notes/formats/enemies.md.
 //
-// The system is driven once per main-loop pass by `pass(clock)` (after the own tanks, as in $333A) and, for the
-// guns, by `frame()` once per video frame. It touches the simulation only through Sim (state words, `bomb`,
+// The system is driven once per main-loop pass by `pass(clock)` (after the own tanks, as in $333A). Gun rounds are
+// bound into Sim and run when `$99C4` consumes pending-period bit 4 / the daily bit. It touches the simulation only through Sim (state words, `bomb`,
 // `roll`, `applyMorale`, the fleet), so it can run headless. Lookup tables come from the game image at runtime
 // (src/data/combat.ts).
 
 import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK } from "../data/scenario.js";
+import { CELL_FLAG_BYTES, cellFlagIndex, cellFlagPointer, mapIndex, resolveCellFlagPointer } from "./cell-flags.js";
+import type { Disk4EnemyAirSlot, Disk4EnemyGroundSlot } from "../data/disk4-entities.js";
 import type { CombatTables } from "../data/combat.js";
+import { DISK4_ADDR } from "../data/disk4-state.js";
 import { SFX } from "../audio/sfx.js";
 import type { Drawable } from "./objects.js";
 import type { EnemySpawn } from "./sim-aliens.js";
-import type { Ship } from "./sim-ships.js";
+import { MAX_SHIPS, isMissile, type FleetRecord, type MissileRecord, type Ship } from "./sim-ships.js";
+import { ENEMY_RECORD_SIZE, MISSILE_TARGET_MASK, ShipRoster, resolveEnemyRecordPointer, type RestoredMissile } from "./ship-roster.js";
 import type { Sim } from "./sim.js";
-import { A } from "./state.js";
-import { OBJECT_SLOTS } from "./world.js";
+import { OBJECT_SLOTS, TYPE_SIZE, TYPE_TABLE } from "./world.js";
 import {
   BLOCKED,
   DIR_STEP,
@@ -43,7 +46,6 @@ export const ENEMY_CRUSHER = 24; // ground: crosses and destroys active building
 export const ENEMY_BOMBER = 25; // air: flies over buildings and bombs them
 export const ENEMY_KAMIKAZE = 26; // air: dives onto a building
 export const ENEMY_KAMIKAZE_FAST = 27; // as 26 at double speed
-export const MISSILE = 17; // ship list type: guided projectile
 export const MAX_GROUND = 60;
 export const MAX_AIR = 30;
 export const FRONT_X = 0x135c4; // $135C4/$135C5: the front, a cell off the map
@@ -91,17 +93,30 @@ export class Enemy implements Walker {
   targetX = NO_TARGET;
   targetY = NO_TARGET;
   recent: [number, number, number] = [0xff, 0xff, 0xff];
-  reserveX: number;
-  reserveY: number;
+  // The cell the slot's raw +$16 flag pointer currently names, or -1 / -1 when that pointer names no playable cell
+  // (zero, padding, off the map). A mirror only: the raw per-slot pointer lives in the EnemySystem
+  // (`groundFlagPointers` / `airFlagPointers`) because the original's +$16 belongs to the fixed slot and survives death
+  // and reuse. The death routine releases the cell the POINTER names, not x/y.
+  reserveX = -1;
+  reserveY = -1;
   waiting = false; // +9 bit 7
   steps = 0; // +D: cell moves / steps in the current mode
   aux = 0; // +$13 (signed): bomb count of a bomber, dive altitude of a kamikaze
   p14 = 0; // +$14: bomb chance in percent (air)
   p15 = 0; // +$15: non-zero = a bomber that has dropped everything turns into a kamikaze
-  toggle = false; // crusher: bit 7 of +$13, it moves every second call
-  counter = 0; // crusher: step counter 0..7
-  anim = 0; // crusher: +$14, second animation dimension of its sprite
+  // Crusher (type 24): +$13 packs both, byte = toggle << 7 | counter ($11F4E bchg #7, $11F58..$11F64 subq/store).
+  toggle = false; // bit 7 of +$13: true = the NEXT call performs the step, false = it only flips the bit
+  counter = 0; // low 7 bits of +$13: step counter, 0..7 (the animation table $12D60 has 8 bytes)
+  anim = 0; // +$14: repeat count the sprite routine $3768 adds to the frame address (0..2 from the table)
   lift = 0; // +$10: altitude of an aircraft
+  tech = 0; // +A (raw wave level on allocated enemies; Disk.4 hydration copies the saved byte)
+  // Saved-record provenance; -1 / null for a spawned enemy. Set only by Enemy.fromDisk4.
+  readonly slot: number;
+  readonly sourceRaw: Uint8Array | null;
+  readonly sourceAddress: number | null;
+  readonly flagPointer: number | null;
+  /** Full saved +9 byte. Ground bit 7 means waiting; air records retain +9 as an uninterpreted mode byte. */
+  readonly savedControl: number | null;
 
   constructor(
     public type: number,
@@ -112,9 +127,129 @@ export class Enemy implements Walker {
     public dmg: number, // +F: damage of an attack
     public bombPct: number, // +E: chance in percent that an attack on a building drops a bomb
     readonly air: boolean,
+    source?: { slot: number; raw: Uint8Array; address: number; flagPointer: number; control: number },
   ) {
-    this.reserveX = x;
-    this.reserveY = y;
+    this.slot = source?.slot ?? -1;
+    this.sourceRaw = source ? source.raw.slice() : null;
+    this.sourceAddress = source?.address ?? null;
+    this.flagPointer = source?.flagPointer ?? null;
+    this.savedControl = source?.control ?? null;
+  }
+
+  /**
+   * Detached runtime enemy from one occupied saved record. Documented fields are copied as stored;
+   * `reservation` is the playable cell the saved flag pointer names (not necessarily x/y), or -1 / -1 when it names none. A crusher's +$13 is split into
+   * `toggle` (bit 7) and `counter` (low 7 bits, kept raw even above 7) and +$14 becomes `anim`; `fromRoster`
+   * rejects out-of-domain values. The exact bytes stay in `sourceRaw`, as do all other undocumented bytes.
+   */
+  static fromDisk4(slot: Disk4EnemyAirSlot | Disk4EnemyGroundSlot, reservation: { x: number; y: number }): Enemy {
+    const air = slot.list === "enemyAir";
+    const e = new Enemy(slot.type, slot.x, slot.y, slot.direction, slot.hp, slot.damage, slot.bombChance, air, {
+      slot: slot.index, raw: slot.raw, address: slot.address, flagPointer: slot.flagPointer, control: slot.control,
+    });
+    e.dx = slot.dx; e.dy = slot.dy; e.vx = slot.vx; e.vy = slot.vy;
+    e.mode = air ? slot.control : slot.control & 0x7f;
+    // Only enemy ground is documented as checking bit 7 for the move-tick wait flag.
+    e.waiting = !air && (slot.control & 0x80) !== 0;
+    e.tech = slot.tech;
+    e.targetX = slot.targetX; e.targetY = slot.targetY;
+    e.steps = slot.stepCounter;
+    e.aux = air ? slot.auxSigned : slot.aux; // same convention as spawn(): aircraft signed, ground unsigned
+    e.p14 = slot.byte14; e.p15 = slot.byte15;
+    if (slot.type === ENEMY_CRUSHER && !air) {
+      e.toggle = (slot.aux & 0x80) !== 0; // $11F4E: bchg.b #7,$13(a6)
+      e.counter = slot.aux & 0x7f;
+      e.anim = slot.byte14;
+    }
+    if (slot.list === "enemyAir") e.lift = slot.lift;
+    else e.recent = [...slot.recentDirections];
+    e.reserveX = reservation.x; e.reserveY = reservation.y;
+    return e;
+  }
+}
+
+export const ENEMY_GROUND_TYPES: readonly number[] = [9, 10, ENEMY_WALKER_A, ENEMY_WALKER_B, ENEMY_CRUSHER];
+export const ENEMY_AIR_TYPES: readonly number[] = [ENEMY_BOMBER, ENEMY_KAMIKAZE, ENEMY_KAMIKAZE_FAST];
+
+export interface EnemyRestoreError {
+  readonly code: "slot-count" | "slot-index" | "enemy-type" | "position" | "direction" | "flag-pointer" | "buffers";
+  readonly list?: "enemyAir" | "enemyGround";
+  readonly slot?: number;
+  readonly field?: string;
+  readonly message: string;
+}
+export type EnemyRestoreResult = { readonly ok: true; readonly value: EnemyRoster } | { readonly ok: false; readonly error: EnemyRestoreError };
+
+/**
+ * Detached fixed-slot enemy lists of a Disk.4 restore: 60 ground and 30 air slots, null = free. It is NOT
+ * an EnemySystem and drives nothing: no spawn/defect/step/combat, no RNG, no hooks, no counter updates.
+ * `cells` / `flags` are the caller's world buffers, kept by reference and never written here; the
+ * occupancy bits the saved enemies imply are whatever the saved map already holds. Ships are not restored.
+ */
+export class EnemyRoster {
+  readonly ground: (Enemy | null)[] = new Array<Enemy | null>(MAX_GROUND).fill(null);
+  readonly air: (Enemy | null)[] = new Array<Enemy | null>(MAX_AIR).fill(null);
+  /**
+   * The raw saved +$16 long of EVERY slot, free records included (the original never clears it, so a free slot keeps the
+   * pointer of its last occupant; enemies.md section 3b). Copied from the decoded records without interpretation; an
+   * `EnemySystem` that adopts the roster works directly on these arrays.
+   */
+  readonly groundPointers: number[] = new Array<number>(MAX_GROUND).fill(0);
+  readonly airPointers: number[] = new Array<number>(MAX_AIR).fill(0);
+  private constructor(readonly cells: Uint16Array, readonly flags: Uint8Array) {}
+
+  /** Occupied enemies in stable slot order. */
+  get groundEnemies(): Enemy[] { return this.ground.filter((e): e is Enemy => e !== null); }
+  get airEnemies(): Enemy[] { return this.air.filter((e): e is Enemy => e !== null); }
+
+  /**
+   * Hydrates all slots, or returns one typed error and nothing. Free slots (type 0) stay null whatever stale
+   * bytes the record holds (those remain in the decoded slot). Occupied records need a supported type for
+   * their list, a map position and direction 0..7. The +$16 long of every record (free or occupied) is kept raw and may be
+   * any unsigned 32-bit value (zero, padding column, outside the flag array); only a playable cell becomes the reserve mirror.
+   */
+  static fromDisk4(
+    cells: Uint16Array,
+    flags: Uint8Array,
+    ground: readonly Disk4EnemyGroundSlot[],
+    air: readonly Disk4EnemyAirSlot[],
+  ): EnemyRestoreResult {
+    const fail = (error: EnemyRestoreError): EnemyRestoreResult => ({ ok: false, error });
+    if (!(cells instanceof Uint16Array) || !(flags instanceof Uint8Array) || cells.length !== MAP_WIDTH * MAP_HEIGHT || flags.length !== CELL_FLAG_BYTES) {
+      return fail({ code: "buffers", message: "Enemy hydration needs the world's 7500 cell words and 7650 flag bytes" });
+    }
+    const roster = new EnemyRoster(cells, flags);
+    const lists = [
+      { name: "enemyGround", records: ground, out: roster.ground, pointers: roster.groundPointers, size: MAX_GROUND, types: ENEMY_GROUND_TYPES },
+      { name: "enemyAir", records: air, out: roster.air, pointers: roster.airPointers, size: MAX_AIR, types: ENEMY_AIR_TYPES },
+    ] as const;
+    for (const list of lists) {
+      const { name } = list;
+      if (list.records.length !== list.size) {
+        return fail({ code: "slot-count", list: name, message: `${name} has ${list.records.length} slots, expected ${list.size}` });
+      }
+      for (let i = 0; i < list.size; i++) {
+        const r = list.records[i];
+        if (!r || r.list !== name || r.index !== i || !(r.raw instanceof Uint8Array) || r.raw.length !== 0x1a) {
+          return fail({ code: "slot-index", list: name, slot: i, field: "record", message: `${name} slot ${i} has missing or inconsistent provenance` });
+        }
+        if (!isUnsignedLong(r.flagPointer)) {
+          return fail({ code: "flag-pointer", list: name, slot: i, field: "+$16", message: `${name} slot ${i} +$16 ${String(r.flagPointer)} is not an unsigned 32-bit long` });
+        }
+        list.pointers[i] = r.flagPointer; // raw, free records too: nothing is guessed from x/y
+        if (r.status === "free") continue;
+        if (!list.types.includes(r.type)) return fail({ code: "enemy-type", list: name, slot: i, field: "+0", message: `${name} slot ${i} has unsupported type ${r.type}` });
+        if (!inMap(r.x, r.y)) return fail({ code: "position", list: name, slot: i, field: "+1/+2", message: `${name} slot ${i} position (${r.x}, ${r.y}) is outside the map` });
+        if (!Number.isInteger(r.direction) || r.direction < 0 || r.direction > 7) {
+          return fail({ code: "direction", list: name, slot: i, field: "+5", message: `${name} slot ${i} direction ${r.direction} is outside 0..7` });
+        }
+        // Any unsigned +$16 is valid on an occupied record: a wave enemy is occupied before its first claim and the allocators
+        // leave the slot tail untouched (zero, padding or any stale long). It is kept raw in `pointers`; the mirror cell is
+        // set only when it names a playable cell, else -1 / -1. Nothing is rejected on the pointer alone.
+        (list.out as (Enemy | null)[])[i] = Enemy.fromDisk4(r, reservationOf(r.flagPointer));
+      }
+    }
+    return { ok: true, value: roster };
   }
 }
 
@@ -124,9 +259,49 @@ interface ShipExtra {
   vy: number;
   next: number; // +$11: the mode to switch to when the current one ends
   turn: number; // +$12: the direction the ship turns to while it climbs or descends
-  rx: number; // the cell holding the ship's map mark (-1 = none)
+  rx: number; // the cell holding the ship's map mark = the cell its +$14 flag pointer names (-1 = none)
   ry: number;
-  target: Enemy | null; // missiles: +$C, the pointer to the enemy
+  // Every missile (launched by launchMissile or restored from Disk.4): the fixed enemy slot the pointer at +$C..+$F names
+  // ($E904 at launch, the saved pointer on restore). The occupant is looked up in the slot every time it is needed (never
+  // kept: a dead Enemy must not outlive its slot, and nothing is matched by coordinates), exactly like $4408 / $ACE2
+  // dereference the address. null for ordinary ships.
+  targetSlot: EnemySlotRef | null;
+}
+
+/** A ship's extra state as the remake save stores it (same fields as the private ShipExtra; rx/ry -1 = no reservation cell). */
+export interface ShipExtraState {
+  readonly vx: number;
+  readonly vy: number;
+  readonly next: number;
+  readonly turn: number;
+  readonly rx: number;
+  readonly ry: number;
+  readonly targetSlot: EnemySlotRef | null;
+}
+
+/** A fixed enemy slot: the 30 air slots ($39E3A + i * $1A) or the 60 ground slots ($3A146 + i * $1A). */
+export interface EnemySlotRef {
+  readonly air: boolean;
+  readonly index: number;
+}
+
+/** Original RAM address of the slot start: the 24-bit pointer a missile stores in +$D..+$F. */
+export function enemySlotAddress(slot: EnemySlotRef): number {
+  return (slot.air ? DISK4_ADDR.enemyAir : DISK4_ADDR.enemyGround) + slot.index * ENEMY_RECORD_SIZE;
+}
+
+/** Plain copy of a ShipExtra for observers (`EnemySystem.inspectShip`); `rx`/`ry` = -1 means no reservation cell. */
+export interface ShipInspection {
+  readonly vx: number;
+  readonly vy: number;
+  readonly next: number;
+  readonly turn: number;
+  readonly rx: number;
+  readonly ry: number;
+  /** The enemy slot a missile follows (null for ordinary ships). */
+  readonly targetSlot: EnemySlotRef | null;
+  /** Whether that slot currently holds an enemy (null without a target slot). */
+  readonly targetOccupied: boolean | null;
 }
 
 export interface EnemyTarget {
@@ -137,7 +312,11 @@ export interface EnemyTarget {
 
 export interface EnemyHooks {
   // $1237C: an explosion at a cell; `lift` is the altitude of an airborne victim, `high` the unit-destroyed sound.
-  explode?: (x: number, y: number, lift: number, high: boolean) => void;
+  // Return value (enemies.md section 6): `true` = the routine clobbered A6, the register `$11C5C`/`$11C30` still
+  // hold the victim's map-word pointer in, so the map occupancy clear of the kill is lost (off-view sound-only path, or
+  // inside the view with an effect allocated). `false` = A6 survived (effect list full: no sprite, no sound), the map
+  // bit is cleared. Anything else (no return value, no hook) counts as "pointer survived".
+  explode?: (x: number, y: number, lift: number, high: boolean) => boolean | void;
   sound?: (id: number) => void;
   // Height in pixels of the building on a cell: a kamikaze dives down to height - 10 (table $1612E +3).
   buildingHeight?: (x: number, y: number) => number;
@@ -145,14 +324,151 @@ export interface EnemyHooks {
   buildPad?: (x: number, y: number) => boolean;
 }
 
+export interface EnemyAdoptError {
+  /**
+   * "unsupported-state": an occupied record whose runtime state is not grounded: a crusher whose +$13 counter is above 7
+   * (`crusher-counter`: `$11F68` would index past the 8-byte table `$12D60`) or whose +$14 is above the table's largest
+   * value (`crusher-anim`: the sprite sheet has no such frame set), a restored missile in a mode other than 1, 2, 4 (the only modes $4408 sets), or a lift above $7F (the original
+   * reads +$10 as a signed byte). "roster": the enemy roster is corrupt (shape, type/list, identity, duplicate
+   * objects). "buffers": the roster was built over other map/flag buffers than this system's. "tables": malformed
+   * CombatTables. "already-adopted": the roster's slots already belong to another EnemySystem.
+   * Own-ship adoption: "ship-roster" (shape, kind/type/class/slot identity, ranges, duplicates, a non-empty Fleet, or a
+   * missile whose saved target disagrees with the adopted enemy slots), "ship-count" (the saved $1429E word differs
+   * from the occupied slots: $ACE2/$4798 loop by that word), "flag-pointer" (the +$14 pointer is not a playable cell).
+   */
+  readonly code: "unsupported-state" | "roster" | "buffers" | "tables" | "already-adopted" | "ship-roster" | "ship-count" | "flag-pointer";
+  readonly reason?: "crusher-counter" | "crusher-anim" | "missile-mode" | "lift";
+  readonly list?: "enemyAir" | "enemyGround" | "ownShips";
+  readonly slot?: number;
+  /** Record field associated with an adoption refusal, when applicable (for example `+$16`). */
+  readonly field?: string;
+  readonly message: string;
+}
+export type EnemyAdoptResult = { readonly ok: true; readonly value: EnemySystem } | { readonly ok: false; readonly error: EnemyAdoptError };
+
+const adoptedRosters = new WeakSet<EnemyRoster>();
+const adoptedShipRosters = new WeakSet<ShipRoster>();
+const FLEET_COUNT = 0x1429e; // $1429E: own ships in the ship list (also bounds the $ACE2 / $4798 loops)
+
+interface AdoptedShip {
+  readonly record: FleetRecord;
+  readonly extra: ShipExtra;
+}
+
+// Validates a ShipRoster for adoption into `sim.fleet` next to the given enemy slots and builds the ShipExtra of every
+// record from the SAVED bytes: +6/+7 -> vx/vy, +$11 -> next, +$12 -> turn, and the cell of the +$14 flag pointer
+// ($4152/$4526/$43EE write it as the ship's current reservation, $4732 releases exactly that cell) -> rx/ry. Nothing
+// is changed here; any problem returns one typed error.
+function planShips(
+  sim: Sim,
+  ships: ShipRoster,
+  ground: readonly (Enemy | null)[],
+  air: readonly (Enemy | null)[],
+): { readonly plan: (AdoptedShip | null)[] } | { readonly error: EnemyAdoptError } {
+  const err = (e: Omit<EnemyAdoptError, "list">): { error: EnemyAdoptError } => ({ error: { list: "ownShips", ...e } });
+  if (!(ships instanceof ShipRoster) || !Array.isArray(ships.slots) || ships.slots.length !== MAX_SHIPS) {
+    return err({ code: "ship-roster", message: `Ship roster must hold a fixed array of ${MAX_SHIPS} slots` });
+  }
+  if (adoptedShipRosters.has(ships)) return err({ code: "already-adopted", message: "This ship roster's records already belong to an EnemySystem" });
+  if (sim.fleet.slots.some((r) => r !== null)) return err({ code: "ship-roster", message: "The Fleet already holds ships; a roster can only be adopted into an empty one" });
+  let occupiedSlots = 0;
+  for (const r of ships.slots) if (r !== null) occupiedSlots++;
+  const savedCount = sim.state.word(FLEET_COUNT);
+  if (savedCount !== occupiedSlots) {
+    return err({ code: "ship-count", message: `Saved ship count ${savedCount} differs from ${occupiedSlots} occupied slots; the original loops by that word` });
+  }
+  const seen = new Set<object>();
+  const plan: (AdoptedShip | null)[] = new Array<AdoptedShip | null>(MAX_SHIPS).fill(null);
+  for (let i = 0; i < MAX_SHIPS; i++) {
+    const r = ships.slots[i];
+    if (r === null) continue;
+    const bad = (message: string, code: EnemyAdoptError["code"] = "ship-roster", reason?: EnemyAdoptError["reason"]) =>
+      err({ code, slot: i, ...(reason ? { reason } : {}), message: `ownShips slot ${i}: ${message}` });
+    if (typeof r !== "object" || r === undefined || seen.has(r) || r.slot !== i) return bad("foreign, duplicated or mismatched record");
+    seen.add(r);
+    const missileKind = r.kind === "missile";
+    if (!missileKind && r.kind !== "ship") return bad("unknown record kind");
+    const rec: FleetRecord = r;
+    if (missileKind ? rec.type !== 17 : !(rec.type >= 11 && rec.type <= 16 && (rec as Ship).cls === rec.type - 11)) return bad("type does not match the record kind or class");
+    if (!inMap(rec.x, rec.y)) return bad("position is outside the map");
+    if (!Number.isInteger(rec.dir) || rec.dir < 0 || rec.dir > 8) return bad("direction is outside 0..8");
+    if (!Number.isInteger(rec.mode) || rec.mode < 0 || rec.mode > 8) return bad("mode is outside 0..8");
+    if (!Number.isInteger(rec.lift) || rec.lift < 0) return bad("lift is not a non-negative integer");
+    if (rec.lift > 0x7f) return bad("lift above $7F: the original reads +$10 as a signed byte", "unsupported-state", "lift");
+    const e = (r as { extra?: { vx: number; vy: number; next: number; turn: number } }).extra;
+    const sb = (v: number): boolean => Number.isInteger(v) && v >= -128 && v <= 127;
+    if (!e || !sb(e.vx) || !sb(e.vy) || !sb(rec.dx) || !sb(rec.dy) || !Number.isInteger(e.next) || !Number.isInteger(e.turn)) return bad("saved extra record is missing or malformed");
+    const fp = resolveCellFlagPointer(r.flagPointer?.raw);
+    if (fp.kind !== "playable") return bad(`+$14 flag pointer is ${fp.kind}: only a pointer to a playable cell can become the reservation`, "flag-pointer");
+    let targetSlot: EnemySlotRef | null = null;
+    if (r.kind === "missile") {
+      const m: RestoredMissile = r;
+      if (m.mode !== 1 && m.mode !== 2 && m.mode !== 4) return bad(`missile mode ${m.mode} is not one $4408 sets (1, 2 or 4)`, "unsupported-state", "missile-mode");
+      const t = m.target;
+      const res = t ? resolveEnemyRecordPointer(t.address) : null;
+      if (!t || !res || res.kind !== "record" || ((t.rawLong & MISSILE_TARGET_MASK) >>> 0) !== t.address ||
+        t.ref?.list !== res.list || t.ref.index !== res.index || t.ref.address !== res.address) {
+        return bad("missile target pointer does not name a fixed enemy slot");
+      }
+      const occupant = (res.list === "enemyAir" ? air : ground)[res.index] ?? null;
+      if ((t.ref.status === "occupied") !== (occupant !== null) || (t.enemy !== undefined && t.enemy !== occupant)) {
+        return bad("missile target disagrees with the adopted enemy slots (occupancy or Enemy identity)");
+      }
+      targetSlot = { air: res.list === "enemyAir", index: res.index };
+    }
+    plan[i] = { record: rec, extra: { vx: e.vx, vy: e.vy, next: e.next, turn: e.turn, rx: fp.x, ry: fp.y, targetSlot } };
+  }
+  return { plan };
+}
+
+function isUnsignedLong(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xffffffff;
+}
+
+/** The (x, y) a raw +$16 pointer names when it names a playable cell, else the "no reservation" marker -1 / -1. */
+function reservationOf(pointer: number): { x: number; y: number } {
+  const t = resolveCellFlagPointer(pointer);
+  return t.kind === "playable" ? { x: t.x, y: t.y } : { x: -1, y: -1 };
+}
+
+/** Index of the first free slot (the scan of $48B6 / $48EC), or -1 when the list is full. */
+function firstFree(slots: readonly (Enemy | null)[]): number {
+  return slots.indexOf(null);
+}
+
+function occupied(slots: readonly (Enemy | null)[]): Enemy[] {
+  return slots.filter((e): e is Enemy => e !== null);
+}
+
 export class EnemySystem {
-  readonly ground: Enemy[] = [];
-  readonly air: Enemy[] = [];
+  /**
+   * Stable fixed slots: 60 ground / 30 air, null = free ($3A146 / $39E3A type byte 0). A freed slot never shifts
+   * the survivors and a new enemy takes the first free slot. After `fromRoster` these ARE the roster's arrays.
+   */
+  readonly groundSlots: (Enemy | null)[];
+  readonly airSlots: (Enemy | null)[];
+  /** Occupied ground enemies in slot order (a fresh dense view; capacity is counted on the slots, not on this). */
+  get ground(): Enemy[] { return occupied(this.groundSlots); }
+  /** Occupied aircraft in slot order (a fresh dense view). */
+  get air(): Enemy[] { return occupied(this.airSlots); }
+  get groundCount(): number { return this.groundSlots.reduce((n, e) => n + (e === null ? 0 : 1), 0); }
+  get airCount(): number { return this.airSlots.reduce((n, e) => n + (e === null ? 0 : 1), 0); }
+  /**
+   * The raw +$16 long of every fixed slot (60 ground / 30 air), occupied or free. Static Disk.1 trace (enemies.md 3b): the
+   * spawn allocators $48B6 / $48EC never write +$16..+$19 and the death routine $4732 clears only +0..+2 and +8/+9, so the
+   * long belongs to the SLOT and survives death and reuse; a movement claim or the event tank defection overwrites it.
+   * A never-used slot starts at 0: that is what one captured pre-spawn RAM image held in all 90 slots (one scenario, one
+   * machine); initial RAM is NOT proven universal. Adopted Disk.4 rosters and native saves bring their own values.
+   * `reserveX/Y` of an enemy is a mirror of the cell its slot's pointer names.
+   */
+  readonly groundFlagPointers: number[];
+  readonly airFlagPointers: number[];
   private readonly cells: Uint16Array;
   private readonly flags: Uint8Array;
-  private readonly extras = new WeakMap<Ship, ShipExtra>();
+  private readonly extras = new WeakMap<FleetRecord, ShipExtra>();
   private clock: PassClock | null = null;
-  private lastTarget: Enemy | null = null; // $E904
+  private lastTargetSlot: EnemySlotRef | null = null; // $E904: a pointer into the fixed enemy slots, not an object
+  // Version-4 save compatibility only; original firing schedule is the pending bit in GameState.$144C1.
   private lastCountdown = -1;
   private cache: Drawable[] = [];
   private dirty = true;
@@ -163,10 +479,22 @@ export class EnemySystem {
     private readonly sim: Sim,
     private readonly units: UnitSystem,
     private readonly tables: CombatTables,
-    private readonly hooks: EnemyHooks = {},
+    private hooks: EnemyHooks = {},
+    /** Internal: slot arrays to adopt (EnemySystem.fromRoster). Omitted = empty lists. */
+    adopt?: { readonly ground: (Enemy | null)[]; readonly air: (Enemy | null)[]; readonly groundPointers: number[]; readonly airPointers: number[] },
   ) {
+    this.groundSlots = adopt?.ground ?? new Array<Enemy | null>(MAX_GROUND).fill(null);
+    this.airSlots = adopt?.air ?? new Array<Enemy | null>(MAX_AIR).fill(null);
+    this.groundFlagPointers = adopt?.groundPointers ?? new Array<number>(MAX_GROUND).fill(0);
+    this.airFlagPointers = adopt?.airPointers ?? new Array<number>(MAX_AIR).fill(0);
     this.cells = sim.world.cells;
     this.flags = units.flags;
+    this.sim.bindRuntimeHooks({
+      gunA: () => this.fireGuns(GUN_A, this.s.long(0x1310e)),
+      gunB: () => this.fireGuns(GUN_B, this.s.long(0x13112)),
+    });
+    this.sim.fleet.setReservationRelease((ship) => this.releaseShip(ship, this.extra(ship)));
+    this.sim.fleet.setMissileDaily((m) => this.dailyMissile(m)); // $ACE2 for every missile, launched or restored
     const leave = (u: Walker): void => this.destroyGround(u as Enemy, false);
     this.walkEnv = {
       cells: this.cells,
@@ -174,51 +502,274 @@ export class EnemySystem {
       flagBit: FLAG_GROUND,
       canEnter: (word, u) => !(word & BLOCKED) || (u.type === UNIT_ADVANCED && (word & TILE_ID_MASK) >= ROCK_FIRST_ID),
       leave,
+      entered: (u, x, y) => this.claimGround(u as Enemy, x, y),
     };
     this.crushEnv = {
       cells: this.cells,
       flags: this.flags,
       flagBit: FLAG_GROUND,
-      // $1208C: rocks and active buildings can be crossed, other blocked cells cannot.
-      canEnter: (word) => !(word & BLOCKED) || (word & TILE_ID_MASK) >= ROCK_FIRST_ID || (word & ACTIVE) !== 0,
+      // $1207E-$12098: an unblocked cell, or a blocked one whose low byte passes `cmpi.b #$88` + bpl (N clear after the
+      // byte subtraction: $88..$FF and, by wrap-around, $00..$07), or an active building (bit 10).
+      canEnter: (word) => !(word & BLOCKED) || (((word & 0xff) - ROCK_FIRST_ID) & 0x80) === 0 || (word & ACTIVE) !== 0,
       leave,
+      entered: (u, x, y) => this.claimGround(u as Enemy, x, y),
       atCentre: (u) => this.acid(u as Enemy),
-      entered: (_u, x, y, word) => {
-        if (word & ACTIVE) this.sim.bomb(x, y); // $22A2: the building under the crusher is destroyed
+      // $1228A: the building is destroyed (jsr $7124, $12332) after the next cell got its occupancy bit and before the
+      // old cell's marks, the reservation pointer, the recent directions, the direction and the velocity change.
+      claimed: (_u, x, y, word) => {
+        if (word & ACTIVE) this.sim.bomb(x, y);
       },
+      // $1231A: only +B becomes $FF; +C, the velocity, the direction and the pixel offset stay.
+      arrive: (u) => {
+        u.targetX = NO_TARGET;
+      },
+      repeatLastCandidate: true, // $12234 re-tries the +5 entry of the $4BCA row (d+3) instead of d-3
+      byteOffsets: true, // $11F88 add.b, $11FA0 cmp.b
     };
+  }
+
+  /**
+   * Headless, inert adoption of a detached `EnemyRoster`: the roster's Enemy objects keep their identity and
+   * their fixed slots (the system works directly on `roster.ground` / `roster.air`; a roster can be adopted once).
+   * Nothing is written: no state word, map cell, flag byte, object record, counter, RNG call, hook call, spawn,
+   * step or combat. The system is driven only by explicit `pass(clock)` / `frame()` calls from the caller.
+   * Everything is validated first and a failure returns one typed error with nothing adopted or changed.
+   * Crusher records (type 24) are adopted with the toggle/counter (+$13) and animation (+$14) decoded by
+   * `Enemy.fromDisk4`; only a counter above 7 or an animation above the table's largest value is refused, as typed
+   * "unsupported-state" (`crusher-counter` / `crusher-anim`), before anything is installed. `sim`'s spawn/defect/repair
+   * hooks and the units' hooks are the caller's own and are not wired here.
+   *
+   * With `ships` (a detached ShipRoster) the same call also adopts the own ships and missiles: the roster's record
+   * objects become the live entries of `sim.fleet` in their saved slots (all 40 positions and holes kept), via
+   * `Fleet.adoptRestored`, never `createShip`, and this system gets a ShipExtra for each from the saved +6/+7,
+   * +$11, +$12 and the cell of the +$14 flag pointer (the current reservation). No counter, RNG draw, hook call or
+   * map / flag / state / object write happens; the saved $1429E word must equal the occupied slots. Restored
+   * missiles resolve their target as the CURRENT occupant of the saved enemy slot (see missileStep and
+   * dailyMissile, shared with launched missiles). All validation precedes any change, so an error leaves everything as it was.
+   *
+   * The roster's raw +$16 long of every slot, free records included, is adopted unchanged (`groundFlagPointers` /
+   * `airFlagPointers` ARE the roster's arrays afterwards): a free slot keeps its stale pointer for the next spawn and the
+   * next pre-movement death, exactly as the static trace says the original does. Occupied and free records alike may hold any
+   * unsigned long (zero, padding, off the array): it stays raw, the enemy's reserve mirror is the named playable cell or
+   * -1 / -1, and death releases only a playable cell (padding / out-of-range release nothing in this port).
+   */
+  static fromRoster(sim: Sim, units: UnitSystem, tables: CombatTables, roster: EnemyRoster, hooks: EnemyHooks = {}, ships?: ShipRoster): EnemyAdoptResult {
+    const fail = (error: EnemyAdoptError): EnemyAdoptResult => ({ ok: false, error });
+    if (!(roster instanceof EnemyRoster) || !Array.isArray(roster.ground) || roster.ground.length !== MAX_GROUND || !Array.isArray(roster.air) || roster.air.length !== MAX_AIR) {
+      return fail({ code: "roster", message: `Roster must hold fixed arrays of ${MAX_GROUND} ground and ${MAX_AIR} air slots` });
+    }
+    if (adoptedRosters.has(roster)) return fail({ code: "already-adopted", message: "This roster's slots already belong to an EnemySystem" });
+    const t = tables as CombatTables | null | undefined;
+    if (!t || !Array.isArray(t.spiral) || t.spiral.length !== 48 || !Array.isArray(t.arcs) || t.arcs.length !== 8 || !t.arcs.every((a) => Array.isArray(a) && a.length === 32) ||
+      !Array.isArray(t.turn) || t.turn.length !== 64 || !Array.isArray(t.crusherAnim) || t.crusherAnim.length !== 8) {
+      return fail({ code: "tables", message: "CombatTables must have 48 spiral cells, 8 arcs of 32, 64 turn entries and 8 crusher animation entries" });
+    }
+    if (roster.cells !== sim.world.cells || roster.flags !== units.flags) {
+      return fail({ code: "buffers", message: "The roster was built over different map or flag buffers than this Sim / UnitSystem" });
+    }
+    const seen = new Set<Enemy>();
+    const lists = [
+      { name: "enemyGround", slots: roster.ground, pointers: roster.groundPointers, air: false, types: ENEMY_GROUND_TYPES },
+      { name: "enemyAir", slots: roster.air, pointers: roster.airPointers, air: true, types: ENEMY_AIR_TYPES },
+    ] as const;
+    for (const list of lists) {
+      if (!Array.isArray(list.pointers) || list.pointers.length !== list.slots.length || !list.pointers.every(isUnsignedLong)) {
+        return fail({ code: "roster", list: list.name, field: "+$16", message: `${list.name} must carry exactly ${list.slots.length} raw unsigned-long +$16 pointers (free slots included)` });
+      }
+      for (let i = 0; i < list.slots.length; i++) {
+        const e = list.slots[i];
+        if (e === null) continue;
+        if (!(e instanceof Enemy) || e.air !== list.air || !list.types.includes(e.type) || e.slot !== i || !inMap(e.x, e.y) || seen.has(e)) {
+          return fail({ code: "roster", list: list.name, slot: i, message: `${list.name} slot ${i} holds a foreign, mismatched or duplicated enemy` });
+        }
+        const named = reservationOf(list.pointers[i]);
+        if (e.reserveX !== named.x || e.reserveY !== named.y) {
+          return fail({ code: "roster", list: list.name, slot: i, field: "+$16", message: `${list.name} slot ${i}: the enemy's reserve mirror does not match the cell its slot pointer names (or -1 / -1)` });
+        }
+        seen.add(e);
+      }
+    }
+    // The table $12D60 (checked above to have 8 entries) is the domain of both crusher fields: $11F68 reads entry
+    // `counter`, and the animation byte is only ever written from it ($11F6E) or at spawn from a wave entry ($4974).
+    const maxAnim = Math.max(...t.crusherAnim);
+    for (let i = 0; i < roster.ground.length; i++) {
+      const c = roster.ground[i];
+      if (c?.type !== ENEMY_CRUSHER) continue;
+      if (typeof c.toggle !== "boolean" || !Number.isInteger(c.counter) || c.counter < 0 || c.counter > 7) {
+        return fail({ code: "unsupported-state", reason: "crusher-counter", list: "enemyGround", slot: i, message: `enemyGround slot ${i} is a crusher whose +$13 counter ${c.counter} is outside 0..7 (the animation table has 8 entries)` });
+      }
+      if (!Number.isInteger(c.anim) || c.anim < 0 || c.anim > maxAnim) {
+        return fail({ code: "unsupported-state", reason: "crusher-anim", list: "enemyGround", slot: i, message: `enemyGround slot ${i} is a crusher whose +$14 animation ${c.anim} is outside 0..${maxAnim} (the table's largest value)` });
+      }
+    }
+    let planned: (AdoptedShip | null)[] | null = null;
+    if (ships !== undefined) {
+      const p = planShips(sim, ships, roster.ground, roster.air);
+      if ("error" in p) return fail(p.error);
+      planned = p.plan;
+    }
+    const system = new EnemySystem(sim, units, tables, hooks, { ground: roster.ground, air: roster.air, groundPointers: roster.groundPointers, airPointers: roster.airPointers });
+    if (ships !== undefined && planned !== null) {
+      for (const a of planned) if (a) system.extras.set(a.record, a.extra);
+      if (!sim.fleet.adoptRestored(planned.map((a) => a?.record ?? null))) {
+        return fail({ code: "ship-roster", list: "ownShips", message: "The Fleet refused the adoption" });
+      }
+      adoptedShipRosters.add(ships);
+    }
+    adoptedRosters.add(roster);
+    return { ok: true, value: system };
+  }
+
+  /**
+   * Replaces the presentation callbacks (explosion, sound, launchpad builder, building height) of an existing system,
+   * e.g. one adopted headlessly by `fromRoster` before a scene exists. Only the hook object changes: the slot arrays,
+   * Enemy / ship / missile objects, ShipExtras, clock, RNG use, the Fleet reservation-release and restored-missile
+   * daily callbacks and all map / flag / state bytes are untouched, and nothing is called. A second system must never
+   * be built over an adopted roster; bind the one you have.
+   */
+  bindHooks(hooks: EnemyHooks): void {
+    this.hooks = hooks;
+  }
+
+  /** True when this system was built over exactly this Sim and own-unit system (identity check for activation). */
+  isComposedOf(sim: Sim, units: UnitSystem): boolean {
+    return this.sim === sim && this.units === units;
+  }
+
+  /**
+   * Remake-save access (save-session.ts), read side: the two private values no other accessor shows. `lastCountdown` is
+   * retained only for version-4 compatibility; `lastTarget` is the fixed enemy slot `findTarget` remembered for the next
+   * launch ($E904). Ship extras are read with `inspectShip`.
+   */
+  get sessionState(): { readonly lastCountdown: number; readonly lastTarget: EnemySlotRef | null } {
+    return { lastCountdown: this.lastCountdown, lastTarget: this.lastTarget() };
+  }
+
+  private lastTarget(): EnemySlotRef | null {
+    return this.lastTargetSlot ? { air: this.lastTargetSlot.air, index: this.lastTargetSlot.index } : null;
+  }
+
+  /**
+   * Remake-save access, write side: REPLACES the whole fixed-slot content of this system and of `sim.fleet` with the given
+   * records (holes and slot numbers kept; the arrays and the system keep their identity, hooks and buffers). The ship extras
+   * are installed per record (`null` = the record has none yet; it then gets the usual lazy default). No counter, map word,
+   * flag byte, state word, RNG draw, hook call or ShipExtra default is produced here; the caller has validated everything
+   * and restores the world buffers itself. The per-slot +$16 pointers (free slots too) are replaced with the saved values.
+   * Returns false, with nothing changed, only for a wrong array shape or a pointer that is not an unsigned long.
+   */
+  installSession(session: {
+    readonly ground: readonly (Enemy | null)[];
+    readonly air: readonly (Enemy | null)[];
+    /** Raw +$16 long of every ground / air slot (60 / 30), free slots included. */
+    readonly groundPointers: readonly number[];
+    readonly airPointers: readonly number[];
+    readonly ships: readonly (FleetRecord | null)[];
+    readonly shipExtras: readonly (ShipExtraState | null)[];
+    readonly lastCountdown: number;
+    readonly lastTarget: EnemySlotRef | null;
+  }): boolean {
+    const { ground, air, ships, shipExtras, groundPointers, airPointers } = session;
+    if (ground.length !== MAX_GROUND || air.length !== MAX_AIR || ships.length !== MAX_SHIPS || shipExtras.length !== MAX_SHIPS) return false;
+    if (groundPointers.length !== MAX_GROUND || airPointers.length !== MAX_AIR || !groundPointers.every(isUnsignedLong) || !airPointers.every(isUnsignedLong)) return false;
+    for (let i = 0; i < MAX_GROUND; i++) { this.groundSlots[i] = ground[i]; this.groundFlagPointers[i] = groundPointers[i]; }
+    for (let i = 0; i < MAX_AIR; i++) { this.airSlots[i] = air[i]; this.airFlagPointers[i] = airPointers[i]; }
+    const slots = this.sim.fleet.slots;
+    for (let i = 0; i < MAX_SHIPS; i++) {
+      const record = ships[i];
+      slots[i] = record;
+      const extra = shipExtras[i];
+      if (record && extra) {
+        this.extras.set(record, { vx: extra.vx, vy: extra.vy, next: extra.next, turn: extra.turn, rx: extra.rx, ry: extra.ry, targetSlot: extra.targetSlot ? { air: extra.targetSlot.air, index: extra.targetSlot.index } : null });
+      }
+    }
+    this.lastCountdown = session.lastCountdown;
+    this.lastTargetSlot = session.lastTarget ? { air: session.lastTarget.air, index: session.lastTarget.index } : null;
+    this.dirty = true;
+    return true;
   }
 
   private get s() {
     return this.sim.state;
   }
 
+  private isGround(e: Enemy): boolean {
+    return this.groundSlots.includes(e);
+  }
+
+  private isAir(e: Enemy): boolean {
+    return this.airSlots.includes(e);
+  }
+
   // ---- creation ---------------------------------------------------------------------------------------
 
   // $48EC / $48B6: a new enemy from a wave entry. Returns false when its list is full.
+  //
+  // `spawn.origin === "wave"` is the alien spawner $1187C (static trace): the routine first compares the count word
+  // ($142A2 ground against 60, $142A4 air against 30) and only then scans for the first free type byte; it sets the
+  // OCCUPANCY BIT IN THE MAP WORD ONLY. The per-cell flag byte (the bit tanks, guns and the enemy scan look at) and the
+  // reservation pointer +$16 are written later, when the first movement step claims the next cell ($3BC6-style claim,
+  // walkerStep / airMove), so a freshly spawned enemy cannot be shot until it has moved. The allocators $48B6 / $48EC
+  // leave +$16..+$19 of the slot untouched (static Disk.1 trace), so the new enemy inherits the slot's raw pointer
+  // (`groundFlagPointers` / `airFlagPointers`: zero in a never-used slot per ONE captured scenario, the stale pointer
+  // of the previous occupant otherwise) and `reserveX/Y` mirror what that pointer names. $4732 releases the cell the
+  // POINTER names, so an enemy that dies before its first claim leaves the spawn cell's map bit set and clears the
+  // stale target (if it is a playable cell). Without `origin` (a caller that stages an enemy directly: tests, Disk.4
+  // style fixtures) the staging behaviour is kept: map word, flag byte AND the pointer / reservation on the spawn cell.
   spawn(spawn: EnemySpawn): boolean {
     const e = spawn.entry;
-    const index = spawn.y * MAP_WIDTH + spawn.x;
+    const index = mapIndex(spawn.x, spawn.y);
+    const flag = cellFlagIndex(spawn.x, spawn.y);
+    const fromWave = spawn.origin === "wave";
+    if (fromWave && this.s.word(spawn.air ? 0x142a4 : 0x142a2) >= (spawn.air ? MAX_AIR : MAX_GROUND)) return false; // count word first
     if (spawn.air) {
-      if (this.air.length >= MAX_AIR) return false;
+      const slot = firstFree(this.airSlots); // $48B6: the first free type byte of the 30 slots
+      if (slot < 0) return false;
       const a = new Enemy(spawn.type, spawn.x, spawn.y, spawn.dir & 7, e[1], e[3], e[6], true);
       a.lift = AIR_START_LIFT;
+      a.tech = spawn.level ?? 0;
       a.aux = s8(e[5]);
       a.p14 = e[6];
       a.p15 = e[7];
       this.cells[index] |= AIR_LAYER;
-      this.flags[index] |= FLAG_AIR;
-      this.air.push(a);
+      if (!fromWave) {
+        this.flags[flag] |= FLAG_AIR;
+        this.airFlagPointers[slot] = cellFlagPointer(spawn.x, spawn.y);
+      }
+      const named = reservationOf(this.airFlagPointers[slot]);
+      a.reserveX = named.x;
+      a.reserveY = named.y;
+      this.airSlots[slot] = a;
     } else {
-      if (this.ground.length >= MAX_GROUND) return false;
+      const slot = firstFree(this.groundSlots); // $48EC: the first free type byte of the 60 slots
+      if (slot < 0) return false;
       const g = new Enemy(spawn.type, spawn.x, spawn.y, spawn.dir & 7, e[1], e[3], e[6], false);
+      g.tech = spawn.level ?? 0;
       g.aux = e[5];
+      g.p14 = e[6];
+      g.p15 = e[7];
+      if (spawn.type === ENEMY_CRUSHER) { // $496E/$4974 copy +$13 = e[5] and +$14 = e[6]: the same packing as a save
+        g.toggle = (e[5] & 0x80) !== 0;
+        g.counter = e[5] & 0x7f;
+        g.anim = e[6];
+      }
       this.cells[index] |= OCCUPIED;
-      this.flags[index] |= FLAG_GROUND;
-      this.ground.push(g);
+      if (!fromWave) {
+        this.flags[flag] |= FLAG_GROUND;
+        this.groundFlagPointers[slot] = cellFlagPointer(spawn.x, spawn.y);
+      }
+      const named = reservationOf(this.groundFlagPointers[slot]);
+      g.reserveX = named.x;
+      g.reserveY = named.y;
+      this.groundSlots[slot] = g;
     }
     this.dirty = true;
     return true;
+  }
+
+  // The movement claim of a ground enemy ($3BC6-style, via `StepEnv.entered`): the slot's +$16 now names the claimed cell.
+  private claimGround(e: Enemy, x: number, y: number): void {
+    const at = this.groundSlots.indexOf(e);
+    if (at >= 0) this.groundFlagPointers[at] = cellFlagPointer(x, y);
   }
 
   // Event 17 ($11566): the first own tank turns into an enemy ground unit (the type stays 9 or 10; it spins in
@@ -226,13 +777,22 @@ export class EnemySystem {
   // ($142A2, $1429C) are changed by the caller (Aliens.eventTankDefect).
   defect(): { x: number; y: number } | null {
     const u = this.units.units[0];
-    if (!u || this.ground.length >= MAX_GROUND) return null;
+    if (!u) return null;
+    const slot = firstFree(this.groundSlots);
+    if (slot < 0) return null;
     this.units.remove(u);
-    const g = new Enemy(u.type, u.x, u.y, u.dir, u.hp, this.s.byte(0x145a3), 0, false); // damage: [H] the tank's own
+    // Static Disk.1 trace (no emulator comparison): $115C6 writes 10 to the converted slot's +$E (bomb chance %) and
+    // $115CC copies $145A3 to +$F (damage). $1196E -> $11952 -> $1266A send a defected tank through the shared attack
+    // routine, where $12772-$12798 rolls 0..99 against +$E before $12332 bombs an active building (after the 0..24 TOD gate).
+    const g = new Enemy(u.type, u.x, u.y, u.dir, u.hp, this.s.byte(0x145a3), 10, false);
     g.mode = 5;
-    this.cells[u.y * MAP_WIDTH + u.x] |= OCCUPIED;
-    this.flags[u.y * MAP_WIDTH + u.x] |= FLAG_GROUND;
-    this.ground.push(g);
+    this.cells[mapIndex(u.x, u.y)] |= OCCUPIED;
+    this.flags[cellFlagIndex(u.x, u.y)] |= FLAG_GROUND;
+    // Static trace: the event path writes the slot's +$16 with the pointer of the tank's CURRENT cell (x, y).
+    this.groundFlagPointers[slot] = cellFlagPointer(u.x, u.y);
+    g.reserveX = u.x;
+    g.reserveY = u.y;
+    this.groundSlots[slot] = g;
     this.dirty = true;
     return { x: u.x, y: u.y };
   }
@@ -248,40 +808,45 @@ export class EnemySystem {
 
   // ---- bookkeeping (destruction) ------------------------------------------------------------------------
 
-  private explode(x: number, y: number, lift: number, high: boolean): void {
-    this.hooks.explode?.(x, y, Math.max(0, lift), high);
+  // Returns whether `$1237C` clobbered A6 (the hook's `true`); see `EnemyHooks.explode`.
+  private explode(x: number, y: number, lift: number, high: boolean): boolean {
+    return this.hooks.explode?.(x, y, Math.max(0, lift), high) === true;
   }
 
-  // $11C5C: an enemy ground unit is gone (no morale change).
+  // $11C5C: an enemy ground unit is gone (no morale change). The cell the slot's +$16 pointer names (NOT x/y) loses its
+  // reservation flag always; its map occupancy bit (`$4000`) is cleared only when the kill had no explosion, or `$1237C`
+  // left A6 (the map-word pointer that `$4732` loaded) intact. $4732 clears only +0..+2 and +8/+9: the pointer itself is
+  // left in the freed slot (`groundFlagPointers`), so an enemy that dies before its first claim releases a STALE cell
+  // (none when the pointer is 0 / not playable) and leaves its own spawn cell's map bit set. Static trace plus one staged
+  // live capture (enemies.md section 6), not broad parity.
   destroyGround(e: Enemy, explosion: boolean): void {
-    const at = this.ground.indexOf(e);
+    const at = this.groundSlots.indexOf(e);
     if (at < 0) return;
-    this.ground.splice(at, 1);
-    if (inMap(e.reserveX, e.reserveY)) {
-      const i = e.reserveY * MAP_WIDTH + e.reserveX;
-      this.cells[i] &= ~OCCUPIED;
-      this.flags[i] &= ~FLAG_GROUND;
-    }
+    this.groundSlots[at] = null; // the slot is freed in place: survivors keep their slots
+    const target = resolveCellFlagPointer(this.groundFlagPointers[at]);
+    const reserved = target.kind === "playable";
+    if (reserved) this.flags[cellFlagIndex(target.x, target.y)] &= ~FLAG_GROUND;
     this.s.setWord(0x142a2, Math.max(0, this.s.word(0x142a2) - 1));
     this.s.setLong(KILLS, this.s.long(KILLS) + 1);
-    if (explosion) this.explode(e.x, e.y, 0, true);
+    const clobbered = explosion && this.explode(e.x, e.y, 0, true);
+    if (reserved && !clobbered) this.cells[mapIndex(target.x, target.y)] &= ~OCCUPIED;
     this.dirty = true;
   }
 
-  // $11C30: an enemy aircraft is gone (also when it flies off the map); the colony gains 50 morale.
+  // $11C30: an enemy aircraft is gone (also when it flies off the map); the colony gains 50 morale. The air-layer bit
+  // (`$2000`) follows the same exg a5,a6 shape as `$11C5C` [static, not observed].
   destroyAir(e: Enemy, explosion: boolean): void {
-    const at = this.air.indexOf(e);
+    const at = this.airSlots.indexOf(e);
     if (at < 0) return;
-    this.air.splice(at, 1);
-    if (inMap(e.reserveX, e.reserveY)) {
-      const i = e.reserveY * MAP_WIDTH + e.reserveX;
-      this.cells[i] &= ~AIR_LAYER;
-      this.flags[i] &= ~FLAG_AIR;
-    }
+    this.airSlots[at] = null;
+    const target = resolveCellFlagPointer(this.airFlagPointers[at]); // the slot's raw +$16, kept after death like the ground list's
+    const reserved = target.kind === "playable";
+    if (reserved) this.flags[cellFlagIndex(target.x, target.y)] &= ~FLAG_AIR;
     this.s.setWord(0x142a4, Math.max(0, this.s.word(0x142a4) - 1));
     this.s.setLong(KILLS, this.s.long(KILLS) + 1);
     this.sim.applyMorale(50);
-    if (explosion) this.explode(e.x, e.y, e.lift, true);
+    const clobbered = explosion && this.explode(e.x, e.y, e.lift, true);
+    if (reserved && !clobbered) this.cells[mapIndex(target.x, target.y)] &= ~AIR_LAYER;
     this.dirty = true;
   }
 
@@ -311,7 +876,7 @@ export class EnemySystem {
   }
 
   // $46CC for the ships: counts, -100 morale (not for missiles), the map marks of the ship are released.
-  destroyShip(ship: Ship, explosion = true): void {
+  destroyShip(ship: FleetRecord, explosion = true): void {
     const ex = this.extra(ship);
     this.releaseShip(ship, ex);
     const lift = ship.lift;
@@ -322,14 +887,19 @@ export class EnemySystem {
     this.dirty = true;
   }
 
-  private releaseShip(ship: Ship, ex: ShipExtra): void {
+  private releaseShip(ship: FleetRecord, ex: ShipExtra): void {
     if (inMap(ex.rx, ex.ry)) {
-      const i = ex.ry * MAP_WIDTH + ex.rx;
-      this.cells[i] &= ~(AIR_LAYER | OCCUPIED);
-      this.flags[i] &= ~(FLAG_SHIP | FLAG_OWN);
+      const i = mapIndex(ex.rx, ex.ry);
+      // Missiles reserve the air layer from launch ($49E8/$497E), even while their saved lift is still 0.
+      if (isMissile(ship) || ship.lift !== 0) {
+        this.cells[i] &= ~AIR_LAYER;
+        this.flags[cellFlagIndex(ex.rx, ex.ry)] &= ~FLAG_SHIP;
+      } else {
+        this.cells[i] &= ~OCCUPIED;
+        this.flags[cellFlagIndex(ex.rx, ex.ry)] &= ~FLAG_OWN;
+      }
     }
     ex.rx = ex.ry = -1;
-    if (inMap(ship.x, ship.y)) this.flags[ship.y * MAP_WIDTH + ship.x] &= ship.lift !== 0 ? ~FLAG_SHIP : ~FLAG_OWN;
   }
 
   // ---- own units: fire ($12588) ------------------------------------------------------------------------------
@@ -347,10 +917,10 @@ export class EnemySystem {
       const cx = x + dx;
       const cy = y + dy;
       if (!inMap(cx, cy)) return;
-      const f = this.flags[cy * MAP_WIDTH + cx] & 3;
+      const f = this.flags[cellFlagIndex(cx, cy)] & 3;
       if (f === 0) continue;
-      const list = f & FLAG_GROUND ? this.ground : this.air;
-      const target = list.find((e) => Math.abs(e.x - cx) <= 1 && Math.abs(e.y - cy) <= 1);
+      const list = f & FLAG_GROUND ? this.groundSlots : this.airSlots;
+      const target = list.find((e) => e !== null && Math.abs(e.x - cx) <= 1 && Math.abs(e.y - cy) <= 1);
       if (!target) return;
       this.hooks.sound?.(SFX.HIT);
       shooterWaits();
@@ -366,19 +936,24 @@ export class EnemySystem {
   // chance +E percent) is bombed; otherwise the first own tank or ship found is hit for +F.
   private attack(e: Enemy): void {
     if (!this.clock?.enemyTick) return;
-    const gate = this.sim.roll(256) < 25; // the original tests the CIA clock register for 0..24
+    // $1266A reads the CIA TOD low byte ($BFE801) once per call and tests it for 0..24. A hardware approximation
+    // (Sim.todLow, sim-hardware.ts): it never consumes the Sim RNG, so the later bomb-chance rolls are unaffected.
+    const gate = this.sim.todLow() <= 24;
     for (const [dx, dy] of this.tables.spiral) {
       const cx = e.x + dx;
       const cy = e.y + dy;
       if (!inMap(cx, cy)) return;
-      const index = cy * MAP_WIDTH + cx;
+      const index = mapIndex(cx, cy);
       if (this.cells[index] & ACTIVE && gate) {
         if (this.sim.roll(100) >= e.bombPct) return;
         e.waiting = true;
+        // `$12790` stores the selected cell in the shared bomb-coordinate words before `$12332`.
+        this.sim.state.setWord(0x142ba, cx);
+        this.sim.state.setWord(0x142bc, cy);
         this.sim.bomb(cx, cy);
         return;
       }
-      const f = this.flags[index] & (FLAG_OWN | FLAG_SHIP);
+      const f = this.flags[cellFlagIndex(cx, cy)] & (FLAG_OWN | FLAG_SHIP);
       if (f === 0) continue;
       if (f & FLAG_OWN) {
         const tank = this.units.units.find((u) => Math.abs(u.x - cx) <= 1 && Math.abs(u.y - cy) <= 1);
@@ -407,16 +982,19 @@ export class EnemySystem {
     this.clock = clock;
     for (const ship of this.sim.fleet.ships) {
       this.shipStep(ship);
-      if (ship.type === MISSILE || !this.sim.fleet.slots.includes(ship)) continue;
+      if (isMissile(ship) || !this.sim.fleet.slots.includes(ship)) continue;
       const damage = this.s.byte(0x145a4 + ship.cls);
       if (damage !== 0 && clock.moveTick) this.fire(ship.x, ship.y, damage, () => {});
     }
-    for (const g of this.ground.slice()) {
+    for (const g of this.ground) { // a snapshot in slot order; units destroyed during the pass are skipped below
+      if (!this.isGround(g)) continue;
       if (g.waiting && !clock.enemyTick) continue;
       g.waiting = false;
       this.groundStep(g);
     }
-    for (const a of this.air.slice()) this.airStep(a);
+    for (const a of this.air) {
+      if (this.isAir(a)) this.airStep(a);
+    }
     this.dirty = true;
   }
 
@@ -436,7 +1014,7 @@ export class EnemySystem {
         walkerStep(g, this.walkEnv);
         if (g.targetX & 0x80) g.mode = 6; // the order is finished
       }
-      if (this.ground.includes(g)) this.attack(g);
+      if (this.isGround(g)) this.attack(g);
     } else if (g.type === ENEMY_CRUSHER) {
       this.crusher(g);
     } else {
@@ -452,7 +1030,7 @@ export class EnemySystem {
       this.pickTarget(g);
     } else if (g.mode === 1) {
       this.crusherStep(g);
-      g.steps++;
+      g.steps = (g.steps + 1) & 0xff; // addq.b #1,$D(a6); cmpi.b #$50 (a saved count above $50 wraps first)
       if (g.steps === 0x50 || g.targetX & 0x80) g.mode = 6;
     }
   }
@@ -464,7 +1042,7 @@ export class EnemySystem {
     g.toggle = !was;
     if (!was) return;
     g.counter = g.counter - 1 < 0 ? 7 : g.counter - 1;
-    g.anim = this.tables.crusherAnim[g.counter];
+    g.anim = this.tables.crusherAnim[g.counter] ?? 0; // supported states keep the counter in 0..7 (see fromRoster)
     walkerStep(g, this.crushEnv);
   }
 
@@ -482,10 +1060,10 @@ export class EnemySystem {
   private airStep(a: Enemy): void {
     if (a.type === ENEMY_KAMIKAZE || a.type === ENEMY_KAMIKAZE_FAST) {
       this.kamikaze(a);
-      if (a.type === ENEMY_KAMIKAZE && this.air.includes(a)) this.attack(a);
+      if (a.type === ENEMY_KAMIKAZE && this.isAir(a)) this.attack(a);
     } else {
       this.bomber(a);
-      if (this.air.includes(a)) this.attack(a);
+      if (this.isAir(a)) this.attack(a);
     }
   }
 
@@ -518,14 +1096,16 @@ export class EnemySystem {
     }
     [a.vx, a.vy] = VELOCITY[a.dir];
     // The air layer mark moves to the next cell when the step starts.
-    const here = a.y * MAP_WIDTH + a.x;
+    const here = mapIndex(a.x, a.y);
     this.cells[here] &= ~AIR_LAYER;
-    this.flags[here] &= ~FLAG_AIR;
+    this.flags[cellFlagIndex(a.x, a.y)] &= ~FLAG_AIR;
     const nx = a.x + DIR_STEP[a.dir][0];
     const ny = a.y + DIR_STEP[a.dir][1];
+    const at = this.airSlots.indexOf(a);
+    if (at >= 0) this.airFlagPointers[at] = cellFlagPointer(nx, ny); // raw pointer, also for a cell off the map (names no playable cell)
     if (inMap(nx, ny)) {
-      this.cells[ny * MAP_WIDTH + nx] |= AIR_LAYER;
-      this.flags[ny * MAP_WIDTH + nx] |= FLAG_AIR;
+      this.cells[mapIndex(nx, ny)] |= AIR_LAYER;
+      this.flags[cellFlagIndex(nx, ny)] |= FLAG_AIR;
       a.reserveX = nx;
       a.reserveY = ny;
     } else {
@@ -605,14 +1185,31 @@ export class EnemySystem {
 
   // ---- ships ($42BE, $4526) ------------------------------------------------------------------------------------
 
-  private extra(ship: Ship): ShipExtra {
+  private extra(ship: FleetRecord): ShipExtra {
     let ex = this.extras.get(ship);
     if (!ex) {
+      // A restored record gets its ShipExtra from the saved bytes at adoption, a launched missile from launchMissile;
+      // inventing defaults for either is a bug (a missile without a target slot cannot run).
+      if ("sourceRaw" in ship || isMissile(ship)) throw new Error("restored or missile record without its own ShipExtra");
       const landed = ship.lift === 0 && ship.mode === 0;
-      ex = { vx: 0, vy: 0, next: 0, turn: 2, rx: landed ? ship.x : -1, ry: landed ? ship.y : -1, target: null };
+      ex = { vx: 0, vy: 0, next: 0, turn: 2, rx: landed ? ship.x : -1, ry: landed ? ship.y : -1, targetSlot: null };
       this.extras.set(ship, ex);
     }
     return ex;
+  }
+
+  /**
+   * Read-only copy of a ship's or missile's extra state (velocity +6/+7, +$11 next, +$12 turn, the reservation cell
+   * named by +$14 and the followed enemy slot of a missile) for observers such as runtime checkpoints. Unlike the
+   * internal accessor it never creates an extra: a ship that has not been stepped or ordered yet has none and gives
+   * null. Writes nothing, draws no RNG and calls no hook.
+   */
+  inspectShip(ship: FleetRecord): ShipInspection | null {
+    const ex = this.extras.get(ship);
+    if (!ex) return null;
+    const target: EnemySlotRef | null = ex.targetSlot ? { air: ex.targetSlot.air, index: ex.targetSlot.index } : null;
+    const occupied = target ? this.occupant(target) !== null : null;
+    return { vx: ex.vx, vy: ex.vy, next: ex.next, turn: ex.turn, rx: ex.rx, ry: ex.ry, targetSlot: target, targetOccupied: occupied };
   }
 
   // ---- orders ($3F9E dispatch, $41A8, $4204, $4260/$427C, takeoff $4152) ----
@@ -626,7 +1223,7 @@ export class EnemySystem {
     ex.turn = ex.next === 1 ? 2 : want < 0 ? 6 : want; // $44DE gives 6 when the ship is on the target
     const i = ship.y * MAP_WIDTH + ship.x;
     this.cells[i] = (this.cells[i] & ~OCCUPIED) | AIR_LAYER;
-    this.flags[i] = (this.flags[i] & ~FLAG_OWN) | FLAG_SHIP;
+    this.flags[cellFlagIndex(ship.x, ship.y)] = (this.flags[cellFlagIndex(ship.x, ship.y)] & ~FLAG_OWN) | FLAG_SHIP;
     ex.rx = ship.x;
     ex.ry = ship.y;
     ship.dir = 2;
@@ -678,6 +1275,7 @@ export class EnemySystem {
   // The dispatch of $3F9E after the ship window: `order` is one of SHIP_ORDER, `target` the cell of the chosen pin
   // (orders 2 and 3). Returns the string index of a refusal message ($ED, no fuel), 0 when the order was given.
   commandShip(ship: Ship, order: number, target: { x: number; y: number } | null): number {
+    if (isMissile(ship as FleetRecord)) return 0; // a missile has no window, class or fuel
     if (ship.fuel === 0) return MSG_NO_FUEL;
     if (order === SHIP_ORDER.hover || order === SHIP_ORDER.buildPad) this.holdOrder(ship, order);
     else if (order === SHIP_ORDER.land) this.landOrder(ship);
@@ -710,10 +1308,10 @@ export class EnemySystem {
   }
 
   // $4526: like the aircraft step; also -1 between cells, 0 when holding (modes 5, 6) or on the target cell.
-  private shipMove(ship: Ship, ex: ShipExtra): number {
+  private shipMove(ship: FleetRecord, ex: ShipExtra): number {
     let dx = ship.dx + ex.vx;
     let dy = ship.dy + ex.vy;
-    if (ship.type === MISSILE) {
+    if (isMissile(ship)) {
       dx += ex.vx;
       dy += ex.vy;
     }
@@ -729,8 +1327,12 @@ export class EnemySystem {
     if (dx !== 0 || dy !== 0) return -1;
     if (ship.mode === 5 || ship.mode === 6) return 0;
     if (!inMap(ship.x, ship.y)) {
-      // $4672: off the map the ship joins the front fleet of its class ($1427C); no lost-unit statistic
-      this.s.setLong(0x1427c + 4 * ship.cls, this.s.long(0x1427c + 4 * ship.cls) + 1);
+      // $4672: off the map the ship joins the front fleet of its class ($1427C); no lost-unit statistic. The index is
+      // the byte at +$D; for a missile (launched or restored alike) that is the top byte of its 24-bit enemy-slot
+      // address (3 for every enemy slot), so the original counts it in the front fleet of "class 3" - reproduced, not
+      // invented (a launched missile has no class: the old fictitious class 6 pointed at $14294 itself).
+      const front = 0x1427c + 4 * (isMissile(ship) ? s8(enemySlotAddress(this.missileSlot(ex)) >>> 16) : ship.cls);
+      this.s.setLong(front, this.s.long(front) + 1);
       ship.x = Math.max(0, Math.min(MAP_WIDTH - 1, ship.x));
       ship.y = Math.max(0, Math.min(MAP_HEIGHT - 1, ship.y));
       this.releaseShip(ship, ex);
@@ -743,16 +1345,16 @@ export class EnemySystem {
     if (want < 0) return 0;
     if (ship.dir > 7 || ship.dir !== want) ship.dir = this.tables.turn[(ship.dir & 7) * 8 + want];
     [ex.vx, ex.vy] = VELOCITY[ship.dir];
-    // the air layer mark follows the ship when the step starts
-    if (inMap(ex.rx, ex.ry)) {
-      this.cells[ex.ry * MAP_WIDTH + ex.rx] &= ~AIR_LAYER;
-      this.flags[ex.ry * MAP_WIDTH + ex.rx] &= ~FLAG_SHIP;
-    }
+    // the air layer mark follows the ship when the step starts: $4646/$464A clear it on the ship's OWN cell (x, y via
+    // $497E) and $4660 then stores the flag pointer of the next cell in +$14. At a cell centre that is the cell +$14
+    // names, so this equals the reservation cell for every ship the port moves itself.
+    this.cells[mapIndex(ship.x, ship.y)] &= ~AIR_LAYER;
+    this.flags[cellFlagIndex(ship.x, ship.y)] &= ~FLAG_SHIP;
     const nx = ship.x + DIR_STEP[ship.dir][0];
     const ny = ship.y + DIR_STEP[ship.dir][1];
     if (inMap(nx, ny)) {
-      this.cells[ny * MAP_WIDTH + nx] |= AIR_LAYER;
-      this.flags[ny * MAP_WIDTH + nx] |= FLAG_SHIP;
+      this.cells[mapIndex(nx, ny)] |= AIR_LAYER;
+      this.flags[cellFlagIndex(nx, ny)] |= FLAG_SHIP;
       ex.rx = nx;
       ex.ry = ny;
     } else {
@@ -783,6 +1385,11 @@ export class EnemySystem {
     if (ship.mode === 4 && !(this.hooks.buildPad?.(ship.x, ship.y) ?? false)) this.startLanding(ship, ex);
   }
 
+  // $43BC-$4406: finish descent. The original restores the current map/flag pointers from $1424C, which $41DA
+  // captured from the ship's x/y when descent was accepted. A restored Disk.4 has no serialized copy of those
+  // transient pointers; mode 8 does not move x/y, so derive that same cell from the saved coordinates here.
+  // This also intentionally does not release the previously saved +$14 reservation: the original completion
+  // writes the landing cell pointer to +$14 and clears/sets only the current cell's map/flag bits.
   private land(ship: Ship, ex: ShipExtra): void {
     ship.lift = 0;
     ship.dir = 8;
@@ -792,15 +1399,15 @@ export class EnemySystem {
     ship.dx = ship.dy = 0;
     const i = ship.y * MAP_WIDTH + ship.x;
     this.cells[i] = (this.cells[i] & ~AIR_LAYER) | OCCUPIED;
-    this.flags[i] = (this.flags[i] & ~FLAG_SHIP) | FLAG_OWN;
+    this.flags[cellFlagIndex(ship.x, ship.y)] = (this.flags[cellFlagIndex(ship.x, ship.y)] & ~FLAG_SHIP) | FLAG_OWN;
     ex.rx = ship.x;
     ex.ry = ship.y;
     if (ship.fuel < 0x8000) ship.fuel = Math.max(0, ship.fuel - 4);
   }
 
-  private shipStep(ship: Ship): void {
+  private shipStep(ship: FleetRecord): void {
     const ex = this.extra(ship);
-    if (ship.type === MISSILE) return this.missileStep(ship, ex);
+    if (isMissile(ship)) return this.missileStep(ship, ex);
     switch (ship.mode) {
       case 2:
       case 5:
@@ -833,106 +1440,140 @@ export class EnemySystem {
   // ---- missiles (ship list type 17) -------------------------------------------------------------------------------
 
   // $12456: the enemy a launcher at (x, y) can aim at within `range` cells. Kamikaze aircraft and crushers come
-  // first, otherwise the last enemy found; the result is remembered for the launch ($E904).
+  // first, otherwise the last enemy found; the result is remembered for the launch as a fixed slot ($E904 is a pointer
+  // into the enemy lists, not an object: a launch resolves whatever stands in that slot at that moment).
   findTarget(range: number, x: number, y: number): EnemyTarget | null {
-    let found: Enemy | null = null;
-    for (const list of [this.ground, this.air]) {
-      for (const e of list) {
+    let found: { enemy: Enemy; slot: EnemySlotRef } | null = null;
+    for (const air of [false, true]) {
+      const list = air ? this.airSlots : this.groundSlots;
+      for (let index = 0; index < list.length; index++) {
+        const e = list[index];
+        if (e === null) continue;
         if (Math.abs(e.x - x) > range || Math.abs(e.y - y) > range) continue;
         if (e.type === ENEMY_CRUSHER || e.type === ENEMY_KAMIKAZE || e.type === ENEMY_KAMIKAZE_FAST) {
-          this.lastTarget = e;
+          this.lastTargetSlot = { air, index };
           return { x: e.x, y: e.y, enemy: e };
         }
-        found = e;
+        found = { enemy: e, slot: { air, index } };
       }
     }
-    this.lastTarget = found;
-    return found ? { x: found.x, y: found.y, enemy: found } : null;
+    this.lastTargetSlot = found ? found.slot : null;
+    return found ? { x: found.enemy.x, y: found.enemy.y, enemy: found.enemy } : null;
   }
 
-  // $E158..: a missile from a launcher cell at the enemy found by `findTarget`. False when the ship list is full.
+  // The fixed slot an installed enemy stands in (null when it is not installed any more).
+  private slotOf(e: Enemy): EnemySlotRef | null {
+    const air = this.airSlots.indexOf(e);
+    if (air >= 0) return { air: true, index: air };
+    const ground = this.groundSlots.indexOf(e);
+    return ground >= 0 ? { air: false, index: ground } : null;
+  }
+
+  // The enemy that currently occupies a fixed slot (null = free, type byte 0).
+  private occupant(slot: EnemySlotRef): Enemy | null {
+    return (slot.air ? this.airSlots : this.groundSlots)[slot.index] ?? null;
+  }
+
+  // $E158..$49E8: a missile from a launcher cell at the enemy of the launch slot. The pointer stored in +$C..+$F is the slot
+  // identity: an explicit `target.enemy` is resolved to the slot it stands in NOW (a dead one cannot be launched at), without
+  // one the slot `findTarget` remembered ($E904) is used. A free slot refuses the launch: the original would read the stale
+  // bytes of the freed record, which are not modelled. +B/+C start as the occupant's +1/+2 ($ACE2 refreshes them daily).
+  // False when the ship list is full, so the caller says $12B (no $C8 here: $49E8 has its own check).
   launchMissile(from: { x: number; y: number }, target?: { x: number; y: number }): boolean {
-    const enemy = (target as EnemyTarget | undefined)?.enemy ?? this.lastTarget;
-    if (!enemy) return false;
-    const index = from.y * MAP_WIDTH + from.x;
-    const before = this.cells[index];
-    const ship = this.sim.fleet.createShip(MISSILE, from.x, from.y, 0);
-    if (!ship) return false;
-    this.cells[index] = before | AIR_LAYER; // createShip marked the ground layer; a missile flies
-    ship.mode = 4;
-    ship.lift = 0;
-    ship.targetX = enemy.x;
-    ship.targetY = enemy.y;
-    const ex = this.extra(ship);
-    ex.target = enemy;
-    ex.rx = from.x;
-    ex.ry = from.y;
-    this.flags[index] |= FLAG_SHIP;
+    const given = (target as EnemyTarget | undefined)?.enemy;
+    const slot = given !== undefined ? this.slotOf(given) : this.lastTargetSlot;
+    const enemy = slot ? this.occupant(slot) : null;
+    if (!slot || !enemy) return false;
+    const missile = this.sim.fleet.createMissile(from.x, from.y);
+    if (!missile) return false;
+    missile.targetX = enemy.x;
+    missile.targetY = enemy.y;
+    this.cells[mapIndex(from.x, from.y)] |= AIR_LAYER; // a missile flies: air mark on the launcher cell ($497E reservation)
+    this.flags[cellFlagIndex(from.x, from.y)] |= FLAG_SHIP;
+    this.extras.set(missile, { vx: 0, vy: 0, next: 0, turn: 2, rx: from.x, ry: from.y, targetSlot: slot });
     this.dirty = true;
     this.hooks.sound?.(SFX.LAUNCH); // $E1A2
     return true;
   }
 
-  private enemyAlive(e: Enemy | null): e is Enemy {
-    return e !== null && (e.air ? this.air : this.ground).includes(e);
+  private missileSlot(ex: ShipExtra): EnemySlotRef {
+    if (!ex.targetSlot) throw new Error("missile without a target slot");
+    return ex.targetSlot;
   }
 
-  // $4408: climb to $22, fly to the enemy (it is followed: the target cell is refreshed at every cell centre),
-  // and on arrival hit it. A ground target freezes and the missile comes down on it first; an aircraft is hit at once.
-  private missileStep(ship: Ship, ex: ShipExtra): void {
-    const target = ex.target;
-    if (ship.mode !== 2 && !this.enemyAlive(target)) {
-      this.destroyShip(ship, false); // the target is gone: the missile vanishes
-      return;
-    }
-    if (ship.mode === 4) {
-      ship.lift += 4;
-      if (ship.lift > AIR_START_LIFT) {
-        ship.lift = AIR_START_LIFT;
-        ship.mode = 1;
-        const want = dirToward(ship.x, ship.y, ship.targetX, ship.targetY);
-        ship.dir = want < 0 ? 0 : want;
-      }
-    } else if (ship.mode === 1) {
-      if (ship.dx === 0 && ship.dy === 0 && target) {
-        ship.targetX = target.x;
-        ship.targetY = target.y;
-      }
-      if (this.shipMove(ship, ex) < 0 || !target) return;
-      if (Math.abs(ship.x - target.x) > 1 || Math.abs(ship.y - target.y) > 1) return;
-      if (!target.air) {
-        ship.mode = 2;
-        ship.dir = 3;
-        ex.vx = ex.vy = 0;
-        target.targetX = NO_TARGET;
-        target.mode = 5;
-      } else {
-        this.missileHit(ship, target);
-      }
-    } else {
-      ship.lift -= 4;
-      if (ship.lift > 0) return;
-      if (target) this.missileHit(ship, target);
-      else this.destroyShip(ship, false);
-    }
-  }
-
-  private missileHit(ship: Ship, target: Enemy): void {
+  private missileHit(ship: FleetRecord, target: Enemy): void {
     this.destroyShip(ship, true);
     this.destroyEnemy(target, true);
   }
 
+  // $4408 for every missile, launched and restored alike, with the pointer semantics of the original: +$C..+$F names a
+  // fixed enemy slot and the CURRENT occupant is read from it each time (a reused slot is followed, a dead Enemy is not kept).
+  //  - mode 4: climb 4 per call to $22, then mode 1 and the direction of $44DE (6 when already on +B/+C).
+  //  - mode 1: $4526 moves it; +B/+C are NOT refreshed here (only the daily $ACE2 does that). At a cell centre / on arrival
+  //    the occupant is tested: within one cell on both axes a ground target (list slot < $19) freezes (mode 5, +B = $FF) and
+  //    the missile switches to mode 2 (dir 3, no velocity), an air target is hit at once. The main pass has NO "target is
+  //    gone" check: a free slot is only noticed by $ACE2.
+  //  - mode 2 (the else branch): lift -4; when it is <= 0 the missile and the occupant (if any) are destroyed.
+  // Limit: with a FREE slot the original still compares against the stale x and the zeroed y bytes of the freed record
+  // and, near them, writes into it; those stale bytes are not modelled, so a missile whose slot is free just flies on
+  // (mode 1) until the next daily pass destroys it, and in mode 2 it simply ends.
+  private missileStep(m: MissileRecord, ex: ShipExtra): void {
+    const slot = this.missileSlot(ex);
+    if (m.mode === 4) {
+      m.lift += 4;
+      if (m.lift > AIR_START_LIFT) {
+        m.lift = AIR_START_LIFT;
+        m.mode = 1;
+        const want = dirToward(m.x, m.y, m.targetX, m.targetY);
+        m.dir = want < 0 ? 6 : want; // $44DE
+      }
+    } else if (m.mode === 1) {
+      if (this.shipMove(m, ex) < 0) return;
+      const target = this.occupant(slot);
+      if (!target) return;
+      if (Math.abs(m.x - target.x) > 1 || Math.abs(m.y - target.y) > 1) return;
+      if (!target.air) {
+        m.mode = 2;
+        m.dir = 3;
+        ex.vx = ex.vy = 0;
+        target.targetX = NO_TARGET;
+        target.mode = 5;
+      } else {
+        this.missileHit(m, target);
+      }
+    } else {
+      m.lift -= 4;
+      if (m.lift > 0) return;
+      const target = this.occupant(slot);
+      if (target) this.missileHit(m, target);
+      else this.destroyShip(m, false);
+    }
+  }
+
+  // $ACE2 for a missile (called from Fleet.dailyFuel in slot order): `tst.b (a0)` of the slot it points at.
+  // Type byte zero (free slot) -> $46CC with d0 = 0 after setting bit 5 of $156A9, which $4732 turns into one explosion
+  // at the missile (no message, no kill/lost count for type 17). Otherwise +B/+C := the occupant's +1/+2, so the
+  // missile always aims at where the CURRENT occupant stands (a reused slot's new enemy included).
+  private dailyMissile(m: MissileRecord): void {
+    const slot = this.missileSlot(this.extra(m));
+    const target = this.occupant(slot);
+    if (!target) {
+      this.destroyShip(m, true);
+      return;
+    }
+    m.targetX = target.x;
+    m.targetY = target.y;
+  }
+
   // ---- guns ($11D34) -------------------------------------------------------------------------------------------
 
-  // Called once per video frame after Sim.tick(): the half-day moment (frame countdown $2D) fires gun A, the day
-  // change fires gun B ($144C1 bits 4 and 0 in the original).
+  // Compatibility no-op: the original schedules gun rounds through the pending-period byte in Sim, not by sampling
+  // the countdown at a pass boundary. Kept for older callers while save-v4 retains the historical baseline field.
   frame(): void {
-    const now = this.s.byte(A.frameCountdown);
-    const before = this.lastCountdown;
-    this.lastCountdown = now;
-    if (before < 0 || before === now) return;
-    if (now === 0x2d) this.fireGuns(GUN_A, this.s.long(0x1310e));
-    if (now > before) this.fireGuns(GUN_B, this.s.long(0x13112));
+  }
+
+  /** Legacy no-op: pending period bits are the authoritative saved firing schedule. */
+  primeRestoredFrame(): void {
   }
 
   // One firing round of all guns with tile `tile` (record byte +3 = $FF: finished). Each gun counts its timer
@@ -941,9 +1582,18 @@ export class EnemySystem {
   fireGuns(tile: number, damage: number): void {
     if (this.s.byte(POWER_LEVEL) >= 0x10) return;
     const o = this.sim.world.objects;
-    for (let slot = 0; slot < OBJECT_SLOTS; slot++) {
+    // $99C4 passes A0=$13248 for Gun A and A0=$1325A for Gun B: the addresses of the +$C total word of the fixed
+    // T[5] (row $1323C) / T[6] (row $1324E) rows, which $11D34 reads as its DBRA budget (not row bases). They are fixed rows;
+    // do not rediscover them through World.findType(), whose tile column may be absent in some scenarios.
+    // $11D34 starts its DBRA budget from the row's +$C total. In-progress records are skipped without consuming it.
+    const typeIndex = tile === GUN_A ? 5 : tile === GUN_B ? 6 : -1;
+    if (typeIndex < 0) return;
+    let remaining = this.s.word(TYPE_TABLE + TYPE_SIZE * typeIndex + 0x0c);
+    if (remaining === 0) return;
+    for (let slot = 0; slot < OBJECT_SLOTS && remaining > 0; slot++) {
       const at = slot * 8;
       if (((o[at] << 8) | o[at + 1]) !== tile || o[at + 3] !== 0xff) continue;
+      remaining--;
       const x = o[at + 4];
       const y = o[at + 5];
       const index = y * MAP_WIDTH + x;
@@ -965,10 +1615,10 @@ export class EnemySystem {
         if (!inMap(cx, cy)) break;
         const word = this.cells[cy * MAP_WIDTH + cx];
         if (i < 8 && word & ACTIVE) break; // a building in the way ends the first part of the arc
-        const f = this.flags[cy * MAP_WIDTH + cx];
+        const f = this.flags[cellFlagIndex(cx, cy)];
         if (f & FLAG_GROUND || f & FLAG_AIR) {
-          const list = f & FLAG_GROUND ? this.ground : this.air;
-          const target = list.find((e) => Math.abs(e.x - cx) <= 1 && Math.abs(e.y - cy) <= 1);
+          const list = f & FLAG_GROUND ? this.groundSlots : this.airSlots;
+          const target = list.find((e) => e !== null && Math.abs(e.x - cx) <= 1 && Math.abs(e.y - cy) <= 1);
           if (!target) {
             ended = true; // flagged cell without an enemy: this gun does nothing this round
             hit = true;
@@ -1019,13 +1669,14 @@ export class EnemySystem {
     };
   }
 
-  // Everything this system draws on the map: ships, enemy ground units, aircraft (lifted by their altitude).
+  // Everything this system draws on the map: enemy ground units, aircraft (lifted by their altitude), ships and missiles, each tagged
+  // with its original draw-list source (`kind`); ObjectLayer orders the sources as `$333A` does (ships, ground, air).
   drawables(): Drawable[] {
     if (!this.dirty) return this.cache;
     const out: Drawable[] = [];
-    for (const g of this.ground) out.push({ type: g.type, x: g.x, y: g.y, dx: g.dx, dy: g.dy, frame: g.dir, anim: g.anim, ref: g });
-    for (const a of this.air) out.push({ type: a.type, x: a.x, y: a.y, dx: a.dx, dy: a.dy, frame: a.dir, lift: Math.max(0, a.lift), ref: a });
-    for (const p of this.sim.fleet.ships) out.push({ type: p.type, x: p.x, y: p.y, dx: p.dx, dy: p.dy, frame: p.dir, lift: Math.max(0, p.lift), ref: p });
+    for (const g of this.ground) out.push({ type: g.type, x: g.x, y: g.y, dx: g.dx, dy: g.dy, frame: g.dir, anim: g.anim, ref: g, kind: "ground" });
+    for (const a of this.air) out.push({ type: a.type, x: a.x, y: a.y, dx: a.dx, dy: a.dy, frame: a.dir, lift: Math.max(0, a.lift), ref: a, kind: "air" });
+    for (const p of this.sim.fleet.ships) out.push({ type: p.type, x: p.x, y: p.y, dx: p.dx, dy: p.dy, frame: p.dir, lift: Math.max(0, p.lift), ref: p, kind: "ship" });
     this.cache = out;
     this.dirty = false;
     return out;

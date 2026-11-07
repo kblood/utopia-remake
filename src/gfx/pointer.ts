@@ -1,6 +1,6 @@
-// Mouse pointer image taken from the game image in the user's Disk.1. A descriptor is
+// Mouse pointer images taken from the game image in the user's Disk.1. A descriptor is
 // {rows-1, image address, mask address}: 32 pixels wide, 5 bit-planes one after the other,
-// one mask plane. Only the descriptor at $4A74 (the arrow) is used so far.
+// one mask plane. $4A74 is the arrow and $4AA4 is the map-cell hover variant.
 
 import { SECTOR_SIZE } from "../data/picture.js";
 import type { Screen } from "./screen.js";
@@ -8,6 +8,7 @@ import type { Screen } from "./screen.js";
 const IMAGE_START = 0x14c * SECTOR_SIZE;
 const IMAGE_BASE = 0x1000;
 export const POINTER_ARROW = 0x4a74;
+export const POINTER_CELL_HOVER = 0x4aa4;
 const PLANES = 5;
 const WIDTH = 32;
 

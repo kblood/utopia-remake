@@ -26,7 +26,7 @@ Static analysis of the game proper (Disk.1 sectors $14C-$208 at $1000). Addresse
 Arguments: d0 = x pixel, d1 = y pixel, a0 = NUL-terminated string, a1 = pointer to an array of 5 long plane addresses. Planes are 40 bytes per row, 8000 bytes per plane (320 x 200 lowres, 5 planes); the colour is the byte at `$156AB`.
 
 - **`$538A` (transparent text, the normal one)**: computes the byte offset `y*40 + x/8`, falls into the shared body at `$53A2`.
-- **`$539E` (opaque variant)**: first calls `$51E6`, which fills a 6-row strip, d2 bytes wide, at (x, y) with an 8-row background pattern (pointer in `$5D7A`, 5 planes x 16 bytes, phase y and 7; the default pattern is made at screen setup from the background picture, row 70, byte 10 at `$16D1A`, and byte 19 at `$16D6A`), then draws the text like `$538A`. Only the first line is pre-erased. Users: disk menu prompts (x 8, y $B5 and $BE, d2 = $25 bytes) and the keyboard text-entry routine near `$515C`. `$52A8` is the 8-row-high version of the same pattern fill (used to clear panel lines).
+- **`$539E` (opaque variant)**: first calls `$51E6`, which fills a 6-row strip, d2 bytes wide, at (x, y) with an 8-row background pattern (pointer in `$5D7A`, five planes x 16 bytes, phase `y & 7`), then draws the text like `$538A`. Screen setup builds the patterns from the displayed screen: `$4F2A` samples byte column 10 (pixels 80..87) over rows 70..77 into `$16D1A`; `$4F92` samples byte column 19 (pixels 152..159) over those rows into `$16D6A`. Each sampled row byte is duplicated in the 16-byte plane block so `$51E6` can consume one eight-row cycle across the five bitplanes. The disk menu points `$5D7A` at `$16D6A`, so its erases repeat the sampled 8x8 tile from the menu picture. Only the first line is pre-erased. Users: disk menu prompts/results and the keyboard text-entry routine near `$515C`. `$52A8` is the 8-row-high version of the same pattern fill (used to clear panel lines).
 - Body (`$53A2`-`$54DC`), per character:
   1. byte 0 ends the string; a byte with **bit 7 set is a line break** (any value $80-$FF): the cursor returns to the line's start (same x including its bit shift) and moves down 9 rows; TAB ($09) is skipped without advance.
   2. table lookup (section 1) -> glyph index and advance; 6 glyph rows, row r written at `+r*40`.
@@ -46,6 +46,8 @@ Only two values are ever written (all 67 write sites are `move.b #imm,$156AB`; i
 | 21 ($15) | 10101 | planes 0, 2, 4 | $FF0 (yellow) | top bar fields, single message line, headings/labels of the F-key screens (33 write sites set it before drawing; the matching resets to 1 follow) |
 
 The in-game palette is the 32 words at offset 40,000 of the unpacked main-screen background (see `map-rendering.md` section 9).
+
+The disk-menu message and list text use colour 1. The loaded image byte at `$156AB` is 1, and the shared start reset `$87D2` also writes 1. Neither the boot-menu setup `$7E52` nor the in-game icon-8 entry `$15AE6` changes `$156AB` before the disk-menu loop calls `$82B8`; `$8462`, `$83A2` and `$539E` read the current byte without overriding it. All routines that temporarily write highlight colour 21 restore 1 before returning to their caller. This establishes the normal text colour for the menu from static control-flow evidence; no live-original screenshot comparison exists.
 
 ## 4. Message line (single line, `$551A`) (VERIFIED)
 

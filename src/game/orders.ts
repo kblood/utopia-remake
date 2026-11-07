@@ -3,7 +3,7 @@
 // and its dispatch ($3F9E) are in screens/orders.ts and EnemySystem.commandShip. Notes: notes/formats/ship-control.md.
 
 import type { ObjectLayer } from "./objects.js";
-import type { Ship } from "./sim-ships.js";
+import { isMissile, type FleetRecord, type Ship } from "./sim-ships.js";
 import { NO_TARGET, type Unit, type UnitSystem } from "./units.js";
 
 export const MISSILE_TYPE = 17; // ship list type of a guided projectile: has no window
@@ -19,9 +19,9 @@ function cellCorner(vx: number, vy: number): { x: number; y: number } {
 
 // $3F5E: what a record is: an own tank (type 9 / 10) or one of the six ship types; missiles, enemies and the rest
 // have no window and end the search.
-function classify(ref: unknown, units: UnitSystem, ships: Ship[]): Pick | null {
+function classify(ref: unknown, units: UnitSystem, ships: FleetRecord[]): Pick | null {
   if (ref && (units.units as unknown[]).includes(ref)) return { kind: "tank", unit: ref as Unit };
-  if (ref && (ships as unknown[]).includes(ref) && (ref as Ship).type !== MISSILE_TYPE) return { kind: "ship", ship: ref as Ship };
+  if (ref && (ships as unknown[]).includes(ref) && (ref as FleetRecord).type !== MISSILE_TYPE && !isMissile(ref as FleetRecord)) return { kind: "ship", ship: ref as Ship };
   return null;
 }
 
@@ -42,7 +42,7 @@ function scan(list: { x: number; y: number; ref: object }[], px: number, py: num
 // Deviation: when both fail the pointer itself is tried too, so a flying ship can be picked by its sprite.
 export function pickObject(
   layer: ObjectLayer,
-  ships: Ship[],
+  ships: FleetRecord[],
   scrollX: number,
   scrollY: number,
   px: number,

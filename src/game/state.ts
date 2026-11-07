@@ -5,6 +5,8 @@
 import { SECTOR_SIZE, type SectorRange } from "../data/picture.js";
 
 export const STATE_BASE = 0x13034;
+/** The scenario's displayed start year; `$142A6` counts elapsed years from this date. */
+export const START_YEAR = 2090;
 const SCENARIO_BYTES = 9 * SECTOR_SIZE; // $13034-$14233
 export const STATE_BYTES = 0x1600; // through $14633: scenario block + variable block
 
@@ -40,15 +42,50 @@ const DAYS_PER_MONTH = 28;
 const MONTHS_PER_YEAR = 12;
 const WEEK = 7;
 
+/** Why a snapshot-based constructor (GameState.fromSnapshot, World.fromSnapshot) refused its input. */
+export type SnapshotErrorCode = "not-bytes" | "state-size" | "map-size" | "flags-size" | "object-size" | "object-count";
+
+export interface SnapshotError {
+  readonly code: SnapshotErrorCode;
+  readonly message: string;
+}
+
+export type SnapshotResult<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: SnapshotError };
+
+// Module-private marker: selects the constructor overload that adopts a finished image.
+const FROM_IMAGE: unique symbol = Symbol("GameState.fromSnapshot");
+
 export class GameState {
   private readonly bytes = new Uint8Array(STATE_BYTES);
   private readonly view = new DataView(this.bytes.buffer);
 
-  constructor(disk2: Uint8Array, block: SectorRange) {
-    const raw = disk2.subarray(block.first * SECTOR_SIZE, (block.last + 1) * SECTOR_SIZE);
+  constructor(disk2: Uint8Array, block: SectorRange);
+  /** Internal: adopts a validated image verbatim; use GameState.fromSnapshot. */
+  constructor(marker: typeof FROM_IMAGE, image: Uint8Array);
+  constructor(source: Uint8Array | typeof FROM_IMAGE, arg: SectorRange | Uint8Array) {
+    if (source === FROM_IMAGE) {
+      this.bytes.set(arg as Uint8Array);
+      return;
+    }
+    const block = arg as SectorRange;
+    const raw = source.subarray(block.first * SECTOR_SIZE, (block.last + 1) * SECTOR_SIZE);
     if (raw.length !== SCENARIO_BYTES) throw new Error(`GameState: scenario block is ${raw.length} bytes`);
     this.bytes.set(raw, 0);
     this.applyDefaults();
+  }
+
+  /**
+   * Builds a state from a complete flat image ($13034-$14633, STATE_BYTES) byte for byte: the
+   * scenario block and the variable block are adopted as given. The new-game defaults ($866E) are NOT
+   * applied and nothing is normalised or clamped. The image is copied, so the caller's buffer stays
+   * independent. Pure: no existing state is touched, and a bad input yields a typed error and no object.
+   */
+  static fromSnapshot(image: Uint8Array): SnapshotResult<GameState> {
+    if (!(image instanceof Uint8Array)) return { ok: false, error: { code: "not-bytes", message: "State image must be a Uint8Array" } };
+    if (image.length !== STATE_BYTES) {
+      return { ok: false, error: { code: "state-size", message: `State image is ${image.length} bytes, expected exactly ${STATE_BYTES}` } };
+    }
+    return { ok: true, value: new GameState(FROM_IMAGE, image) };
   }
 
   // The whole flat image ($13034-$14633), as the original's save area B holds it.
@@ -101,7 +138,11 @@ export class GameState {
     this.setLong(A.pollution, 50);
     this.setLong(A.tax, 10);
     this.setLong(A.nextTax, 10);
-    for (let i = 0; i < 8; i++) this.setByte(0x14540 + 10 * i + 2, 0xff); // marker slots unused
+    this.setWord(0x1453e, 2); // `$8B02`'s current Disk.2 id
+    for (let i = 0; i < 8; i++) {
+      this.setByte(0x14540 + 10 * i, i + 1); // marker ids are static image data, not reset by `$866E`
+      this.setByte(0x14540 + 10 * i + 2, 0xff); // marker slots unused
+    }
     this.setByte(A.frameCountdown, FRAMES_PER_DAY);
     this.setByte(A.stepByte, 1);
     this.setByte(A.techLevel, 1);
@@ -109,22 +150,33 @@ export class GameState {
     this.setByte(A.month, 5);
     this.setByte(A.weekday, 0);
     this.setByte(A.difficulty, 0x1e);
-    this.setLong(A.year, 2090);
+    this.setLong(A.year, 0);
+    // These combat values live after the variable block cleared above. They are initialized data in the
+    // original image, so reproduce them when constructing a new scenario state.
+    this.setByte(0x145a3, 1);
+    [0, 2, 3, 4, 3, 1].forEach((value, i) => this.setByte(0x145a4 + i, value));
   }
 
   // Called once per video frame. Returns the period bits that became due (daily, weekly, ...).
   tickFrame(): number {
+    return this.countFrame() ? this.advanceDay() : 0;
+  }
+
+  // The VBL half of the day timer ($14590): one decrement per video frame; true when it ran out and was reloaded
+  // (the original then flags the date change for the next main-loop pass; here the caller queues it).
+  countFrame(): boolean {
     const left = this.byte(A.frameCountdown) - 1;
     if (left > 0) {
       this.setByte(A.frameCountdown, left);
-      return 0;
+      return false;
     }
     this.setByte(A.frameCountdown, FRAMES_PER_DAY);
-    return this.advanceDay();
+    return true;
   }
 
-  // $564A: day, weekday, month and year chain. 28-day months, 12 months, 7-day weeks.
-  private advanceDay(): number {
+  // $564A: day, weekday, month and year chain. 28-day months, 12 months, 7-day weeks. Returns the period bits
+  // that became due (also OR-ed into the pending byte).
+  advanceDay(): number {
     let due: number = PERIOD.daily;
     let day = this.byte(A.day) + 1;
     if (day > DAYS_PER_MONTH) {
@@ -149,7 +201,7 @@ export class GameState {
   dateText(): string {
     const dd = String(this.byte(A.day)).padStart(2, "0");
     const mm = String(this.byte(A.month) + 1).padStart(2, "0");
-    return `${dd}/${mm}/${this.long(A.year)}`;
+    return `${dd}/${mm}/${START_YEAR + this.long(A.year)}`;
   }
 
   // Money as the top bar shows it: clamped to 9,999,999.

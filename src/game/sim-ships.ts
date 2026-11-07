@@ -6,7 +6,9 @@
 import { MAP_WIDTH, MAP_HEIGHT, TILE_ID_MASK } from "../data/scenario.js";
 import { divuQ, mulu, s16, s8 } from "./sim-math.js";
 import { SHIP_FUEL_CAP, SHIP_UNIT_TYPE, UNIT_INIT, YARD_FRAME_COST, YARD_GOODS3 } from "./sim-tables.js";
+import type { RestoredMissile } from "./ship-roster.js";
 import type { Sim } from "./sim.js";
+import { OBJECT_SLOTS } from "./world.js";
 
 // Graphics hook kinds (SimOptions.effect). Coordinates are map cells.
 export type EffectKind =
@@ -17,8 +19,8 @@ export type EffectKind =
   | "meteorFall" // $1449C meteor (type 21) starts falling
   | "meteorImpact"; // $11676 meteor lands at the cell
 
-// Ship record ($3A75E list, $18 bytes). Field names after game-state.md 3.8 / units.md.
-export interface Ship {
+// Fields every ship-list record has, missile included ($3A75E list, $18 bytes). Field names after game-state.md 3.8 / units.md.
+export interface ShipCore {
   type: number; // +0: 11..16 (class + 11), 17 projectile
   x: number; // +1
   y: number; // +2
@@ -30,9 +32,34 @@ export interface Ship {
   tech: number; // +A tech level at creation
   targetX: number; // +B ($FF none)
   targetY: number; // +C
+  lift: number; // +$10 non-zero = airborne cell layer (clears bit 13 instead of bit 14 of the cell on removal)
+}
+
+// Ordinary ship record: ship types 11..16 and the projectiles Fleet.createShip makes (type 17, class 6, fuel 0).
+export interface Ship extends ShipCore {
   cls: number; // +D class 0..5
   fuel: number; // +E word
-  lift: number; // +$10 non-zero = airborne cell layer (clears bit 13 instead of bit 14 of the cell on removal)
+}
+
+// Projectile (ship list type 17), the ONE shape of every missile, launched at run time (`Fleet.createMissile`, $49E8) or
+// restored from Disk.4 (`RestoredMissile` extends it with provenance). It has NO class and NO fuel: the bytes +$D..+$F of a
+// missile are its 24-bit enemy-slot pointer ($ACE2 masks the long at +$C), which the EnemySystem keeps as a fixed
+// list/slot identity in its ShipExtra, so code that reads `cls` / `fuel` must first rule it out with isMissile().
+export interface MissileRecord extends ShipCore {
+  readonly kind: "missile";
+  type: 17;
+}
+
+// What a Fleet slot can hold.
+export type FleetRecord = Ship | MissileRecord;
+
+export function isMissile(record: FleetRecord): record is MissileRecord {
+  return (record as { kind?: string }).kind === "missile";
+}
+
+/** A missile adopted from a Disk.4 save (carries the saved bytes and the saved target pointer), as opposed to a launched one. */
+export function isRestoredMissile(record: FleetRecord): record is RestoredMissile {
+  return isMissile(record) && "sourceRaw" in record;
 }
 
 export const MAX_SHIPS = 40;
@@ -44,15 +71,38 @@ const CELL_AIR = 0x2000; // bit 13
 const V = { ships: 0x1429e, tanksStored: 0x13310, tanksStoredB: 0x13322, fuelStored: 0x14342, tankCountA: 0x13302, tankCountB: 0x13314 };
 
 export class Fleet {
-  readonly slots: (Ship | null)[] = new Array(MAX_SHIPS).fill(null);
+  readonly slots: (FleetRecord | null)[] = new Array(MAX_SHIPS).fill(null);
   // $156B3: "out of fuel" message shown once per month.
   fuelWarned = false;
+  // Daily step ($ACE2) of every missile, launched or restored: it needs the enemy slots, so the EnemySystem installs it.
+  private missileDaily: ((missile: MissileRecord) => void) | null = null;
+  // $4732 releases the layer mark at the cell addressed by +$14. EnemySystem owns the live reservation state.
+  private releaseReservation: ((ship: FleetRecord) => void) | null = null;
 
   constructor(private readonly sim: Sim) {}
 
-  // Used ships in slot order (the order the original iterates).
-  get ships(): Ship[] {
-    return this.slots.filter((s): s is Ship => s !== null);
+  /** Installed by EnemySystem so every destruction path (daily fuel/event as well as combat) frees +$14's cell. */
+  setReservationRelease(release: (ship: FleetRecord) => void): void {
+    this.releaseReservation = release;
+  }
+
+  /** Installed by EnemySystem: the $ACE2 refresh / destruction of a missile (the Fleet has no enemy slots). */
+  setMissileDaily(daily: (missile: MissileRecord) => void): void {
+    this.missileDaily = daily;
+  }
+
+  // Used ships and projectiles in slot order (the order the original iterates).
+  get ships(): FleetRecord[] {
+    return this.slots.filter((s): s is FleetRecord => s !== null);
+  }
+
+  // Disk.4 restore: puts already-validated records into their saved slots (identity and holes kept). Writes nothing else:
+  // no createShip, no counters ($1429E and the per-type counts are the saved ones), no map or flag byte. The caller
+  // (EnemySystem.fromRoster) has validated everything; this only refuses a fleet that is not empty.
+  adoptRestored(records: readonly (FleetRecord | null)[]): boolean {
+    if (records.length !== MAX_SHIPS || this.slots.some((s) => s !== null)) return false;
+    for (let i = 0; i < MAX_SHIPS; i++) this.slots[i] = records[i];
+    return true;
   }
 
   private get s() {
@@ -65,8 +115,10 @@ export class Fleet {
 
   // ---- creation / destruction -----------------------------------------------------------
 
-  // $387E: d1 = unit type 11..16, (x, y) the launch cell, dir = 8. Fails (message $C8) with 40 ships.
+  // $387E: d1 = unit type 11..16, (x, y) the launch cell, dir = 8. Fails (message $C8) with 40 ships. A missile (type 17) is
+  // not made here: $49E8 has its own free-slot check and message, see createMissile (null, nothing written).
   createShip(type: number, x: number, y: number, dir = 8): Ship | null {
+    if (type === 0x11) return null;
     const s = this.s;
     if (s.word(V.ships) === 40) {
       this.sim.msg(0xc8);
@@ -100,8 +152,37 @@ export class Fleet {
     return ship;
   }
 
+  // $49E8 / $381E: a missile record in the first free ship slot, count word $1429E + 1. No per-type count (none for type 17),
+  // no map or flag write (the EnemySystem sets the air mark and the reservation) and no message: a full list ($1429E == 40 or no
+  // free slot) is refused by returning null and the caller says $12B. Mode 4, lift 0, no target yet (+B/+C = $FF); the target
+  // pointer is the EnemySystem's (ShipExtra.targetSlot). hp from table $4B76 row 17, tech byte $14592.
+  createMissile(x: number, y: number): MissileRecord | null {
+    const s = this.s;
+    if (s.word(V.ships) >= MAX_SHIPS) return null;
+    const slot = this.slots.indexOf(null);
+    if (slot < 0) return null;
+    s.setWord(V.ships, s.word(V.ships) + 1);
+    const missile: MissileRecord = {
+      kind: "missile",
+      type: 17,
+      x,
+      y,
+      dx: 0,
+      dy: 0,
+      dir: 0,
+      hp: UNIT_INIT[17 - 9].hp,
+      mode: 4,
+      tech: s.byte(0x14592),
+      targetX: 0xff,
+      targetY: 0xff,
+      lift: 0,
+    };
+    this.slots[slot] = missile;
+    return missile;
+  }
+
   // $46CC: remove a ship. `message` 0 = none. Counts as a lost unit (-100 morale) except for projectiles.
-  destroyShip(ship: Ship, message = 0, explode = true): void {
+  destroyShip(ship: FleetRecord, message = 0, explode = true): void {
     const s = this.s;
     const sim = this.sim;
     const slot = this.slots.indexOf(ship);
@@ -114,9 +195,13 @@ export class Fleet {
     }
     s.setWord(V.ships, s.word(V.ships) - 1);
     this.slots[slot] = null;
-    const i = this.cellIndex(ship.x, ship.y);
-    if (ship.lift !== 0) sim.world.cells[i] &= ~CELL_AIR;
-    else sim.world.cells[i] &= ~CELL_UNIT;
+    if (this.releaseReservation) this.releaseReservation(ship);
+    else {
+      // Standalone Fleet fallback, used only when no EnemySystem owns ship movement/reservations.
+      const i = this.cellIndex(ship.x, ship.y);
+      if (ship.lift !== 0) sim.world.cells[i] &= ~CELL_AIR;
+      else sim.world.cells[i] &= ~CELL_UNIT;
+    }
     if (explode) sim.effect("explosion", ship.x, ship.y);
     sim.events.push({ kind: "ship", what: "destroyed", type: ship.type, x: ship.x, y: ship.y });
     if (message !== 0) sim.msg(message);
@@ -149,7 +234,7 @@ export class Fleet {
     const per = divuQ(workers, yards); // workers per yard
     if (per === 0) return;
     const o = sim.world.objects;
-    for (let slot = 0; slot < sim.world.objectCount && yards > 0; slot++) {
+    for (let slot = 0; slot < OBJECT_SLOTS && yards > 0; slot++) {
       const at = slot * 8;
       if (((o[at] << 8) | o[at + 1]) !== SHIP_YARD_TILE) continue;
       yards--;
@@ -189,7 +274,7 @@ export class Fleet {
     const yx = o[at + 4];
     const yy = o[at + 5];
     const cells: [number, number][] = [];
-    for (let i = 0; i < 1000; i++) {
+    for (let i = 0; i < OBJECT_SLOTS; i++) {
       const p = i * 8;
       if (((o[p] << 8) | o[p + 1]) !== TILE_LAUNCHPAD) continue;
       if (o[p + 3] !== 0xff) continue;
@@ -217,10 +302,14 @@ export class Fleet {
   // ---- fuel ---------------------------------------------------------------------------------------
 
   // $ACE2 (daily): hovering ships burn 1 fuel, flying ones 2; at 0 the ship is lost (message $40). Class 4
-  // (type 15) never burns. Type 17 projectiles follow their target and vanish when it is gone (not modelled).
+  // (type 15) never burns. Every missile (launched or restored; pointer to a fixed enemy slot) is handed to the EnemySystem:
+  // it refreshes +B/+C from the slot's current occupant or is destroyed when the slot is free. No fuel for type 17.
   dailyFuel(): void {
     for (const ship of this.ships) {
-      if (ship.type === 0x11) continue;
+      if (isMissile(ship)) {
+        this.missileDaily?.(ship);
+        continue;
+      }
       if (ship.type === 0x0f) continue;
       const burn = ship.mode === 1 ? 1 : ship.mode === 2 || ship.mode === 3 ? 2 : 0;
       if (burn === 0) continue;
@@ -277,7 +366,7 @@ export class Fleet {
   weeklyRefuel(): void {
     const s = this.s;
     for (const ship of this.ships) {
-      if (ship.mode !== 0 || ship.cls === 4) continue;
+      if (isMissile(ship) || ship.mode !== 0 || ship.cls === 4) continue;
       if (!this.tankNear(ship.x, ship.y)) continue;
       const tile = this.sim.world.cells[this.cellIndex(ship.x, ship.y)] & TILE_ID_MASK;
       if (tile < 0x48 || tile > 0x4b) continue;
@@ -341,7 +430,7 @@ export class Fleet {
     for (;;) {
       let any = false;
       for (const ship of this.ships) {
-        if (ship.type === 0x0f || ship.type === 0x11) continue;
+        if (isMissile(ship) || ship.type === 0x0f) continue;
         const missing = s16((SHIP_FUEL_CAP[ship.cls] - ship.fuel) & 0xffff);
         if (missing === 0) continue;
         any = true;

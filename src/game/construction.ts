@@ -31,10 +31,11 @@ const ONLINE = 0xff; // object record byte +3 of the one online Command Centre
 export class Construction {
   // `flagTable` = the 256 bytes at $16408 (cell flag byte per tile id). `phase` stands in for the
   // beam position bit read by $2E00 that gives a new solar-type building its phase (1 or $FF).
+  // The default is a remake-only, separately saved PRNG approximation owned by World.
   constructor(
     private readonly world: World,
     private readonly flagTable: Uint8Array,
-    private readonly phase: () => boolean = () => Math.random() < 0.5,
+    private readonly phase: () => boolean = () => world.nextSolarPhase(),
   ) {}
 
   private get s() {

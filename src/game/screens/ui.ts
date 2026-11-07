@@ -198,15 +198,21 @@ export class Ui {
     for (let i = 0; i < BUTTON_COUNT; i++) this.drawButton(screen, i, table[i]);
   }
 
-  // $5756 / $57D6: a pressed button is shown inverted (all five planes complemented).
+  // $5756 / $57D6: a pressed button is shown flipped (see `flipButtonPixels`).
   invertButton(screen: Screen, i: number): void {
     const { x, y } = this.buttonPosition(i);
-    for (let row = 0; row < 16; row++) {
-      for (let col = 0; col < 16; col++) {
-        const at = (y + row) * SCREEN_WIDTH + x + col;
-        screen.pixels[at] = ~screen.pixels[at] & 31;
-      }
-    }
+    flipButtonPixels(screen, x, y);
+  }
+}
+
+// `$57D6` (static trace): 16 rows of `not.b (a0)+` twice (16 pixels) through `$C(a6)` of the plane array at `$160FA`/`$16116`,
+// i.e. only plane 3 (colour bit 3), not all five planes: pixel ^= 8. The x position is truncated to a byte column (the ten
+// command buttons sit on multiples of 8). `$57FA` runs the same routine again, so the flip is its own inverse.
+export const BUTTON_FLIP = 8;
+export function flipButtonPixels(screen: Screen, x: number, y: number): void {
+  const left = x & ~7;
+  for (let row = 0; row < 16; row++) {
+    for (let col = 0; col < 16; col++) screen.pixels[(y + row) * SCREEN_WIDTH + left + col] ^= BUTTON_FLIP;
   }
 }
 
@@ -237,7 +243,8 @@ export class Pointer {
 }
 
 // $5110 text entry: digits are echoed followed by a '-' cursor; Return confirms (not when
-// empty), Backspace deletes. Escape cancels (not in the original).
+// empty), Backspace deletes. Escape cancels (not in the original). `$5110` reads only the key code `$161A0`; it never calls
+// `$50B2`, `$5730` or `$5756`, so the mouse does nothing while an entry is open (PanelScene enforces that via `modal`).
 export class NumberEntry {
   digits = "";
   done: number | null = null;

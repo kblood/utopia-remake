@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const { parseSfxBank, renderEffect, effectSeconds, SfxScheduler, SFX, SFX_COUNT, musicChannels } = await import("../dist/audio/sfx.js");
+const { parseSfxBank, renderEffect, effectSeconds, SfxScheduler, SFX, SFX_COUNT, musicChannels, effectChannelsFor } = await import("../dist/audio/sfx.js");
 const { PAL_CLOCK } = await import("../dist/audio/modplayer.js");
 
 let failed = 0;
@@ -96,6 +96,34 @@ const synth = (frames, period = 630, volume = 64) => ({ id: 0, name: "synthetic"
   const d = s.request(0, 12 + 30, [1, 3]);
   check("sched/music: free again after the duration", d && d.channel === 1);
   check("musicChannels from flags words", JSON.stringify([musicChannels(0), musicChannels(1), musicChannels(2), musicChannels(3), musicChannels(4)]) === "[[1,3],[2,3],[1,2],[1,3],null]");
+}
+
+{
+  // `$11B4` tests the music-active bit (bit 1 of $1581), not the loaded track ($1580): a paused track frees all four channels.
+  const bank = { effects: [synth(30)] };
+  const channelsFor = (link) => effectChannelsFor(link);
+  check("effectChannelsFor: active track gives its pair", JSON.stringify(channelsFor({ current: 2, active: true })) === "[1,2]");
+  check("effectChannelsFor: paused track (selected, inactive) gives null = all four channels", channelsFor({ current: 2, active: false }) === null);
+  check("effectChannelsFor: no track / no link gives null", channelsFor({ current: -1, active: false }) === null && channelsFor(undefined) === null);
+  const s = new SfxScheduler(bank);
+  const got = [0, 1, 2, 3, 4].map((i) => s.request(0, 10 + 2 * i, channelsFor({ current: 2, active: false }))?.channel ?? null);
+  check("sched/paused music: four voices on channels 0-3, the fifth is dropped", got.join() === "0,1,2,3,");
+  const r = new SfxScheduler(bank);
+  const live = [0, 1, 2].map((i) => r.request(0, 10 + 2 * i, channelsFor({ current: 2, active: true }))?.channel ?? null);
+  check("sched/active music: only the track's two channels", live.join() === "1,2,");
+}
+
+{
+  // the frame-stepped model also owns the module's channels (full coverage of the events: test/audio-ownership.mjs)
+  const s = new SfxScheduler({ effects: [synth(10)] });
+  const v = s.request(0, 100, [1, 3]);
+  check("sched/ownership: a request under music releases the module's voice at once, only on the effect's channel", v.channel === 1 && !s.moduleEnabled(1) && s.moduleEnabled(3) && s.moduleEnabled(0) && s.moduleEnabled(2));
+  s.advanceTo(110);
+  check("sched/ownership: the expiry under active music hands it back; events queued, start, end", s.moduleEnabled(1) && s.take().map((e) => e.type).join() === "queued,start,end");
+  const n = new SfxScheduler({ effects: [synth(10)] });
+  n.request(0, 100, null);
+  n.advanceTo(120);
+  check("sched/ownership: without music no module voice is ever touched", [0, 1, 2, 3].every((c) => n.moduleEnabled(c)));
 }
 
 // ---- real data ----------------------------------------------------------------------------------

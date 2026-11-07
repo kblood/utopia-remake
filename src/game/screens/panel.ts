@@ -2,6 +2,7 @@
 // the screen's own button images, and the click-to-leave behaviour of $58F8 (a button is shown
 // inverted while pressed; releasing it returns its index).
 
+import { SFX } from "../../audio/sfx.js";
 import { COLOR } from "../../data/gamefont.js";
 import type { Screen } from "../../gfx/screen.js";
 import type { Input } from "../intro.js";
@@ -87,14 +88,22 @@ export abstract class PanelScene implements ScreenScene {
       this.onClose();
       return "close";
     }
-    if (p.pressedEdge) {
+    // A number entry ($5110) reads the key code only: it never polls the mouse ($50B2), never hit-tests ($5730) and never
+    // calls $5756, so while one is open a press neither highlights a button, clicks, selects a row nor leaves a release
+    // pending for later. (Original detail not reproduced: a button still held when the entry ends is seen as a new press
+    // by the next $50B2 if its state bit was clear; here a press during an entry is simply dropped.)
+    const modal = this.modal;
+    if (p.pressedEdge && !modal) {
       const b = this.ui.buttonAt(p.x, p.y);
-      if (b >= 0) this.pressedButton = b;
-      else this.onClick();
+      if (b >= 0) {
+        this.pressedButton = b;
+        this.ctx.sound?.(SFX.CLICK); // $5756 plays id 4 on the press; the release ($57FA) is silent.
+      } else this.onClick();
     }
     if (p.releasedEdge && this.pressedButton >= 0) {
       const b = this.pressedButton;
       this.pressedButton = -1;
+      if (modal) return "running"; // a release seen during an entry must not run the button (it could close the window)
       if (this.onButton(b) === "close") {
         this.onClose();
         return "close";

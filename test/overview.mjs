@@ -147,7 +147,8 @@ const env = (cells, extra = {}) => ({ cells, inventions: 0, power: 0, circles, u
 check(
   "scroll for a click centres the 8 x 8 view and clamps",
   JSON.stringify(scrollForClick(8 + 2 * 50, 8 + 2 * 40)) === JSON.stringify({ x: 46, y: 36 }) &&
-    JSON.stringify(scrollForClick(0, 0)) === JSON.stringify({ x: 0, y: 0 }) &&
+    JSON.stringify(scrollForClick(0, 0)) === JSON.stringify({ x: 0x5c, y: 0x43 }) &&
+    JSON.stringify(scrollForClick(7, 7)) === JSON.stringify({ x: 0x5c, y: 0x43 }) &&
     JSON.stringify(clampScroll(500, 500)) === JSON.stringify({ x: 0x5c, y: 0x43 }),
 );
 
@@ -155,14 +156,20 @@ check(
 {
   const objects = fakeObjects();
   const scroll = { x: 10, y: 12 };
-  const { state, ctx } = fresh({ objects, scroll });
+  const clickSounds = [];
+  const { state, ctx } = fresh({ objects, scroll, sound: (id) => clickSounds.push(id) });
   const scene = createScreen("overview", ctx);
   const screen = new Screen();
   scene.draw(screen);
   const main = mainBackground(disk1);
   check("overview: draws a full-screen picture", screen.pixels.some((p) => p !== 0) && screen.pixels.some((p, i) => p !== main.pixels[i]));
   settle(scene);
-  click(scene, ...centre(3));
+  press(scene, ...centre(3));
+  check("overview: requests click sound 4 on button press", clickSounds.join() === "4");
+  scene.update(input); // held; no second press edge
+  check("overview: held button does not repeat click sound", clickSounds.join() === "4");
+  release(scene);
+  check("overview: release does not request another click sound", clickSounds.join() === "4");
   check("overview: layer button sets the mode and writes $144B6", scene.mode === 3 && state.byte(OVERVIEW.mode) === 3);
   const before = new Screen();
   scene.draw(before);
@@ -173,6 +180,7 @@ check(
   release(scene);
   check("overview: mode 5 after release", scene.mode === 5);
   click(scene, 8 + 2 * 60, 8 + 2 * 30);
+  check("overview: map clicks do not request button sound", clickSounds.length === 2);
   check("overview: map click scrolls the view and writes it back", scroll.x === 56 && scroll.y === 26 && state.word(OVERVIEW.scrollX) === 56);
   click(scene, 0xe8 + 8 * 2 + 1, 0x4a + 8 * 3 + 1);
   const pin = objects.markers[0];

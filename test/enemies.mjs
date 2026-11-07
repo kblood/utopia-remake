@@ -17,9 +17,10 @@ if (!fs.existsSync(disk1Path) || !fs.existsSync(disk2Path)) {
 const { readScenarioRecords, loadMap, MAP_WIDTH, MAP_HEIGHT } = await import("../dist/data/scenario.js");
 const { loadCombatTables } = await import("../dist/data/combat.js");
 const { GameState, A } = await import("../dist/game/state.js");
-const { World } = await import("../dist/game/world.js");
+const { World, T, TYPE_TABLE, TYPE_SIZE } = await import("../dist/game/world.js");
 const { Sim } = await import("../dist/game/sim.js");
 const { UnitSystem } = await import("../dist/game/units.js");
+const { cellFlagIndex } = await import("../dist/game/cell-flags.js");
 const { EnemySystem, dirToward } = await import("../dist/game/enemies.js");
 
 const disk1 = new Uint8Array(fs.readFileSync(disk1Path));
@@ -39,15 +40,17 @@ const ACTIVE = 0x0400;
 const AIR = 0x2000;
 
 // A world with the first scenario; `rng` fixes every roll (0 = every chance succeeds).
-function fresh({ fixed = 0 } = {}) {
+function fresh({ fixed = 0, tod = fixed === null ? 0 : fixed, raster = 0 } = {}) {
   const state = new GameState(disk2, records[0].block);
   const world = new World(state, loadMap(disk2, records[0]));
   const bombs = [];
   const explosions = [];
   const sounds = [];
   const morale = [];
+  const explodeResult = { value: undefined }; // what the explode hook reports (true = $1237C clobbered A6)
   const sim = new Sim(world, {
     rng: (range) => Math.min(fixed, range - 1),
+    hardware: { todLow: () => tod, rasterParity: () => raster },
     demolishAt: (x, y) => bombs.push([x, y]),
     spawnEnemy: (s) => enemies.spawn(s),
     defectUnit: () => enemies.defect(),
@@ -64,7 +67,10 @@ function fresh({ fixed = 0 } = {}) {
     combat: (u, t) => enemies.tankCombat(u, t),
   });
   const enemies = new EnemySystem(sim, units, tables, {
-    explode: (x, y, lift, high) => explosions.push({ x, y, lift, high }),
+    explode: (x, y, lift, high) => {
+      if (explodeResult.value !== false) explosions.push({ x, y, lift, high });
+      return explodeResult.value;
+    },
     sound: (id) => sounds.push(id),
     buildingHeight: () => 20,
   });
@@ -74,7 +80,7 @@ function fresh({ fixed = 0 } = {}) {
       enemies.pass(units.clock);
     }
   };
-  return { state, world, sim, units, enemies, bombs, explosions, sounds, morale, run, cells: world.cells };
+  return { state, world, sim, units, enemies, bombs, explosions, sounds, morale, run, cells: world.cells, explodeResult };
 }
 
 // A free 12x12 area of plain ground (no blocked, occupied or active cell) for movement tests.
@@ -97,9 +103,11 @@ function freeArea(world, size = 12) {
 }
 
 function spawn(env, air, type, x, y, dir, entry) {
+  const slots = air ? env.enemies.airSlots : env.enemies.groundSlots;
+  const known = new Set(slots);
   const spawned = env.enemies.spawn({ air, type, x, y, dir, entry: entry ?? [0, 6, 0, 3, 0, 5, 50, 0] });
   if (!spawned) throw new Error("spawn failed");
-  return air ? env.enemies.air[env.enemies.air.length - 1] : env.enemies.ground[env.enemies.ground.length - 1];
+  return slots.find((e) => e !== null && !known.has(e)); // the object that took the first free slot
 }
 
 // ---- tables read from the image --------------------------------------------------------------------------------
@@ -120,11 +128,11 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
   const { x, y } = freeArea(env.world);
   const e = spawn(env, false, 22, x + 4, y + 4, 0);
   const i = (y + 4) * MAP_WIDTH + x + 4;
-  check("ground enemy: occupies its cell (map bit and flag bit 0)", (env.cells[i] & OCCUPIED) !== 0 && (env.enemies.ground.length === 1) && (env.units.flags[i] & 1) === 1);
+  check("ground enemy: occupies its cell (map bit and flag bit 0)", (env.cells[i] & OCCUPIED) !== 0 && (env.enemies.ground.length === 1) && (env.units.flags[cellFlagIndex(x + 4, y + 4)] & 1) === 1);
   check("ground enemy: record fields from the wave entry (hp 6, damage 3, bomb 50%)", e.hp === 6 && e.dmg === 3 && e.bombPct === 50 && e.mode === 6);
   const air = spawn(env, true, 25, x + 8, y + 8, 2, [0, 4, 0, 2, 0, 3, 40, 0]);
   const j = (y + 8) * MAP_WIDTH + x + 8;
-  check("air enemy: air layer mark, flag bit 1, lift $22", (env.cells[j] & AIR) !== 0 && (env.units.flags[j] & 2) === 2 && air.lift === 0x22);
+  check("air enemy: air layer mark, flag bit 1, lift $22", (env.cells[j] & AIR) !== 0 && (env.units.flags[cellFlagIndex(x + 8, y + 8)] & 2) === 2 && air.lift === 0x22);
   check("overview lists the enemies", env.enemies.overview().enemyGround.length === 1 && env.enemies.overview().enemyAir.length === 1);
   check("drawables: one per enemy", env.enemies.drawables().length === 2);
 
@@ -139,7 +147,7 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
   env.run(9);
   check("own tank hits an enemy within reach on a move tick", e.hp < before, `hp ${before} -> ${e.hp}`);
   env.run(40);
-  check("enemy killed by the tank: gone, cell released", env.enemies.ground.length === 0 && (env.cells[i] & OCCUPIED) === 0 && (env.units.flags[i] & 1) === 0);
+  check("enemy killed by the tank: gone, cell released", env.enemies.ground.length === 0 && (env.cells[i] & OCCUPIED) === 0 && (env.units.flags[cellFlagIndex(x + 4, y + 4)] & 1) === 0);
   check("kill statistics and counters ($14298 +1, $142A2 -1)", env.state.long(0x14298) === 1 && env.state.word(0x142a2) === 0);
   check("destroyed ground unit explodes with the high blast, no morale change", env.explosions.some((e2) => e2.high && e2.x === x + 4) && env.morale.length === 0);
   check("hit sound played", env.sounds.includes(2));
@@ -162,25 +170,80 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
   void d0;
 }
 
-// an enemy bombs an active building: attack gate (roll < 25) and bomb chance (+E) both pass with roll 0
+// The enemy reads a separate CIA TOD approximation for the gate; only the bomb-percent check consumes Sim RNG.
 {
   const env = fresh({ fixed: 0 });
+  const rolls = [];
+  env.sim.rng = (range) => (rolls.push(range), 0);
   const { x, y } = freeArea(env.world);
   env.cells[(y + 6) * MAP_WIDTH + x + 5] |= ACTIVE;
   const e = spawn(env, false, 22, x + 5, y + 5, 0);
   e.mode = 5;
   env.run(10);
   check("attack: enemy tick, an active cell within the 48 cells is bombed", env.bombs.length >= 1 && env.bombs[0][0] === x + 5 && env.bombs[0][1] === y + 6, JSON.stringify(env.bombs));
+  check("attack: selected bomb coordinates are preserved in $142BA/$142BC before demolition", env.state.word(0x142ba) === x + 5 && env.state.word(0x142bc) === y + 6);
   check("attack: the attacker waits for the next enemy tick afterwards", e.waiting);
+  check("attack: CIA gate consumes no Sim RNG draw; only bomb percentage uses range 100", rolls.join() === "100", `rolls ${rolls.join()}`);
 }
 {
-  const env = fresh({ fixed: 99 }); // roll(256) = 99: the attack gate (< 25) is closed
+  const env = fresh({ fixed: 0, tod: 25 }); // CIA values above 24 close the active-building gate
   const { x, y } = freeArea(env.world);
   env.cells[(y + 6) * MAP_WIDTH + x + 5] |= ACTIVE;
   const e = spawn(env, false, 22, x + 5, y + 5, 0);
   e.mode = 5;
   env.run(20);
   check("attack: gate closed, no bomb", env.bombs.length === 0);
+}
+
+// Event 17 defected tank: +$E is 10 (static trace $115C6; no emulator comparison). Connected through the real hook
+// (Sim aliens event -> EnemySystem.defect) and the normal pass -> attack path.
+{
+  const COUNTER = 0x1346a;
+  const defectedAttack = ({ tod, roll, passes }) => {
+    const env = fresh({ fixed: 0, tod });
+    const rolls = [];
+    env.sim.rng = (range) => (rolls.push(range), range === 100 ? roll : 0);
+    const { x, y } = freeArea(env.world);
+    env.cells[(y + 6) * MAP_WIDTH + x + 5] |= ACTIVE;
+    env.units.spawn(9, x + 5, y + 5, 0);
+    env.state.setWord(0x1429c, 3);
+    env.sim.aliens.eventTankDefect(100); // consumes one range-100 draw (roll < 100: defects)
+    const g = env.enemies.ground[0];
+    const eventRolls = rolls.length;
+    const msgs = env.sim.messages.slice();
+    const before = env.state.word(COUNTER);
+    for (let i = 0; i < passes && env.bombs.length === 0; i++) env.run(1);
+    return { env, g, bombs: env.bombs.length, bombed: env.state.word(COUNTER) - before, msgs, rolls: rolls.slice(eventRolls) };
+  };
+  const hit = defectedAttack({ tod: 0, roll: 9, passes: 20 });
+  check("defect event: converted tank has bomb chance 10 and its own damage", !!hit.g && hit.g.type === 9 && hit.g.bombPct === 10 && hit.g.dmg === hit.env.state.byte(0x145a3));
+  check("defect event: counters moved and message 0x181 posted once", hit.env.state.word(0x1429c) === 2 && hit.env.state.word(0x142a2) === 1 && hit.msgs.join() === "385");
+  check("defect event: TOD 0 + roll 9 bombs the active building and counts $1346A", hit.bombs === 1 && hit.bombed === 1 && hit.env.bombs[0][0] === hit.env.enemies.ground[0].x && hit.rolls.every((r) => r === 100) && hit.rolls.length >= 1, JSON.stringify(hit.env.bombs));
+  check("defect event: bombing posts no further message", hit.env.sim.messages.join() === "385");
+  const miss = defectedAttack({ tod: 0, roll: 10, passes: 20 });
+  check("defect event: TOD 0 + roll 10 (not below 10) does not bomb", miss.rolls.length >= 1 && miss.bombs === 0 && miss.bombed === 0 && miss.env.sim.messages.join() === "385");
+  const gated = defectedAttack({ tod: 25, roll: 0, passes: 20 });
+  check("defect event: TOD 25 closes the gate before any percentage draw", gated.rolls.length === 0 && gated.bombs === 0 && gated.bombed === 0 && gated.env.sim.messages.join() === "385");
+}
+
+// Static Disk.1 trace: a defected type-9/10 unit reaches the shared $1266A attack routine, which can also damage
+// nearby own units; it is not limited to the active-building bomb branch.
+{
+  const env = fresh({ tod: 25 }); // close the building-bomb gate; direct unit attacks remain eligible
+  const { x, y } = freeArea(env.world);
+  env.state.setByte(0x145a3, 2); // copied into the converted enemy's +$F damage byte
+  const former = env.units.spawn(9, x + 5, y + 5, 0);
+  const target = env.units.spawn(10, x + 5, y + 6, 0);
+  target.hp = 7;
+  env.state.setWord(0x1429c, 2);
+  const converted = env.enemies.defect();
+  const defector = env.enemies.groundSlots[0];
+  const hpBefore = target.hp;
+  for (let i = 0; i < 4; i++) env.run(1);
+  check("defection preserves the source cell and converts only the first tank", !!converted && converted.x === former.x && converted.y === former.y &&
+    !env.units.units.includes(former) && env.units.units.includes(target) && defector?.type === 9 && defector.mode === 5);
+  check("defected tank's shared attack path damages a nearby own tank on the enemy tick", !!defector && defector.waiting &&
+    target.hp === hpBefore - defector.dmg && defector.dmg === 2 && env.bombs.length === 0);
 }
 
 // an enemy hits an own tank; the tank dies ($4692: counters, statistic, morale -50)
@@ -196,7 +259,7 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
   env.run(10);
   check("attack: an enemy kills a tank next to it", env.units.units.length === 0);
   check("tank destroyed: $1429C and the type counter drop, $14294 +1, morale -50", env.state.word(0x1429c) === 0 && env.state.long(0x14258) === 0 && env.state.long(0x14294) === 1 && env.morale.includes(-50));
-  check("tank cell released", (env.cells[(y + 6) * MAP_WIDTH + x + 5] & OCCUPIED) === 0 && env.units.flags[(y + 6) * MAP_WIDTH + x + 5] === 0);
+  check("tank cell released", (env.cells[(y + 6) * MAP_WIDTH + x + 5] & OCCUPIED) === 0 && env.units.flags[cellFlagIndex(x + 5, y + 6)] === 0);
 }
 
 // ---- aircraft -----------------------------------------------------------------------------------------------------
@@ -252,13 +315,18 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
   c.targetY = y + 6;
   let moves = 0;
   let lastX = c.x;
+  const seen = new Set([c.counter]);
+  const counterSequence = [c.counter];
+  let animOk = true;
   for (let i = 0; i < 300 && env.enemies.ground.includes(c); i++) {
     env.run(1);
     if (c.x !== lastX) moves++;
     lastX = c.x;
+    if (!seen.has(c.counter)) { seen.add(c.counter); counterSequence.push(c.counter); animOk = animOk && c.anim === tables.crusherAnim[c.counter]; }
   }
   check("crusher: walks, crossing an active cell and bombing it", env.bombs.some(([bx, by]) => bx === x + 8 && by === y + 6) && moves > 0, JSON.stringify(env.bombs));
-  check("crusher: animation counter runs 0..7", c.counter >= 0 && c.counter < 8);
+  check("crusher: the step counter decreases modulo 8 and +$14 follows table $12D60", counterSequence.length > 1 &&
+    counterSequence.every((n, i) => n >= 0 && n < 8 && (i === 0 || n === ((counterSequence[i - 1] + 7) & 7))) && animOk, counterSequence.join());
 }
 
 // ---- defect and repair ----------------------------------------------------------------------------------------------
@@ -289,6 +357,8 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
 // ---- guns ($11D34) ---------------------------------------------------------------------------------------------------
 
 function addGun(env, tile, x, y, facing, timer = 0, rotate = 0) {
+  const type = env.world.findType(tile);
+  const typeAt = env.world.typeAddress(type);
   const slot = env.world.objectCount++;
   const at = slot * 8;
   env.world.objects[at] = tile >> 8;
@@ -299,6 +369,9 @@ function addGun(env, tile, x, y, facing, timer = 0, rotate = 0) {
   env.world.objects[at + 5] = y;
   env.world.objects[at + 6] = rotate;
   env.world.objects[at + 7] = timer;
+  // $11D34's DBRA budget is T[type].+$C, so this staged completed object must be counted.
+  env.state.setWord(typeAt + T.total, env.state.word(typeAt + T.total) + 1);
+  env.state.setWord(typeAt + T.active, env.state.word(typeAt + T.active) + 1);
   env.cells[y * MAP_WIDTH + x] = (env.cells[y * MAP_WIDTH + x] & ~0xff) | (tile + facing);
   return at;
 }
@@ -324,6 +397,42 @@ function addGun(env, tile, x, y, facing, timer = 0, rotate = 0) {
   env.enemies.fireGuns(0x1f, 5);
   check("gun A: kills the enemy when its hit points run out, explosion and counters", env.enemies.ground.length === 0 && env.explosions.length >= 1);
 }
+// Bounded live-original comparison (Copperline 1.0.1, A1200/AGA PAL, RAM-STAGED fixture, not a natural game state): one
+// finished Gun A at (50,34) facing 4, T[5]+$C ($13248) = 1, stationary crusher (type 24) one cell below at (50,35), hp 8,
+// damage 5 ($1310E). Observed after each Gun A period: gun timer 3,2,1,0,3; target hp 8 -> 3 -> (unchanged) -> destroyed on
+// the 5th round; tile low byte $27 after the shot, back to $1F once the timer reached 1; ground count 1 -> 0. The wall-clock
+// part (latch every 90 VBL, $14590 = 45 at the latch) is covered by test/map-loop.mjs and the Sim schedule tests. The
+// original left the map-word occupancy bit of the target cell set after the kill (flag byte cleared); that is NOT asserted
+// here, see notes/formats/enemies.md section 6 (open point).
+{
+  const env = fresh();
+  const [ax, ay] = tables.arcs[4][0];
+  const { x, y } = freeArea(env.world);
+  const gx = x + 3;
+  const gy = y + 3;
+  const at = addGun(env, 0x1f, gx, gy, 4, 0);
+  env.cells[gy * MAP_WIDTH + gx] = (env.cells[gy * MAP_WIDTH + gx] & ~0xff) | 0x1f; // the staged word held the bare tile $1F
+  const budgetAt = TYPE_TABLE + TYPE_SIZE * 5 + T.total;
+  env.state.setWord(budgetAt, 1); // the staged T[5]+$C scan budget ($13248)
+  const e = spawn(env, false, 24, gx + ax, gy + ay, 0, [0, 8, 0, 5, 0, 5, 50, 0]);
+  e.mode = 5;
+  const timers = [];
+  const hps = [];
+  const lows = [];
+  for (let round = 0; round < 5; round++) {
+    env.enemies.fireGuns(0x1f, 5);
+    timers.push(env.world.objects[at + 7]);
+    hps.push(env.enemies.groundSlots[0] ? e.hp : null);
+    lows.push(env.cells[gy * MAP_WIDTH + gx] & 0xff);
+  }
+  check("live Gun A cycle: the gun timer after the five rounds is 3,2,1,0,3", timers.join() === "3,2,1,0,3", timers.join());
+  check("live Gun A cycle: target hp 8 -> 3, held for three rounds, destroyed on the fifth", hps.join() === "3,3,3,3," && e.hp === -2 /* null (slot freed) joins as empty */, `${hps.join()} hp ${e.hp}`);
+  check("live Gun A cycle: tile flash $27 after the shot, reverted to $1F at timer 1, flashed again by the kill shot", lows.join() === "39,39,31,31,39", lows.join());
+  check("live Gun A cycle: ground count 0 and the flag byte of the target cell cleared", env.enemies.groundSlots[0] === null && env.state.word(0x142a2) === 0 && (env.units.flags[cellFlagIndex(gx + ax, gy + ay)] & 1) === 0);
+  env.state.setWord(budgetAt, 0);
+  env.enemies.fireGuns(0x1f, 5);
+  check("live Gun A cycle: with the scan budget T[5]+$C back at 0 the gun is not visited (timer unchanged)", env.world.objects[at + 7] === 3);
+}
 {
   const env = fresh();
   const { x, y } = freeArea(env.world);
@@ -335,15 +444,98 @@ function addGun(env, tile, x, y, facing, timer = 0, rotate = 0) {
   check("guns are dead on a power failure (level >= $10)", env.world.objects[at + 2] === 1);
 }
 {
-  // the half-day / day events are detected from the frame countdown in `frame()`
   const env = fresh();
-  const { x, y } = freeArea(env.world);
-  const at = addGun(env, 0x1f, x + 6, y + 6, 0, 0, 1);
+  // $99C4 passes the fixed T[5] row address for Gun A. Its tile column is not needed by $11D34 and may be
+  // absent from a scenario's type table when there are no such buildings.
+  const gunA = TYPE_TABLE + TYPE_SIZE * 5;
+  env.state.setWord(gunA + T.tile, 0);
+  env.state.setWord(gunA + T.total, 0);
+  let threw = false;
+  try { env.enemies.fireGuns(0x1f, 20); } catch { threw = true; }
+  check("Gun A reads fixed T[5].+$C and safely returns when the scenario has no matching type tile", !threw && env.state.word(gunA + T.total) === 0);
+}
+{
+  const env = fresh();
+  const shots = [];
+  env.enemies.fireGuns = (tile) => shots.push(tile);
   env.state.setByte(A.frameCountdown, 0x30);
-  env.enemies.frame();
+  for (let i = 0; i < 3; i++) env.sim.countFrame();
+  check("gun A schedule: VBL value $2D latches pending bit 4 without firing", env.state.byte(A.frameCountdown) === 0x2d && (env.state.byte(A.pending) & 0x10) !== 0 && shots.length === 0);
+  env.sim.loopPass();
+  check("gun A schedule: $99C4 consumes bit 4 exactly once", shots.join() === "31" && (env.state.byte(A.pending) & 0x10) === 0);
+  env.sim.run();
+  check("gun A schedule: consumed latch does not repeat", shots.length === 1);
+}
+{
+  const env = fresh();
+  const shots = [];
+  env.enemies.fireGuns = (tile) => shots.push(tile);
   env.state.setByte(A.frameCountdown, 0x2d);
-  env.enemies.frame();
-  check("frame(): gun A turns at the half-day moment (countdown $2D)", env.world.objects[at + 2] === 1);
+  env.sim.paused = true;
+  env.sim.countFrame();
+  check("paused VBL at $2D sets the latch while leaving the countdown frozen", env.state.byte(A.frameCountdown) === 0x2d && (env.state.byte(A.pending) & 0x10) !== 0);
+  env.sim.run();
+  check("paused simulation retains the pending gun round", shots.length === 0 && (env.state.byte(A.pending) & 0x10) !== 0);
+  env.sim.paused = false;
+  env.sim.run();
+  check("resume consumes the latched gun round", shots.join() === "31" && (env.state.byte(A.pending) & 0x10) === 0);
+}
+{
+  const env = fresh();
+  const shots = [];
+  env.enemies.fireGuns = (tile) => shots.push(tile);
+  env.state.setByte(A.frameCountdown, 2);
+  env.sim.countFrame();
+  env.sim.countFrame();
+  env.sim.loopPass();
+  check("daily gun B runs once when the queued day becomes the daily bit", shots.join() === "15" && (env.state.byte(A.pending) & 1) === 0, shots.join());
+}
+{
+  const env = fresh();
+  const order = [];
+  env.enemies.fireGuns = (tile) => order.push(`gun${tile.toString(16)}`);
+  env.sim.fleet.dailyFuel = () => order.push("ACE2");
+  env.state.setByte(A.pending, 0x11); // special then daily
+  env.sim.run();
+  check("$99C4 order: gun A, daily gun B, then $ACE2", order.join(",") === "gun1f,gunf,ACE2", order.join(","));
+}
+
+// ---- map occupancy after a kill ($11C5C / $11C30 -> $4732 -> $1237C A6 clobber, enemies.md section 6) ---------------------
+
+for (const air of [false, true]) {
+  const kind = air ? "air" : "ground";
+  const layer = air ? AIR : OCCUPIED;
+  const flagBit = air ? 2 : 1;
+  const setup = (result) => {
+    const env = fresh();
+    env.explodeResult.value = result;
+    const { x, y } = freeArea(env.world);
+    const e = spawn(env, air, air ? 25 : 22, x + 4, y + 4, 0);
+    e.mode = 5;
+    // Reservation cell: a flagged copy on the unit's own cell (spawn marks the map; the flag byte is set here).
+    env.units.flags[cellFlagIndex(e.reserveX, e.reserveY)] |= flagBit;
+    return { env, e, i: e.reserveY * MAP_WIDTH + e.reserveX, f: cellFlagIndex(e.reserveX, e.reserveY) };
+  };
+
+  {
+    const { env, e, i, f } = setup(true); // would clobber, but there is no explosion
+    check(`${kind} fixture: map bit set before the kill`, (env.cells[i] & layer) !== 0 && (env.units.flags[f] & flagBit) !== 0);
+    air ? env.enemies.destroyAir(e, false) : env.enemies.destroyGround(e, false);
+    check(`${kind} kill without explosion: map bit and flag cleared, hook not called`, (env.cells[i] & layer) === 0 && (env.units.flags[f] & flagBit) === 0 && env.explosions.length === 0);
+  }
+  {
+    const { env, e, i, f } = setup(true); // $1237C clobbered A6 (off-view sound, or in-view effect allocated)
+    air ? env.enemies.destroyAir(e, true) : env.enemies.destroyGround(e, true);
+    check(`${kind} explosive kill, hook clobbers A6: map bit stays set, flag cleared, slot and counts updated`,
+      (env.cells[i] & layer) !== 0 && (env.units.flags[f] & flagBit) === 0 && env.explosions.length === 1 &&
+      (air ? env.enemies.airSlots : env.enemies.groundSlots).every((s) => s === null) && env.state.long(0x14298) === 1);
+  }
+  {
+    const { env, e, i, f } = setup(false); // effect list full: $1237C returns without touching A6
+    air ? env.enemies.destroyAir(e, true) : env.enemies.destroyGround(e, true);
+    check(`${kind} explosive kill, effect list full (no clobber): no effect/sound, map bit and flag cleared`,
+      (env.cells[i] & layer) === 0 && (env.units.flags[f] & flagBit) === 0 && env.explosions.length === 0);
+  }
 }
 
 // ---- missiles and ships ---------------------------------------------------------------------------------------------
@@ -375,15 +567,17 @@ function addGun(env, tile, x, y, facing, timer = 0, rotate = 0) {
   check("missile: its map marks are gone", env.cells.every((w) => !(w & AIR)) && env.units.flags.every((f) => !(f & 8)));
 }
 {
-  // an air target is hit at once on arrival; a vanished target removes the missile silently
+  // an air target is hit at once on arrival; a vanished target is only noticed by the daily $ACE2 (no main-pass check, $4408)
   const env = fresh();
   const { x, y } = freeArea(env.world);
   const a = spawn(env, true, 25, x + 9, y + 2, 2);
   a.mode = 5;
+  a.targetX = a.x; a.targetY = a.y; // hold position so this check isolates a missile strike, not a multi-day chase
   const target = env.enemies.findTarget(20, x + 2, y + 2);
   env.enemies.launchMissile({ x: x + 2, y: y + 2 }, target);
   env.run(600);
-  check("missile: hits an aircraft", env.enemies.air.length === 0 && env.sim.fleet.ships.length === 0);
+  check("missile: hits an aircraft", env.enemies.air.length === 0 && env.sim.fleet.ships.length === 0,
+    `air ${env.enemies.air.map((e) => `${e.slot}:${e.x},${e.y},mode${e.mode}`).join("|")} fleet ${env.sim.fleet.ships.map((s) => `${s.type}:${s.x},${s.y},mode${s.mode},lift${s.lift},target${s.targetX},${s.targetY}`).join("|")}`);
 }
 {
   const env = fresh();
@@ -393,7 +587,12 @@ function addGun(env, tile, x, y, facing, timer = 0, rotate = 0) {
   env.enemies.launchMissile({ x: x + 2, y: y + 2 }, env.enemies.findTarget(20, x + 2, y + 2));
   env.enemies.destroyAir(a, false);
   env.run(5);
-  check("missile: vanishes when its target is gone", env.sim.fleet.ships.length === 0);
+  check("missile: the main pass does not notice a vanished target", env.sim.fleet.ships.length === 1 && env.explosions.length === 0);
+  const missile = env.sim.fleet.ships[0];
+  env.sim.fleet.dailyFuel();
+  check("missile: the daily $ACE2 removes it silently (one explosion, no morale or lost-unit change)", env.sim.fleet.ships.length === 0 &&
+    env.explosions.length === 1 && env.explosions[0].x === missile.x && env.explosions[0].y === missile.y && !env.morale.includes(-100));
+  check("missile: its air mark is released with it", env.cells.every((w) => !(w & AIR)) && env.units.flags.every((f) => !(f & 8)));
 }
 {
   // a ship takes off, flies to a cell and lands there
@@ -405,7 +604,7 @@ function addGun(env, tile, x, y, facing, timer = 0, rotate = 0) {
   env.run(400);
   check("ship: arrives at the target and lands (lift 0, mode 0, parked frame)", ship.x === x + 8 && ship.y === y + 5 && ship.lift === 0 && ship.mode === 0 && ship.dir === 8, `${ship.x},${ship.y} mode ${ship.mode} lift ${ship.lift}`);
   const i = (y + 5) * MAP_WIDTH + x + 8;
-  check("ship: lands with the ground mark and flag 4, the old cell is clean", (env.cells[i] & OCCUPIED) !== 0 && (env.units.flags[i] & 4) !== 0 && (env.cells[(y + 2) * MAP_WIDTH + x + 2] & (OCCUPIED | AIR)) === 0);
+  check("ship: lands with the ground mark and flag 4, the old cell is clean", (env.cells[i] & OCCUPIED) !== 0 && (env.units.flags[cellFlagIndex(x + 8, y + 5)] & 4) !== 0 && (env.cells[(y + 2) * MAP_WIDTH + x + 2] & (OCCUPIED | AIR)) === 0);
 }
 {
   // a ship sent to the front flies off the map: front fleet counter of its class
@@ -434,6 +633,203 @@ function addGun(env, tile, x, y, facing, timer = 0, rotate = 0) {
   e.mode = 5;
   env.run(30);
   check("attack: an enemy shoots a hovering ship down (-100 morale)", !env.sim.fleet.ships.includes(ship) && env.morale.includes(-100));
+}
+
+// ---- stable fixed slots: first-free allocation, destroy never shifts survivors, capacity counts occupancy ---------------
+
+{
+  const env = fresh();
+  const { x, y } = freeArea(env.world);
+  const E = env.enemies;
+  check("fresh system: 60 ground / 30 air null slots, dense views empty", E.groundSlots.length === 60 && E.airSlots.length === 30 &&
+    E.groundSlots.every((e) => e === null) && E.airSlots.every((e) => e === null) && E.ground.length === 0 && E.air.length === 0 && E.groundCount === 0 && E.airCount === 0);
+  const g = [0, 1, 2, 3].map((i) => spawn(env, false, 22, x + i, y, 0));
+  check("spawns take slots 0..3 in order", g.every((e, i) => E.groundSlots[i] === e));
+  E.destroyGround(g[1], false);
+  check("destroy frees slot 1 in place: survivors keep slots 0, 2, 3", E.groundSlots[0] === g[0] && E.groundSlots[1] === null && E.groundSlots[2] === g[2] && E.groundSlots[3] === g[3]);
+  check("dense view skips the hole in slot order", E.ground.length === 3 && E.ground[0] === g[0] && E.ground[1] === g[2] && E.ground[2] === g[3] && E.groundCount === 3);
+  const n = spawn(env, false, 23, x + 5, y, 0);
+  check("next spawn takes the first free slot (1), not the end", E.groundSlots[1] === n && E.groundSlots[4] === null && E.groundCount === 4);
+  E.destroyGround(g[0], false);
+  E.destroyGround(g[3], false);
+  const m = spawn(env, false, 22, x + 6, y, 0);
+  const m2 = spawn(env, false, 22, x + 7, y, 0);
+  check("lowest free slot first again (0, then 3)", E.groundSlots[0] === m && E.groundSlots[3] === m2 && E.groundSlots[2] === g[2] && E.groundSlots[1] === n);
+  check("destroying an object that is not in a slot does nothing", (() => { const c = E.groundCount; E.destroyGround(g[1], false); return E.groundCount === c; })());
+
+  // air list: same rules
+  const a = [0, 1, 2].map((i) => spawn(env, true, 25, x + i, y + 2, 2));
+  E.destroyAir(a[0], false);
+  E.destroyAir(a[2], false);
+  check("air destroy leaves holes, survivor keeps slot 1", E.airSlots[0] === null && E.airSlots[1] === a[1] && E.airSlots[2] === null && E.air.length === 1 && E.airCount === 1);
+  const b = spawn(env, true, 26, x + 4, y + 2, 2);
+  check("air spawn takes the first free slot", E.airSlots[0] === b);
+}
+{
+  // capacity counts occupied slots: a full list with a hole in the middle still accepts exactly one more
+  const env = fresh();
+  const { x, y } = freeArea(env.world);
+  const E = env.enemies;
+  const all = [];
+  for (let i = 0; i < 60; i++) all.push(spawn(env, false, 22, x + (i % 12), y + Math.floor(i / 12), 0));
+  check("60 ground enemies fill every slot, the 61st is refused", E.groundCount === 60 && E.groundSlots.every((e) => e !== null) &&
+    E.spawn({ air: false, type: 22, x, y, dir: 0, entry: [0, 6, 0, 3, 0, 5, 50, 0] }) === false && E.groundCount === 60);
+  E.destroyGround(all[37], false);
+  check("a hole in a full list is the only free slot", E.groundSlots[37] === null && E.groundCount === 59);
+  // $48EC checks the saved count word before scanning the fixed slots. A full count therefore refuses a wave spawn
+  // even if a stale/inconsistent count leaves a physical hole; ordinary calls still use the first free slot.
+  env.state.setWord(0x142a2, 60);
+  check("wave allocator honors the full count word before scanning a free slot", E.groundSlots[37] === null &&
+    E.spawn({ air: false, type: 22, x, y, dir: 0, entry: [0, 6, 0, 3, 0, 5, 50, 0], origin: "wave" }) === false &&
+    E.groundSlots[37] === null && E.groundCount === 59);
+  env.state.setWord(0x142a2, 59);
+  const again = spawn(env, false, 23, x, y, 0);
+  check("the freed slot 37 is reused and the list is full again", E.groundSlots[37] === again && E.groundCount === 60 &&
+    E.spawn({ air: false, type: 22, x, y, dir: 0, entry: [0, 6, 0, 3, 0, 5, 50, 0] }) === false);
+  const airs = [];
+  for (let i = 0; i < 30; i++) airs.push(spawn(env, true, 25, x + (i % 12), y + 6 + Math.floor(i / 12), 1));
+  check("30 aircraft fill every slot, the 31st is refused", E.airCount === 30 && E.spawn({ air: true, type: 25, x, y, dir: 0, entry: [0, 6, 0, 3, 0, 5, 50, 0] }) === false);
+  E.destroyAir(airs[29], false);
+  check("air slot 29 can be freed and reused", E.airSlots[29] === null && E.spawn({ air: true, type: 26, x, y, dir: 0, entry: [0, 6, 0, 3, 0, 5, 50, 0] }) === true && E.airSlots[29].type === 26);
+}
+// ---- wave spawns through the alien spawner ($1187C -> $48EC / $48B6): record bytes, occupancy, refusal -------------
+// Synthetic fixtures written from the static trace (not an original-run comparison). The spawner is driven directly
+// (`sim.aliens.spawnStep()`), so the real Sim -> EnemySystem hook path is exercised. Group 0, first queue cell $6C.
+{
+  const REC = 0x13456;
+  const GROUP0 = 0x135c6;
+  const ENTRY = 0x13476 + 3 * 8; // a wave-entry row inside the table: type, +1 hp, +3 damage, +4 count, +5/+6/+7 bytes
+  const setup = (env, entryBytes, cell, dir) => {
+    const s = env.state;
+    s.setByte(REC + 0x11, 3); // alien level $13467 -> record +A
+    entryBytes.forEach((b, i) => s.setByte(ENTRY + i, b));
+    for (let i = 0; i < 0x80; i++) s.setLong(GROUP0 + 0x10 + 4 * i, 0);
+    for (let c = 0; c < 8; c++) { s.setByte(GROUP0 + 2 * c, cell.x); s.setByte(GROUP0 + 2 * c + 1, cell.y); }
+    s.setByte(GROUP0 + 0x90, 1); // one queued entry
+    s.setByte(GROUP0 + 0x91, dir);
+    s.setLong(GROUP0 + 0x10 + 0x6c, ENTRY);
+  };
+  const queuedLong = (env) => env.state.long(GROUP0 + 0x10 + 0x6c);
+
+  // ground entry: +A = level, +$13/+$14/+$15 = entry bytes 5/6/7, map word marked, flag byte and counters per the trace
+  {
+    const env = fresh();
+    const { x, y } = freeArea(env.world);
+    setup(env, [22, 7, 0, 4, 1, 0x83, 45, 9], { x, y }, 0x0d); // direction byte is masked with 7
+    const idx = y * MAP_WIDTH + x;
+    env.state.setWord(0x142a2, 0);
+    env.sim.aliens.spawnStep();
+    const e = env.enemies.groundSlots[0];
+    check("wave spawn (ground): first free slot 0, hp / damage / +$E / mode from the entry", !!e && e.type === 22 && e.hp === 7 && e.dmg === 4 && e.bombPct === 45 && e.mode === 6 && e.x === x && e.y === y);
+    check("wave spawn (ground): +A = alien level $13467, +$13/+$14/+$15 = entry bytes 5/6/7 (unsigned), direction masked", !!e && e.tech === 3 && e.aux === 0x83 && e.p14 === 45 && e.p15 === 9 && e.dir === 5);
+    check("wave spawn (ground): map word occupancy only; flag byte untouched, slot +$16 untouched (initial 0), no reservation cell",
+      (env.cells[idx] & OCCUPIED) !== 0 && (env.units.flags[cellFlagIndex(x, y)] & 3) === 0 && e.reserveX === -1 && e.reserveY === -1 && env.enemies.groundFlagPointers[0] === 0);
+    check("wave spawn (ground): $142A2 +1, queue cell emptied, group count 0, group index advanced, cursor stepped by $14",
+      env.state.word(0x142a2) === 1 && queuedLong(env) === 0 && env.state.byte(GROUP0 + 0x90) === 0 &&
+      env.sim.aliens.spawner.groupIndex === 1 && env.sim.aliens.spawner.cursor === 0x6c);
+    check("wave spawn (ground): every other ground and air slot stays free", env.enemies.groundCount === 1 && env.enemies.airCount === 0);
+  }
+
+  // air entry: aux is signed, lift starts at the climb value, air map bit and $142A4
+  {
+    const env = fresh();
+    const { x, y } = freeArea(env.world);
+    setup(env, [25, 5, 0, 2, 1, 0xfe, 33, 1], { x, y }, 2);
+    env.state.setWord(0x142a4, 0);
+    env.sim.aliens.spawnStep();
+    const a = env.enemies.airSlots[0];
+    check("wave spawn (air): +A = level, +$13 signed (-2), +$14 / +$15 from entry, lift $22, direction from the group", !!a && a.type === 25 && a.hp === 5 && a.dmg === 2 && a.bombPct === 33 &&
+      a.tech === 3 && a.aux === -2 && a.p14 === 33 && a.p15 === 1 && a.lift === 0x22 && a.dir === 2);
+    check("wave spawn (air): air map bit set, flag byte untouched, $142A4 +1 (not $142A2)",
+      (env.cells[y * MAP_WIDTH + x] & AIR) !== 0 && (env.units.flags[cellFlagIndex(x, y)] & 3) === 0 && env.state.word(0x142a4) === 1 && env.state.word(0x142a2) === 0 && queuedLong(env) === 0);
+  }
+
+  // crusher: the +$13/+$14 packing of a wave entry equals the saved-record packing
+  {
+    const env = fresh();
+    const { x, y } = freeArea(env.world);
+    setup(env, [24, 6, 0, 3, 1, 0x85, 2, 0], { x, y }, 0);
+    env.sim.aliens.spawnStep();
+    const c = env.enemies.groundSlots[0];
+    check("wave spawn (crusher): +$13 = toggle bit 7 + counter, +$14 = animation byte", !!c && c.type === 24 && c.toggle === true && c.counter === 5 && c.anim === 2);
+  }
+
+  // full list: the count word is checked first; nothing is allocated, marked, counted or dequeued
+  {
+    const env = fresh();
+    const { x, y } = freeArea(env.world, 12);
+    const spawnCell = { x: x + 11, y: y + 11 };
+    for (let i = 0; i < 60; i++) spawn(env, false, 22, x + (i % 10), y + Math.floor(i / 10), 0);
+    env.state.setWord(0x142a2, 60);
+    setup(env, [22, 7, 0, 4, 1, 0, 45, 0], spawnCell, 0);
+    const idx = spawnCell.y * MAP_WIDTH + spawnCell.x;
+    const before = env.cells[idx];
+    env.sim.aliens.spawnStep();
+    check("wave spawn with a full ground list is refused: entry stays queued, count and $142A2 unchanged, spawn cell unmarked",
+      env.enemies.groundCount === 60 && queuedLong(env) === ENTRY && env.state.byte(GROUP0 + 0x90) === 1 &&
+      env.state.word(0x142a2) === 60 && env.cells[idx] === before && env.sim.aliens.spawner.groupIndex === 1 && env.sim.aliens.spawner.cursor === 0x80 - 6 * 0x14);
+    // The allocator's -1 lets the bounded queue scan continue. A following air entry can still spawn when
+    // only the ground list is full; this proves the next queue slot is attempted after refusal.
+    const air = fresh();
+    const ax = freeArea(air.world);
+    for (let i = 0; i < 60; i++) spawn(air, false, 22, ax.x + (i % 10), ax.y + Math.floor(i / 10), 0);
+    air.state.setWord(0x142a2, 60);
+    const follow = { x: ax.x + 11, y: ax.y + 11 };
+    setup(air, [22, 7, 0, 4, 1, 0, 45, 0], follow, 0);
+    const ENTRY_AIR = ENTRY + 8;
+    air.state.setByte(ENTRY_AIR, 25);
+    air.state.setByte(ENTRY_AIR + 1, 5);
+    air.state.setByte(ENTRY_AIR + 3, 2);
+    air.state.setByte(ENTRY_AIR + 4, 1);
+    air.state.setByte(ENTRY_AIR + 5, 0);
+    air.state.setByte(ENTRY_AIR + 6, 33);
+    air.state.setByte(ENTRY_AIR + 7, 0);
+    air.state.setLong(GROUP0 + 0x10 + 0x58, ENTRY_AIR);
+    air.state.setByte(GROUP0 + 0x90, 2);
+    air.sim.aliens.spawnStep();
+    check("wave spawner continues after full ground list refusal and attempts the following air entry", air.enemies.groundCount === 60 &&
+      air.enemies.airCount === 1 && air.enemies.airSlots[0]?.type === 25 && queuedLong(air) === ENTRY && air.state.long(GROUP0 + 0x10 + 0x58) === 0 &&
+      air.state.byte(GROUP0 + 0x90) === 1 && air.state.word(0x142a2) === 60 && air.state.word(0x142a4) === 1 &&
+      (air.cells[(follow.y * MAP_WIDTH) + follow.x] & AIR) !== 0);
+
+    // An actually full air list also leaves its own queue entry intact.
+    const fullAir = fresh();
+    const fx = freeArea(fullAir.world);
+    for (let i = 0; i < 30; i++) spawn(fullAir, true, 25, fx.x + (i % 10), fx.y + Math.floor(i / 10), 0);
+    fullAir.state.setWord(0x142a4, 30);
+    setup(fullAir, [25, 5, 0, 2, 1, 0, 33, 0], { x: fx.x + 11, y: fx.y + 11 }, 0);
+    fullAir.sim.aliens.spawnStep();
+    check("wave spawn with a full air list is refused without consuming its entry or incrementing $142A4", fullAir.enemies.airCount === 30 &&
+      queuedLong(fullAir) === ENTRY && fullAir.state.byte(GROUP0 + 0x90) === 1 && fullAir.state.word(0x142a4) === 30 &&
+      (fullAir.cells[(fx.y + 11) * MAP_WIDTH + fx.x + 11] & AIR) === 0);
+  }
+}
+{
+  // defect uses the first free ground slot and respects occupancy-based capacity
+  const env = fresh();
+  const { x, y } = freeArea(env.world);
+  const E = env.enemies;
+  const a = spawn(env, false, 22, x, y, 0);
+  const b = spawn(env, false, 22, x + 1, y, 0);
+  E.destroyGround(a, false);
+  const t = env.units.spawn(9, x + 3, y + 3, 4);
+  E.defect();
+  check("defect takes the first free ground slot (0)", E.groundSlots[0] !== null && E.groundSlots[0].type === 9 && E.groundSlots[1] === b && E.groundCount === 2);
+  for (let i = 0; i < 58; i++) spawn(env, false, 22, x + (i % 12), y + 2 + Math.floor(i / 12), 0);
+  env.units.spawn(9, x + 8, y + 8, 4);
+  check("defect refuses when all 60 slots are occupied", E.groundCount === 60 && E.defect() === null && env.units.units.length === 1);
+}
+{
+  // the missile target / overview / findTarget see slot objects in slot order after holes appear
+  const env = fresh();
+  const { x, y } = freeArea(env.world);
+  const E = env.enemies;
+  const a = spawn(env, false, 22, x + 2, y + 2, 0);
+  const b = spawn(env, false, 22, x + 4, y + 4, 0);
+  const c = spawn(env, true, 26, x + 5, y + 5, 1);
+  E.destroyGround(a, false);
+  check("overview and drawables follow occupancy, not slots", E.overview().enemyGround.length === 1 && E.overview().enemyGround[0].x === x + 4 && E.drawables().length === 2);
+  check("findTarget still finds survivors in the holey lists", E.findTarget(20, x + 3, y + 3)?.enemy === c);
 }
 
 if (failed) {

@@ -4,7 +4,8 @@
 import { SECTOR_SIZE, type SectorRange } from "./picture.js";
 import { unpackLz } from "./unpack.js";
 
-const HEADER_SECTOR = 0x3c0;
+export const HEADER_SECTOR = 0x3c0;
+export const HEADER_SECTORS = 2;
 const HEADER_MAGIC = "UTOP";
 const RECORD_START = 10;
 const RECORD_SIZE = 0x40;
@@ -33,6 +34,7 @@ export interface ScenarioRecord {
   descriptors: SectorRange; // 8-byte {rows-1, offset} entries for the tile images
   map: SectorRange;
   block: SectorRange; // scenario parameter block
+  intel: SectorRange; // scenario-specific intelligence portraits/report assets
   text: SectorRange[]; // per language
 }
 
@@ -58,7 +60,7 @@ function sectors(disk: Uint8Array, range: SectorRange): Uint8Array {
 }
 
 export function readScenarioRecords(disk2: Uint8Array): ScenarioRecord[] {
-  const header = disk2.subarray(HEADER_SECTOR * SECTOR_SIZE, (HEADER_SECTOR + 2) * SECTOR_SIZE);
+  const header = disk2.subarray(HEADER_SECTOR * SECTOR_SIZE, (HEADER_SECTOR + HEADER_SECTORS) * SECTOR_SIZE);
   const magic = String.fromCharCode(...header.subarray(0, 8));
   if (!magic.startsWith(HEADER_MAGIC) || magic.slice(4) !== "SCEN") {
     throw new Error("readScenarioRecords: Disk.2 has no scenario header");
@@ -76,10 +78,25 @@ export function readScenarioRecords(disk2: Uint8Array): ScenarioRecord[] {
       descriptors: pair(2),
       map: pair(3),
       block: pair(4),
+      intel: pair(5),
       text: [pair(6), pair(7), pair(8), pair(9)],
     });
   }
   return records;
+}
+
+/**
+ * The disk id word at header+8 of the scenario disk ("UTOPSCEN" + word). VERIFIED statically that the original's disk
+ * check `$8A5A` compares this word of the presented disk with `$8D00`, which the Disk.4 load fills from the saved word
+ * `$1453E` (`$888A`); the supplied Disk.2 holds 2. Throws like `readScenarioRecords` when the disk has no scenario header.
+ */
+export function readScenarioDiskId(disk2: Uint8Array): number {
+  const header = disk2.subarray(HEADER_SECTOR * SECTOR_SIZE, (HEADER_SECTOR + HEADER_SECTORS) * SECTOR_SIZE);
+  const magic = String.fromCharCode(...header.subarray(0, 8));
+  if (!magic.startsWith(HEADER_MAGIC) || magic.slice(4) !== "SCEN") {
+    throw new Error("readScenarioDiskId: Disk.2 has no scenario header");
+  }
+  return word(header, 8);
 }
 
 function readTiles(descriptors: Uint8Array, count: number, images: Uint8Array, base: number): Tile[] {

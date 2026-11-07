@@ -187,6 +187,13 @@ export interface ModPlayerOptions {
   ciaTempo?: boolean;
   /** Master volume 0..64 (64 = unchanged). */
   masterVolume?: number;
+  /**
+   * Paula's guest-controlled LED low-pass model. `a1200` approximates the A1200 output stage; `none` leaves
+   * the host output unfiltered. Default: `a1200`.
+   */
+  paulaFilter?: "none" | "a1200";
+  /** Optional guest-state callback used by the shared WebAudio music/SFX output bus. */
+  onPaulaFilterChange?: (enabled: boolean) => void;
 }
 
 export class ModPlayer {
@@ -196,6 +203,11 @@ export class ModPlayer {
   interpolation: "linear" | "nearest";
   masterVolume: number;
   private readonly ciaTempo: boolean;
+  private readonly paulaFilter: "none" | "a1200";
+  private readonly onPaulaFilterChange?: (enabled: boolean) => void;
+  private ledFilterOn = false;
+  private readonly filterLeft = [0, 0, 0];
+  private readonly filterRight = [0, 0, 0];
 
   private channels: Channel[] = [];
   private speed = 6;
@@ -219,6 +231,8 @@ export class ModPlayer {
     this.interpolation = options.interpolation ?? "linear";
     this.ciaTempo = options.ciaTempo ?? false;
     this.masterVolume = options.masterVolume ?? 64;
+    this.paulaFilter = options.paulaFilter ?? "a1200";
+    this.onPaulaFilterChange = options.onPaulaFilterChange;
     this.reset();
   }
 
@@ -244,6 +258,11 @@ export class ModPlayer {
     this.tickLeft = 0;
     this.ticks = 0;
     this.wraps = 0;
+    // The game player's module initializer sets CIA-A PRA bit 1: filter bypassed.
+    this.ledFilterOn = false;
+    this.onPaulaFilterChange?.(false);
+    this.filterLeft.fill(0);
+    this.filterRight.fill(0);
   }
 
   /** Song position (index into the order list). */
@@ -263,6 +282,10 @@ export class ModPlayer {
   }
   get elapsedTicks(): number {
     return this.ticks;
+  }
+  /** Current guest-controlled CIA-A PRA bit 1 state (false = filter bypassed). */
+  get filterEnabled(): boolean {
+    return this.ledFilterOn;
   }
 
   setChannelMuted(channel: number, muted: boolean): void {
@@ -365,6 +388,31 @@ export class ModPlayer {
         pos += step;
       }
       c.pos = pos;
+    }
+
+    if (this.paulaFilter === "a1200") {
+      // The A1200's switchable LED path is represented as three cascaded RC stages. WinUAE describes
+      // its knee as starting around 5–6 kHz; 5.5 kHz is an explicit approximation, not an original
+      // waveform measurement. Keep the RC states warm while bypassed, as the analogue path continues
+      // to settle behind the hardware switch.
+      const alpha = 1 - Math.exp((-2 * Math.PI * 5500) / this.sampleRate);
+      const lstate = this.filterLeft;
+      const rstate = this.filterRight;
+      for (let i = 0; i < n; i++) {
+        const idx = at + i;
+        let l = left[idx];
+        let r = right[idx];
+        for (let stage = 0; stage < 3; stage++) {
+          lstate[stage] += alpha * (l - lstate[stage]);
+          rstate[stage] += alpha * (r - rstate[stage]);
+          l = lstate[stage];
+          r = rstate[stage];
+        }
+        if (this.ledFilterOn) {
+          left[idx] = l;
+          right[idx] = r;
+        }
+      }
     }
   }
 
@@ -540,6 +588,12 @@ export class ModPlayer {
 
   private extendedTickZero(c: Channel, sub: number, y: number): void {
     switch (sub) {
+      case 0:
+        // Game-player handler $2166: bit 1 of CIA-A PRA is replaced with y&1.
+        // A clear bit engages the switchable low-pass filter; a set bit bypasses it.
+        this.ledFilterOn = (y & 1) === 0;
+        this.onPaulaFilterChange?.(this.ledFilterOn);
+        break;
       case 1:
         c.period = Math.max(113, c.period - y);
         break;
