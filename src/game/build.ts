@@ -5,6 +5,7 @@
 
 import { MAP_HEIGHT, MAP_WIDTH, TILE_ID_MASK } from "../data/scenario.js";
 import { Construction, SITE_TILE, TILE_WAREHOUSE } from "./construction.js";
+import { divuQ, mulu } from "./sim-math.js";
 import { T, type World } from "./world.js";
 
 export { SITE_TILE };
@@ -38,7 +39,7 @@ export const MSG = {
   mustBeConnected: 1,
   tooFar: 0x127,
   demolishRefused: 0x58,
-  warnPowerOff: 0x5e,
+  sportsEvent: 0x5e, // $6C72: refused while a sports event is in progress (bit 1 of $144B1)
   warnStrike: 0x11b,
   noGroundForVent: 0x123,
   padRefused: 0xe9, // $771E: not on the buildable area, blocked, or no free object slot
@@ -178,7 +179,7 @@ export class Builder {
     }
     const t = this.world.typeAddress(type);
     if (s.byte(V.warn) & 2) {
-      this.say(MSG.warnPowerOff);
+      this.say(MSG.sportsEvent);
       return false;
     }
     if (s.byte(V.warn) & 4) {
@@ -338,6 +339,9 @@ export class Builder {
     if (stored.has(tile) && total > 0) {
       s.setWord(t + T.stored, s.word(t + T.stored) - Math.floor(s.word(t + T.stored) / total));
     }
+    // $7454: demolishing a sports complex (tile $5C) clears the sports countdown $144B2 (weeks until another event
+    // may be called). Static trace of the real-building path only; cancelling a site never reaches it.
+    if (tile === 0x5c) s.setByte(0x144b2, 0);
     if (tile === 0x41) {
       s.setLong(V.farmA, s.long(V.farmA) - 10);
       s.setLong(V.freeColonists, s.long(V.freeColonists) + 10);
@@ -345,11 +349,13 @@ export class Builder {
       s.setLong(V.farmB, s.long(V.farmB) - 10);
       s.setLong(V.freeColonists, s.long(V.freeColonists) + 10);
     } else if (tile === TILE_WAREHOUSE && total > 0) {
+      // $7470-$749E: share = stock divu.w total, then ext.l (divuQ). On overflow divu.w keeps the stock, so a
+      // negative stock gives its sign-extended low word. The weight step is mulu.w of the low word of the share.
       for (let i = 0; i < WAREHOUSE_WEIGHTS_SLOTS; i++) {
         const at = V.stock + 4 * i;
-        const share = Math.floor(s.long(at) / total);
+        const share = divuQ(s.long(at), total);
         s.setLong(at, s.long(at) - share);
-        s.setLong(V.weight, s.long(V.weight) - share * (this.weights[i] ?? 0));
+        s.setLong(V.weight, s.long(V.weight) - mulu(share, this.weights[i] ?? 0));
       }
       s.setLong(V.capacity, s.long(V.capacity) - 80000);
     }
@@ -364,7 +370,9 @@ export class Builder {
       blast.push([ox, oy]);
       if (s.byte(t + 1) !== 1) blast.push([ox + 1, oy], [ox + 1, oy + 1], [ox, oy + 1]); // $75A8 order
     }
-    this.writeBuilding(TILE_CLEARED, o[slot + 4], o[slot + 5], s.byte(t + 1));
+    // $74D6 -> $6FC4 (not $6A8C): the cleared tile id goes into every footprint cell unchanged, so a 2 x 2 building
+    // leaves $38 in all four cells, not $38..$3B.
+    this.markCells(TILE_CLEARED, o[slot + 4], o[slot + 5], s.byte(t + 1));
     return true;
   }
 
@@ -387,7 +395,8 @@ export class Builder {
     const workers = s.byte(t + 4);
     s.setLong(V.builders, s.long(V.builders) - workers);
     s.setLong(V.freeColonists, s.long(V.freeColonists) + workers);
-    this.writeBuilding(TILE_CLEARED, x, y, s.byte(t + 1));
+    // $752C -> $6FC4: the same as demolition, one unchanged cleared id in every footprint cell.
+    this.markCells(TILE_CLEARED, x, y, s.byte(t + 1));
     return true;
   }
 }

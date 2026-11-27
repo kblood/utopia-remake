@@ -190,7 +190,9 @@ const sourceOf = (rig, extra = {}) => ({ loop: rig.loop, sim: rig.sim, units: ri
   rig.sim.aliens.alien = { x: 5, y: 6 };
   rig.sim.aliens.meteor = { x: 7, y: 8, timer: 9 };
   rig.sim.alerts.set(0, true);
+  rig.sim.blastMark = true; // $156A9 bit 5: a free-slot missile hit left the mark
   const flagged = captureCheckpoint(sourceOf(rig));
+  check("checkpoint: the blast mark ($156A9 bit 5) is captured", flagged.time.blastMark === true && captureCheckpoint(sourceOf(rig)).time.blastMark === true);
   check("pending bits, pause, queued day, offer, alien, meteor, light", flagged.time.pendingBits === 5 && flagged.time.pending.daily && !flagged.time.pending.weekly && flagged.time.pending.monthly && !flagged.time.pending.special &&
     flagged.time.paused && flagged.time.dayQueued && flagged.time.offer.what === "colonists" && flagged.time.offer.count === 12 && flagged.time.offer.price === 30 &&
     flagged.aliens.alien.x === 5 && flagged.aliens.meteor.timer === 9 && flagged.alerts.lights[0] === 0xff);
@@ -422,11 +424,11 @@ if (!fs.existsSync(disk1Path) || !fs.existsSync(disk2Path)) {
       }
       runAfterVblWait();
     };
-    m.update(idle()); // update 4: the pass; $99C4 queues after this update's message drain
+    m.update(idle()); // update 4: the pass; $99C4 posts 143 after the draw, and that update splices it before its checkpoint
     for (let i = 0; i < 4; i++) m.update(idle());
     const [first, second] = r.checkpoints;
-    check("queued Sim messages are seen before the drain, message requests are listed once", first.queues.simMessages.join() === "143" && first.queues.messagesPushed.join() === "113" &&
-      second.queues.simMessages.length === 0 && second.queues.messagesPushed.join() === "143" && first.queues.messageLog !== null);
+    check("a message posted by $99C4 is drained in its posting update, and message requests are listed once", first.queues.simMessages.length === 0 && first.queues.messagesPushed.join() === "113,143" &&
+      second.queues.simMessages.length === 0 && second.queues.messagesPushed.length === 0 && first.queues.messageLog !== null);
 
     // the modal build-menu pass
     seeded();

@@ -159,7 +159,7 @@ Required staff = count(+$C) * 10; pool 6 uses *20. [V]
 | addr | meaning | tag |
 |---|---|---|
 | $144C8 | power shortage level = number of building types that cannot be powered, computed in $A0D4 | V |
-| $144BB | eclipse flag (solar output 0) | V |
+| $144BB | eclipse flag (solar output 0); starts at 3, counts down weekly; each start and end also calls the `$11024` swap, which the remake keeps as a stored PARITY of all traced calls (`Sim.tileExchange`, save version 11; 5.1 item 3) | V |
 | $144B4 | starvation level (0..20) | V |
 | $144B5 | air shortage flag (=10) | V |
 | $144C4 | overcrowding flag | V |
@@ -213,7 +213,7 @@ Map cell word: low 10 bits tile id, $0400 animated, $0800 and $8000 resource fla
 $7F = special marker tile (7.3). [V]
 
 ### 3.9 System flag bytes
-$156A8: bit7 queued day (set at `$2C8E`, cleared by `$564A`), bit4 freezes the VBL timer block during dialogs/build menu; bit2 screen-busy; bit0 is set by each VBL at `$2C58` and cleared by UI paths, with its remaining role not fully mapped; bits3/5/6 are partly used. `$156A9`: bit2 pause (skips `$99C4`), bit4, bit5, bit6 enemy
+$156A8: bit7 queued day (set at `$2C8E`, cleared by `$564A`), bit4 freezes the VBL timer block during dialogs/build menu; bit2 screen-busy; bit0 is set by each VBL at `$2C58` and cleared by UI paths, with its remaining role not fully mapped; bits3/5/6 are partly used. `$156A9`: bit2 pause (skips `$99C4`), bit4 (set around `$7372` for bombs), bit5 the blast mark (set by each destroyer just before a `$4732`, cleared by every `$4732`; it survives between passes only after a missile hit on a free slot, ship-control.md 5e; `Sim.blastMark`), bit6 enemy
 ground moves, bit7 own units move; `$156AA`: bit0 is set by `$866E` then cleared by `$80A6` on ordinary game start (runtime meaning otherwise unmapped), bit1 attack-wave pending, bit2 no-unit-bonus (blocks event 9), bit3 game over, bit4/bit5 QoL >=80/>=90
 announced, bit7 Tutorial mode (set by `$8114`; skips daily events/eclipses and affects QoL). $156AB: draw-mode byte ($15 while drawing text, then 1). [V]
 
@@ -222,6 +222,11 @@ $144CC: 6 longs of 100; $144E4/$144E8 = $2F, $144E6/$144EA = $21 (view origin); 
 $144F4 = $144F8 = 10; eight 10-byte marker slots at $14540 with byte +2 = $FF; $14590 = 90, $14591 = 1, $14592 = 1;
 date "28/06/2090" (day $1C, month 5, weekday 0, difficulty $1E); $14634/$14636 = $FFFF; $15698 = $FF;
 $156A8 = $94, $156A9 = 2, $156AA = 1, $156AB = 1.
+
+Timer writers, static (2026-11-11, Disk.1): `$14634` is decremented by the VBL only while positive (`$2CBE`), tested by the main
+loop idle clear `$15850` (zero triggers the clear, then the word is `$FFFF`), set to 500 by a log add (`$5AF4`, game-text.md 5),
+and set to 1 by `move.w #1,$14634` at `$80AE`, in the exit tail `$802C`-`$80C6` that runs after `bclr #0,$156AA` at `$80A6` (fall-through, not a separate call; `game-proper.md`, "Tutorial start route", 2026-11-11). At the E state of
+the 2026-11-10 construction capture (replayed 2026-11-11) the word is `$FFFF` with an empty log list (building.md, E-state RAM).
 
 The game image's initialized bytes outside the `$866E` reset range include `$1453E=2`, marker ids 1..8 at `$14540+10n`,
 `$145A3=1`, and weapon table `$145A4..$145A9 = 00 02 03 04 03 01`. A fresh `GameState` recreates these image defaults;
@@ -249,6 +254,11 @@ and 4 but leaves bit 7 queued, so the first `$4D1C` consumes a day before the fi
 2. Daily: if day==1 `$A8E8`; `$11D34` (a0=$1325A = T[6]+$C, d1=$F, d7=$13112); `$ACE2` ship fuel; `$B086` game over; $144BD countdown;
    $15698 message timers; `$10E1E` event scheduler; `$AF12` alien intelligence.
 3. Weekly: `$7000` construction countdown; `$4798`; `$10FCA` eclipse; `$12510`; `$127A0`; $144B2--.
+   [V, re-traced 2026-11-13 from Disk.1: the dispatch at `$9A56`-`$9A88` runs exactly this order, gated by `bclr #1` on `$144C1`.]
+   - **`$10FCA` body** [V, static]: returns if `$156AA` bit 7 (tutorial). With `$144BB` = 0, `$145A0` = `$0B` and `$1459F` = `$15`: `$144BB` := 3, message `$DD`, bit 6 set, then `jsr $5A8C` and `bsr $11024`. With `$144BB` nonzero: decrement; at zero, message `$DE` and bit 6 cleared, then the same `$5A8C` and `$11024`.
+   - **`$11024` graphics swap** [V, static; the state is a parity of every traced call, 2026-11-13 parity handoff; the visible effect is not observed]: swaps the data-address longs (+4) of descriptor entries 4 and 51, and 50 and 54, in the table at `$1612E` (8-byte entries `{rows-1, data address}`; rows-1 stays with its entry). Tile ids are 1-based, so these are tile ids 5, 52, 51 and 55 (`$05`, `$34`, `$33`, `$37`). Callers of `$11024`: the weekly eclipse start and end (`$1100A`, `$10FCA` paths), event 14 (`$1107A`), disk-menu entry `$7ECA` (only if bit 6 is set) and disk-menu exit `$8040` (only if `$144BB` is nonzero). [V, re-checked 2026-11-13 from the raw Disk.1 bytes at `sector*512` with base `$29800` for `$1000`, the `btst #6,$156AA` at `$7ECA` as the anchor: the `jsr $11024` sites are exactly `$7ED4`, `$8040`, `$1100A` (`bsr`) and `$1107A` (`bsr`); `$1100A` is reached from the start path through `$11004` (`jsr $5A8C`) and from the end path by `bra $11004`; `$1107A` is reached from `$11058` (event 14) at `$11028`, after `tst.b $144BB; bne` skips the roll, and after `move.b d2,$144BB`. The entry `$7E52` is called only by `$157AE` and `$15AE6`; `$157AE` only by `jmp` from `$B0BE` and `$10E18` (game-over paths).] Build-menu page 1 draws `$33`, and `$34` is the slot-9 research unlock, so the menu icons would change during an eclipse if the menu reads this table as the map does.
+   - **Remake port (parity, 2026-11-13, `src/game/eclipse-tiles.ts`, `Sim.tileExchange`, `MapScene.syncTileView`).** `Sim` keeps the parity: every traced call toggles it (`exchangeTiles`). `Sim.enterDiskMenu()` toggles it when bit 6 is set (`$7ECA`); `Sim.leaveDiskMenu()` returns when game over is set or `$144BB` is 0, else toggles it and sets bit 6 (`$8040`-`$8046`). `eclipseTileView(tiles, exchanged)` returns a new tile list with the four entries' data addresses exchanged when `exchanged` is true (each keeps its own rows); the source tiles, planes and image bytes are not changed. `MapScene` keeps its own list, rewrites it in place when the parity changes, and applies it before each draw. `ObjectLayer`, `Controls` and `BuildMenuRenderer` receive that same list. The parity is saved (save-session.ts version 11); `Game.createScene` and `activateDisk4` carry the replaced session's parity, since no reset rebuilds the table (the carry into the Disk.4 session is not verified against the original).
+   - **Why the table is a parity, not bit 6 (static, VERIFIED disassembly, 2026-11-13).** Bit 6 does not give the table state: (a) `$7E52`, entered from `$157AE` (`jsr $7e52`, and also the `$15AE6` call), runs `btst #6,$156AA` / `jsr $11024` (`$7ECA`-`$7ED4`), so each entry into that menu while bit 6 is set exchanges the table, and the menu's own state is then 0 while bit 6 is still set; `$157AE` is also the target of `jmp` at `$10E18` (the colony-fall tail, which leaves bit 3 set); (b) the new-game reset (`$866E` -> `$875C`) ends with `move.b #1,$156AA` (`$87CA`), which clears bit 6 with no exchange, so a table left exchanged persists into the new game. Table construction runs once at boot (`$15762`, `$7C4A` from `$1578E`), and no reset rebuilds it. Not checked: `$B0BE` (also `jmp $157AE`), and the in-game exit path beyond `$8040`; the emulator has not been run.
 4. Monthly: `$9B20` = `$A86A` (trade income), `$A802` (market walk), `$9E3A`, `$9E98` (food), `$9DBA` (housing), `$9CDA` (air/finance),
    `$9BAE` (births, calls `$9C80` deaths and `$A246`), `$A010` (statistics/tax/grant), `$A0D4` (power);
    then the Command Centre re-open check (5.9), `$9F36` (job allocation), `$A270` (morale), `$10BC8` (crime), `$A360` (production), `$AB0C` (research).
@@ -257,7 +267,7 @@ and 4 but leaves bit 7 queued, so the first `$4D1C` consumes a day before the fi
 ### 5.2 Births and deaths
 `$9BAE`: modifier m selected by difficulty $145A2: 0 -> 0, $14 -> $14, $1E -> $1E, plus a random 0/$1E/$3C.
 births = ((pop*10+500)/1000 * (rate+rand) + 5)/10 into $1432E, added to pop and free colonists. Crime/overcrowding reduce
-it. `$9C80`: death percent d2 removes d2% of free colonists and from each job pool (random rounding). [V structure, H exact constants]
+it. `$9C80`: death percent d2 removes d2% of free colonists and from each job pool (random rounding). [V, static formula cross-check 2026-11-10: births `$9BAE` rate `roll(difficulty)+base` and `(pop*10+500)/1000` etc. match `sim.ts births()`; `$9C80` matches `deaths()`.]
 
 ### 5.3 Air and finance (`$9CDA`) [V]
 ```
@@ -336,13 +346,15 @@ QoL = (d6 / 100) + 55, max 98, -30 if strike, min 10
 ```
 Every 150 of $142DA reduces $144F0 by 1 (messages at 49, 40, 30, 20). First time QoL >= 80 (bit4) or >= 90 (bit5): message via `$E770`.
 
-### 5.13 Research (`$AB0C`) [H]
+### 5.13 Research (`$AB0C`) [V static cross-check 2026-11-10]
 Tech level $14592 from $145A3 via table $12D56; thresholds $B154; invention bits $14476 from table $B214; message 239 if no
 Command Centre.
 
-### 5.14 Crime (`$10BC8`) writes $142CE and $144C6. [V target, H formula]
+### 5.14 Crime (`$10BC8`) writes $142CE and $144C6. [V, static formula cross-check 2026-11-10: `crimeMonthly()` matches the disassembly, including the signed percent caps]
 ### 5.15 Game over (`$B086`, daily) [V]
 Lose if $142C2 == 0, or (T[7].C==0 and pop < 60), or (T[7].C != 0 and pop < 30). Sets $156AA bit3.
+Static trace (2026-11-10): the loss calls `$E770` (id 1), sets bit 3 at `$B0B6`, then `jmp $157AE` (the disk menu, not a return to
+`$99C4`). The rest of that daily pass is skipped, and the disk menu holds the game with the sim stopped. Details: game-proper.md, "Game over".
 
 ### 5.16 Market (`$A802`) [V layout, H semantics]
 12 entries of 10 bytes at $1316A: words {value, min, max, step, countdown}. First 6 prices, next 6 supply/demand; random walk
@@ -350,9 +362,22 @@ with min/max; supply/demand capacity (pop/100+1)*value capped at $270F.
 
 ---
 
+### 5.17 Static cross-check of the monthly economy (2026-11-10, Disk.1 disassembly, no emulator)
+Routines compared line by line against `src/game/sim.ts` (static evidence only; no emulator run, no pixel or trace parity claimed):
+- Production `$A360` (workshop `$143FE` -> good 4 when `$144C8` < 3; pool 0 consumes good 1 into good 3 when < 8; mines pool 2 at < 12 with the 1 % roll per worker, ore via `$A4A8` tile `$60`; fuel pool 1 at < 11, tile `$3E`), `$A4A8` richness sum, `$A2DE` add and `$A32C` remove (capacity overflow adds the leftover kilograms and the units that fit).
+- Tank yard `$A620` (power < 10, `$133F8` gate with message `$B3`, per-yard share, counter byte +6 thresholds 20 and `$FF`, messages `$96`/`$94`/`$95`, eight-neighbour exit order, `$37CA` spawn with `$1429C` limit 99, tank count `$14254/$14258` per type). Matches. The per-type counter (`$14254` for type 9, `$14258` for type 10, `addq.l` at `$3856`) is in the unit-fill routine `$381E`, which falls through into `$3840` and is reached on the spawn path via `$380E` (static).
+- Jobs `$9F36`/`$9F4A` (a fifth of free colonists plus one, per-pool required = count x 10, x 20 for pool 6, excess released, proportional fill; the `movem.l $18(a2)` copy writes medics, scientists and security to `$1313E/$13142/$13146`). Matches.
+- Construction completion `$703A`, `$75D4` flag count (centre plus eight neighbours; bit 15 for mines, bit 11 for fuel) and the warehouse capacity step `+80000`. Matches. Demolition is in `building.md` (a cleared-tile fix was made here).
+- Earth offers: colonists `$110FE` (population / 4 at 100 Gr, not overcrowded, price below money), scientists `$111A6` (count max(scientists/4, 5), gate on the LOW BYTE `cmpi.b #$F`), tanks `$11280` (above 10 tanks, count `roll(9)+1`, fine = money / `roll(8)+2` made even, capped at 999,999 = `$F423F`). Match, including the signed-byte gate.
+- Air `$9CDA` storage (type A caps at `$13104` per building, the surplus goes to type B capped by `$13106` with the count test). Matches.
+
+**16-bit operand semantics (reproduced in code; reachability not evaluated).** `$A2DE`/`$A32C`/`$9C80`/`$9F4A`/`$10BC8` use `mulu.w`/`divu.w` on low words (for example `mulu.w d3,d2` on the units count, `divu.w d7,d2` on the total shortage, `mulu.w d2,d7` on free colonists), so quantities at or above 65536 are truncated in the original. The remake's `mulu`, `divuQ` and `divuReg` helpers (`src/game/sim-math.ts`) reproduce that truncation and the divide-overflow rule (the register keeps its old value), and `$A2DE`, `$A32C`, the `$9C80` death percentage and the `$9F4A` job requirement use them (checked by reading `src/game/sim.ts`, 2026-11-10; `$10BC8` was not re-checked). Earlier text here said the remake used 32-bit arithmetic; that was stale. `test/goods-capacity.mjs` covers the `$A2DE` overflow arithmetic and the two November endpoints; no test forces a quantity at or above 65536.
+
+**`$A2DE` capacity overflow (static disassembly, 2026-11-10; port `Sim.addGoods`).** `d2 = units x weight`; if `stored + d2 > capacity` (signed compare), `d2 = capacity - stored` and `d0 = d2 / weight` (divu low word), then the stored weight gains `d2` (so it reaches the capacity exactly) and the stock gains `d0`; `d1 = $FF` marks the overflow. The stored weight therefore keeps `d2 mod weight` kilograms that no stock holds. If the leftover is below the stored weight (capacity below stored weight, for example after a warehouse is destroyed), `divu.w` overflows and keeps the negative leftover, `ext.l` gives a negative unit count, and the stock can go negative (static, `$A30E`-`$A324`; original behaviour, not clamped). `$A360` tests `d1` after the workshop, pool 0, good 2 and ore adds and jumps to `$A44C` (message `$6C`) for the first three, skipping the later goods steps; the ore add posts `$6C` and falls through. `$9E98` (food) posts `$6D` on overflow and continues.
+
 ## 6. Per-frame routines (no simulation unless stated)
 `$6936` tile animation in the viewport (ids 1-3 cycle, 6-13 cycle); `$6540` animation blit; `$4D48` money display;
-`$4D1C` date + day-tick; `$4D96` QoL display (blink bit5 of $1581); `$5D30` four blinking UI items ($15628, 16-byte stride);
+`$4D1C` date + day-tick; `$4D96` QoL display (title flag bit 5 of $1581, flipped once per main-loop pass; game-text.md section 8); `$5D30` four blinking UI items ($15628, 16-byte stride);
 `$3310` eight markers ($14540, 10 bytes); `$16012` bitmap prep; `$333A` unit loop (sub-tick $144C9 0..8, own units move
 every 9th frame at count 8, enemy ground at count 4), sprite list at $2954A. [V]
 

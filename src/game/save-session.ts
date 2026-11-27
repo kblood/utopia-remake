@@ -1,12 +1,13 @@
-// The remake's own saved session (localStorage format version 9; field-by-field list and exclusions in
+// The remake's own saved session (localStorage format version 12; field-by-field list and exclusions in
 // notes/formats/remake-save.md). This is NOT the original's Disk.4 save record: nothing here is written to, read from or
 // compatible with Disk.4, and no original file, asset or captured RAM is stored. A save is the live state of the remake:
 //   - the flat state image, the 7500 map words, the 7650 per-cell flag bytes and the 1000 object records (verbatim),
 //   - the fixed-slot own tanks (99), enemy ground (60) / air (30) units, ships and missiles (40) with every field the
 //     step code reads, the ShipExtra of each ship (velocity, next mode, turn, reservation cell, missile target slot),
 //     the enemy system's legacy gun-countdown compatibility field and remembered launch target,
-//   - the pass clock, exact main-loop phase and a pending modal-return pass, the simulation flags (system flags, pause, queued day, warning lights, alien
+//   - the pass clock, exact main-loop phase and a pending modal-return pass, the simulation flags (system flags, pause, blast mark (version 10), queued day, warning lights, alien
 //     and meteor, spawner position, fuel warning) and the port's RNG counter,
+//   - the descriptor exchange parity of `$11024` (`tileExchange`, version 11; versions 2..10 migrate with the disk-menu value 0 and are flagged as assumed),
 //   - the eight marker pins and the view origin,
 //   - the 30 FIXED effect (explosion) slots, holes kept (version 8; versions 6 and 7 stored a dense list): the pool is
 //     gameplay-relevant because a full pool makes a combat explosion fail, which decides whether the enemy's occupancy bit is
@@ -29,12 +30,16 @@ import { EFFECT_EXPLOSION, EFFECT_EXPLOSION_HIGH, type Marker } from "./objects.
 import { isMissile, isRestoredMissile, MAX_SHIPS, type FleetRecord, type MissileRecord, type Ship } from "./sim-ships.js";
 import type { Sim } from "./sim.js";
 import type { HardwareState } from "./sim-hardware.js";
+import { isSaveName } from "./save-name.js";
 import { STATE_BYTES } from "./state.js";
 import { inMap, MAX_UNITS, Unit, UNIT_ADVANCED, UNIT_BASIC, type UnitSystem } from "./units.js";
-import { OBJECT_SIZE, OBJECT_SLOTS, type World } from "./world.js";
+import { FIXED_SOLAR_PHASE_STATE, OBJECT_SIZE, OBJECT_SLOTS, type World } from "./world.js";
 
-/** Version of the session shape below. Bump when a field is renamed, removed or changes meaning. */
-export const SESSION_VERSION = 9;
+/**
+ * Version of the session shape below. Bump when a field is renamed, removed or changes meaning. Version 12 adds the optional save
+ * name (`name`, the slot record's name field of the original; save-name.ts); versions 2..11 migrate with `name` null.
+ */
+export const SESSION_VERSION = 12;
 
 const MARKER_COUNT = 8;
 const NO_MARKER = 0xff;
@@ -165,6 +170,15 @@ export interface SavedSim {
   paused: boolean;
   /** A day change waits for the next pass (`$156A8` bit 7). */
   dayQueued: boolean;
+  /** `$156A9` bit 5, the blast mark left by a missile hit on a free slot (ship-control.md 5e); false in versions 2..9. */
+  blastMark: boolean;
+  /**
+   * The descriptor exchange of `$11024` (sim.ts `tileExchange`): the parity of the traced calls since boot. Version 11+. Versions
+   * 2..10 stored none and migrate with 0 (the disk-menu value, save.ts) and `tileExchangeAssumed` set.
+   */
+  tileExchange: boolean;
+  /** True when `tileExchange` was assumed at a migration (versions 2..10); kept true in later saves, since the traced calls cannot verify it. */
+  tileExchangeAssumed: boolean;
   /** The port's RNG counter, or null when it was not captured (a legacy save or a custom generator): the target keeps its own. */
   rng: number | null;
   /** Separate deterministic CIA/raster stand-in stream state; null for older saves or custom sources without state access. */
@@ -187,6 +201,11 @@ export interface SavedSim {
 export interface SessionSave {
   /** Index into the scenario records of Disk.2. */
   scenario: number;
+  /**
+   * The name the player gave the save (save-name.ts): 1..15 characters of the original's name table, or null for a save with no
+   * name (the direct `saveToSlot` call, and every version 2..11 save). The slot list shows it in place of the date when present.
+   */
+  name: string | null;
   scroll: { x: number; y: number };
   state: Uint8Array;
   cells: Uint16Array;
@@ -417,6 +436,7 @@ function checkArray(value: unknown, length: number, path: string, each: (item: u
 export function validateSession(save: unknown): SessionError | null {
   if (!isObject(save)) return invalid("save", "is not an object");
   if (!isInt(save.scenario, 0, 0xffff)) return invalid("scenario", "must be an integer in 0..65535");
+  if (save.name !== null && !isSaveName(save.name)) return invalid("name", "must be null or 1..15 characters from the name table (uppercase letters, digits, - = \\ , . / and space)");
   if (!isObject(save.scroll) || !isInt(save.scroll.x, 0, MAX_SCROLL_X) || !isInt(save.scroll.y, 0, MAX_SCROLL_Y)) {
     return invalid("scroll", `must be { x: 0..${MAX_SCROLL_X}, y: 0..${MAX_SCROLL_Y} }`);
   }
@@ -432,6 +452,9 @@ export function validateSession(save: unknown): SessionError | null {
   if (!isInt(sim.sysFlags, 0, 255)) return invalid("sim.sysFlags", "must be a byte");
   if (typeof sim.paused !== "boolean") return invalid("sim.paused", "must be a boolean");
   if (typeof sim.dayQueued !== "boolean") return invalid("sim.dayQueued", "must be a boolean");
+  if (typeof sim.blastMark !== "boolean") return invalid("sim.blastMark", "must be a boolean");
+  if (typeof sim.tileExchange !== "boolean") return invalid("sim.tileExchange", "must be a boolean");
+  if (typeof sim.tileExchangeAssumed !== "boolean") return invalid("sim.tileExchangeAssumed", "must be a boolean");
   if (sim.rng !== null && !isInt(sim.rng, 0, 0xffffffff)) return invalid("sim.rng", "must be null or an unsigned 32-bit integer");
   if (sim.hardware !== null && (!isObject(sim.hardware) || !isInt(sim.hardware.tod, 0, 0xffffffff) || !isInt(sim.hardware.raster, 0, 0xffffffff))) {
     return invalid("sim.hardware", "must be null or contain unsigned 32-bit tod and raster counters");
@@ -642,6 +665,7 @@ export function captureSession(parts: SessionParts, scenario: number): CaptureRe
   const clock = units?.clock ?? null;
   const save: SessionSave = {
     scenario,
+    name: null, // the caller names the save (`Game.saveToSlot`); a capture alone has no name
     scroll: { x: parts.scroll.x, y: parts.scroll.y },
     state: world.state.snapshot(),
     cells: world.cells.slice(),
@@ -649,7 +673,7 @@ export function captureSession(parts: SessionParts, scenario: number): CaptureRe
     objects: world.objects.slice(),
     world: { objectCount: world.objectCount, solarPhaseRng: world.solarPhaseRngState },
     sim: {
-      sysFlags: sim.sysFlags, paused: sim.paused, dayQueued: sim.dayQueued, rng: sim.rngState, hardware: sim.hardwareState, fuelWarned: sim.fleet.fuelWarned, lights,
+      sysFlags: sim.sysFlags, paused: sim.paused, dayQueued: sim.dayQueued, blastMark: sim.blastMark, tileExchange: sim.tileExchange, tileExchangeAssumed: sim.tileExchangeAssumed, rng: sim.rngState, hardware: sim.hardwareState, fuelWarned: sim.fleet.fuelWarned, lights,
       aliens: { alien: alien ? { x: alien.x, y: alien.y } : null, meteor: meteor ? { x: meteor.x, y: meteor.y, timer: meteor.timer } : null, groupIndex: spawner.groupIndex, cursor: spawner.cursor },
     },
     loop: { vblPerPass: loop.vblPerPass, vbls: loop.vbls, passes: loop.passes, phase: loop.updatesIntoPass, immediatePass: loop.immediatePassPending },
@@ -787,11 +811,16 @@ export function restoreSession(save: SessionSave, parts: SessionParts): RestoreR
   world.cellFlags.set(save.cellFlags);
   world.objects.set(save.objects);
   world.objectCount = save.world.objectCount;
-  if (save.world.solarPhaseRng !== null) world.restoreSolarPhaseRngState(save.world.solarPhaseRng);
+  // A save without the stream (versions 2-3, version-less) has no state to continue: the fixed state, not the scene's
+  // host-random seed (World's constructor uses Math.random for a new world), so the same slot always loads the same stream.
+  world.restoreSolarPhaseRngState(save.world.solarPhaseRng ?? FIXED_SOLAR_PHASE_STATE);
 
   sim.sysFlags = save.sim.sysFlags;
   sim.paused = save.sim.paused;
   sim.dayQueued = save.sim.dayQueued;
+  sim.blastMark = save.sim.blastMark;
+  sim.tileExchange = save.sim.tileExchange;
+  sim.tileExchangeAssumed = save.sim.tileExchangeAssumed;
   sim.pending = null;
   sim.messages.length = 0;
   sim.events.length = 0;

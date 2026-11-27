@@ -20,7 +20,7 @@ globalThis.localStorage = {
 
 const { GameState, STATE_BYTES, A: ADDR, START_YEAR } = await import("../dist/game/state.js");
 const { World, OBJECT_SLOTS, OBJECT_SIZE } = await import("../dist/game/world.js");
-const { Sim } = await import("../dist/game/sim.js");
+const { Sim, SYS } = await import("../dist/game/sim.js");
 const { UnitSystem, Unit, MAX_UNITS } = await import("../dist/game/units.js");
 const { EnemySystem, Enemy, ENEMY_AIR_TYPES, MAX_GROUND, MAX_AIR } = await import("../dist/game/enemies.js");
 const { MainLoop } = await import("../dist/game/main-loop.js");
@@ -148,13 +148,14 @@ const sameRefs = (x, y) => x.length === y.length && x.every((v, i) => v === y[i]
 const A = make();
 const tanks = populate(A);
 const S = cap(A);
-check("capture: validates, version constant is 9", validateSession(S) === null && SESSION_VERSION === 9);
+check("capture: validates, version constant is 12", validateSession(S) === null && SESSION_VERSION === 12);
 check("capture: an object layer with an empty effect pool saves 30 free slots (not null) and no slot assumption", Array.isArray(S.effectSlots) && S.effectSlots.length === 30 && S.effectSlots.every((e) => e === null) && S.effectSlotsAssumed === false);
 check("capture: tanks keep their slots, freed slots 1 and 3 are null", S.tanks.length === MAX_UNITS && S.tanks[1] === null && S.tanks[3] === null && S.tanks[0] !== null && S.tanks[2] !== null && S.tanks[4] !== null && S.tanks[4].type === 10 && S.tanks[5] === null);
 check("capture: tank fields are the live ones (target, reservation, velocity, control, recent)", S.tanks[0].targetX === 14 && S.tanks[0].targetY === 24 && S.tanks[0].reserveX === tanks[0].reserveX && S.tanks[0].vx === tanks[0].vx && S.tanks[0].control === tanks[0].control && S.tanks[0].recent.join() === tanks[0].recent.join());
 check("capture: enemy lists keep slot numbers, the freed ground slot 1 is null", S.enemies.ground.length === MAX_GROUND && S.enemies.air.length === MAX_AIR && S.enemies.ground[0] !== null && S.enemies.ground[1] === null && S.enemies.ground[2] !== null && S.enemies.air[0] !== null && S.enemies.air[1] !== null && S.enemies.air[2] === null);
 check("capture: ship list has 40 slots, freed slot 1 is null, a missile is saved as such", S.ships.length === MAX_SHIPS && S.ships[1] === null && S.ships[0].kind === "ship" && S.ships.some((s) => s && s.kind === "missile"));
 const missileAt = S.ships.findIndex((s) => s && s.kind === "missile");
+check("capture: the launched missile is saved still climbing with the traced launch direction 8 ($49E8 moveq #8,d4)", S.ships[missileAt].dir === 8 && S.ships[missileAt].mode === 4);
 check("capture: the missile keeps no class/fuel and follows enemy slot ground/2 by index (a reference, not a copy)", S.ships[missileAt].cls === null && S.ships[missileAt].fuel === null && S.ships[missileAt].extra.target.air === false && S.ships[missileAt].extra.target.index === 2);
 check("capture: a ship created after the last pass has no extra yet (lazy default is kept lazy)", S.ships.some((s) => s && s.kind === "ship" && s.extra === null) && S.ships[0].extra !== null);
 check("capture: legacy gun-countdown field and remembered launch target ($E904) are saved", typeof S.enemies.lastCountdown === "number" && S.enemies.lastTarget !== null && S.enemies.lastTarget.index === 2 && S.enemies.lastTarget.air === false);
@@ -182,13 +183,13 @@ check("capture: scenario index is the caller's", S.scenario === 2);
 
 const text = encodeSave(S);
 const parsed = JSON.parse(text);
-check("text: JSON with format and version 9, binary parts as base64 strings", parsed.format === "utopia-remake-session" && parsed.version === 9 && typeof parsed.cells === "string" && typeof parsed.cellFlags === "string" && typeof parsed.state === "string" && typeof parsed.objects === "string");
+check("text: JSON with format and version 12, binary parts as base64 strings", parsed.format === "utopia-remake-session" && parsed.version === 12 && typeof parsed.cells === "string" && typeof parsed.cellFlags === "string" && typeof parsed.state === "string" && typeof parsed.objects === "string");
 check("text: map words are explicit little-endian (first word's low byte comes first)", (() => { const c = new Uint16Array(7500); c[0] = 0x1234; const t = JSON.parse(encodeSave({ ...S, cells: c })); return atob(t.cells).charCodeAt(0) === 0x34 && atob(t.cells).charCodeAt(1) === 0x12; })());
 {
   const back = decodeSave(text);
   check("text: decode returns an equal, validated session (not legacy)", back.ok && !back.legacy && encodeSave(back.save) === text && back.save.cells instanceof Uint16Array && back.save.cellFlags instanceof Uint8Array);
 }
-check("text: nothing of the original game is stored (only the listed keys)", Object.keys(parsed).sort().join() === "cellFlags,cells,effectSlots,effectSlotsAssumed,enemies,format,loop,markers,objects,passClock,scenario,scroll,ships,sim,state,tanks,version,world");
+check("text: nothing of the original game is stored (only the listed keys)", Object.keys(parsed).sort().join() === "cellFlags,cells,effectSlots,effectSlotsAssumed,enemies,format,loop,markers,name,objects,passClock,scenario,scroll,ships,sim,state,tanks,version,world");
 
 // ---- 3. restore: occupied / freed slots, references, buffers, flags -------------------------------------------------------------
 
@@ -202,6 +203,17 @@ const restored = restoreSession(S, B);
 check("restore: ok", restored.ok, restored.ok ? "" : JSON.stringify(restored.error));
 check("restore: the restored session prints exactly like the saved one", print(B) === print(A));
 check("restore: future solar phases continue from the saved independent stream", (() => { const left = make(); const right = make(); restoreSession(S, left); restoreSession(S, right); const expected = left.world.nextSolarPhase(); return right.world.nextSolarPhase() === expected; })());
+check("restore: a save without a solar-phase stream (legacy) gives the same future phases whatever the scene's stream was", (() => {
+  const legacy = structuredClone(S);
+  legacy.world.solarPhaseRng = null;
+  const left = make();
+  const right = make();
+  left.world.restoreSolarPhaseRngState(12345); // a host-random or earlier state the scene started with
+  right.world.restoreSolarPhaseRngState(0xdeadbeef);
+  restoreSession(legacy, left);
+  restoreSession(legacy, right);
+  return left.world.solarPhaseRngState === right.world.solarPhaseRngState && left.world.nextSolarPhase() === right.world.nextSolarPhase();
+})());
 check("restore: hardware approximation continues from the saved counters", (() => { const left = make(); const right = make(); restoreSession(S, left); restoreSession(S, right); return left.sim.todLow() === right.sim.todLow() && left.sim.rasterParity() === right.sim.rasterParity(); })());
 check("restore: buffers keep their identity (units, enemies and world still share cells and flags)", B.world.cells === bufs[0] && B.world.cellFlags === bufs[1] && B.world.objects === bufs[2] && B.units.usesBuffers(B.world.cells, B.world.cellFlags) && B.enemies.isComposedOf(B.sim, B.units));
 check("restore: occupied tank slots hold new objects, freed slots 1 and 3 are null", B.units.slots[0] !== null && B.units.slots[0] !== A.units.slots[0] && B.units.slots[1] === null && B.units.slots[3] === null && B.units.slots[0].slot === 0 && B.units.slots[2].slot === 2 && B.units.slots[4].type === 10 && B.units.slots[5] === null);
@@ -578,7 +590,7 @@ function junkInto(g) {
   const textE = encodeSave(SE);
   const jsonE = JSON.parse(textE);
   const backE = decodeSave(textE);
-  check("effects text: version 9 JSON carries the 30 slots with null holes, the assumption flag, and no dense `effects` key", jsonE.version === 9 && Array.isArray(jsonE.effectSlots) && jsonE.effectSlots.length === 30 && jsonE.effectSlots[1] === null && jsonE.effectSlots[3].type === 0x14 && jsonE.effectSlots[3].lift === 34 && jsonE.effectSlots[17].frame === 3 && jsonE.effectSlotsAssumed === false && !("effects" in jsonE));
+  check("effects text: version 12 JSON carries the 30 slots with null holes, the assumption flag, and no dense `effects` key", jsonE.version === 12 && Array.isArray(jsonE.effectSlots) && jsonE.effectSlots.length === 30 && jsonE.effectSlots[1] === null && jsonE.effectSlots[3].type === 0x14 && jsonE.effectSlots[3].lift === 34 && jsonE.effectSlots[17].frame === 3 && jsonE.effectSlotsAssumed === false && !("effects" in jsonE));
   check("effects text: decode returns an equal validated session, not migrated, no assumption", backE.ok && !backE.legacy && backE.effectsAssumedEmpty === false && backE.effectSlotsAssumed === false && eqSlots(backE.save.effectSlots, expected) && encodeSave(backE.save) === textE);
 
   // restore: new objects, equal fields, same slots array, holes kept, junk gone
@@ -789,7 +801,7 @@ function junkInto(g) {
   const v6 = decodeSave(older(textE, 6));
   check("v6 migration: the dense list converts the same way and carries the same assumption", v6.ok && v6.effectSlotsAssumed === true && eqSlots(v6.save.effectSlots, v7.save.effectSlots) && v6.effectsAssumedEmpty === false);
   const v7empty = decodeSave(older(encodeSave(SEmpty), 7));
-  check("v7 migration: an EMPTY dense list converts cleanly (30 free slots, no warning)", v7empty.ok && v7empty.effectSlotsAssumed === false && v7empty.effectsAssumedEmpty === false && v7empty.save.effectSlotsAssumed === false && v7empty.save.effectSlots.length === 30 && v7empty.save.effectSlots.every((e) => e === null) && slotWarning(v7empty) === "");
+  check("v7 migration: an EMPTY dense list converts cleanly (30 free slots, no effect warning; only the parity assumption TBL UNK)", v7empty.ok && v7empty.effectSlotsAssumed === false && v7empty.effectsAssumedEmpty === false && v7empty.save.effectSlotsAssumed === false && v7empty.save.effectSlots.length === 30 && v7empty.save.effectSlots.every((e) => e === null) && slotWarning(v7empty) === " TBL UNK");
   const v7bare = decodeSave(older(encodeSave(SBare), 7));
   check("v7 migration: a session without object layer keeps effectSlots null and assumes nothing", v7bare.ok && v7bare.save.effectSlots === null && v7bare.effectSlotsAssumed === false);
   const v7missing = decodeSave(older(textE, 7, (j) => { delete j.effects; }));
@@ -813,7 +825,7 @@ function junkInto(g) {
   check("v7 durability: capturing the restored session keeps effectSlotsAssumed = true and the next first-free slot is 4", v7again.effectSlotsAssumed === true && v7again.effectSlots.slice(0, 4).every((e) => e !== null) && V7.layer.spawnEffect(0x12, 30, 30) && V7.effectPool.slots[4] !== null && V7.effectPool.slots[4].x === 30);
   const v9text = encodeSave(v7again);
   const v9back = decodeSave(v9text);
-  check("v7 durability: the version 9 text carries the flag and decoding reports the assumption again (no silent exactness)", JSON.parse(v9text).effectSlotsAssumed === true && v9back.ok && v9back.effectSlotsAssumed === true && v9back.effectsAssumedEmpty === false && JSON.parse(v9text).version === 9);
+  check("v7 durability: the version 12 text carries the flag and decoding reports the assumption again (no silent exactness)", JSON.parse(v9text).effectSlotsAssumed === true && v9back.ok && v9back.effectSlotsAssumed === true && v9back.effectsAssumedEmpty === false && JSON.parse(v9text).version === 12);
   const V7b = makeLayered();
   check("v7 durability: a second generation (restore of the version 9 text, capture again) still says assumed", v9back.ok && restoreSession(v9back.save, V7b).ok && V7b.effectPool.assumedSlots === true && cap(V7b).effectSlotsAssumed === true && encodeSave(cap(V7b)) === encodeSave(cap(V7b)));
   for (let n = 0; n < 6; n++) V7b.layer.update();
@@ -823,7 +835,7 @@ function junkInto(g) {
   check("v7 durability: restoring an exact save into a target that carried the flag clears it", restoreSession(SE, stale).ok && stale.effectPool.assumedSlots === false);
   store.set("utopia-remake-save-5", older(textE, 7));
   const sum7 = slotSummaries()[5];
-  check("v7 migration: slot summary carries the slot assumption and the label names it within 31 columns", sum7?.status === "ok" && sum7.effectSlotsAssumed === true && sum7.effectsAssumedEmpty === false && slotWarning(sum7).includes("SLOT") && ("SLOT 6  31/12/2099" + slotWarning(sum7)).length <= 31, sum7?.status === "ok" ? slotWarning(sum7) : "");
+  check("v7 migration: slot summary carries the slot assumption and the label names it within 31 columns", sum7?.status === "ok" && sum7.effectSlotsAssumed === true && sum7.effectsAssumedEmpty === false && slotWarning(sum7) === " FX/TBL UNK" && ("SLOT 6  31/12/2099" + slotWarning(sum7)).length <= 31, sum7?.status === "ok" ? slotWarning(sum7) : "");
   store.delete("utopia-remake-save-5");
 
   // text of version 9 with the flag but no records (or other malformed v9 text) is invalid, never guessed
@@ -831,8 +843,8 @@ function junkInto(g) {
   check("effects v9: a text that assumes slot numbers for an empty pool is invalid (effectSlotsAssumed)", !v8flagEmpty.ok && v8flagEmpty.error.code === "invalid" && /effectSlotsAssumed/.test(v8flagEmpty.error.message));
   const v8short = (() => { const j = JSON.parse(textE); j.effectSlots.pop(); return decodeSave(JSON.stringify(j)); })();
   check("effects v9: a text with 29 effect slots is invalid", !v8short.ok && v8short.error.code === "invalid" && /effectSlots/.test(v8short.error.message));
-  const v10 = decodeSave(older(textE, 10));
-  check("effects versions: version 10 is unsupported and the message lists versions 2 through 9", !v10.ok && v10.error.code === "unsupported-version" && v10.error.message.includes("2 through 9"));
+  const unsupported = decodeSave(older(textE, 13));
+  check("effects versions: version 13 is unsupported and the message lists versions 2 through 12", !unsupported.ok && unsupported.error.code === "unsupported-version" && unsupported.error.message.includes("2 through 12"));
 }
 
 // ---- 9c. per-slot enemy +$16 flag pointers (schema version 7) -----------------------------------------------------------------
@@ -913,8 +925,28 @@ function junkInto(g) {
   check("v7 capture: the saved pointer arrays are detached copies", SP.enemies.groundPointers[5] === 0 && SP.enemies.groundPointers !== P.enemies.groundFlagPointers);
   P.enemies.groundFlagPointers[5] = 0;
   const textP = encodeSave(SP);
-  const backP = decodeSave(textP);
-  check("v9 text: decodes equal with no assumption flags and no migration", backP.ok && !backP.legacy && backP.enemyPointersAssumed === false && backP.effectsAssumedEmpty === false && encodeSave(backP.save) === textP && JSON.parse(textP).version === 9 && backP.effectSlotsAssumed === false);
+  const v11json = JSON.parse(textP);
+  v11json.version = 11;
+  delete v11json.name;
+  const v11text = JSON.stringify(v11json);
+  const backP = decodeSave(v11text);
+  check("v11 text: migrates without assumptions and gains only the new null name field", backP.ok && !backP.legacy && backP.enemyPointersAssumed === false && backP.effectsAssumedEmpty === false && backP.save.name === null && backP.save.scenario === SP.scenario && backP.effectSlotsAssumed === false && backP.tableAssumed === false);
+  // version 10 stores the blast mark (`$156A9` bit 5); a version-9 text has none and migrates with it clear (save.ts header)
+  const markedText = encodeSave({ ...SP, sim: { ...SP.sim, blastMark: true } });
+  const markedBack = decodeSave(markedText);
+  check("version 10: the blast mark is written and decodes to true", JSON.parse(markedText).sim.blastMark === true && markedBack.ok && markedBack.save.sim.blastMark === true);
+  const MK = make();
+  check("version 10: restore puts the blast mark back and a new capture reads it again", markedBack.ok && restoreSession(markedBack.save, MK).ok && MK.sim.blastMark === true && cap(MK).sim.blastMark === true);
+  const old9 = JSON.parse(textP);
+  delete old9.sim.blastMark;
+  old9.version = 9;
+  const back9 = decodeSave(JSON.stringify(old9));
+  check("version 9 text (no blast mark) migrates with the mark clear, and is not flagged legacy", back9.ok && back9.save.sim.blastMark === false && !back9.legacy);
+  const noMark = JSON.parse(textP);
+  delete noMark.sim.blastMark;
+  const badNoMark = decodeSave(JSON.stringify(noMark));
+  check("version 10 text without the blast mark is invalid (never guessed)", !badNoMark.ok && badNoMark.error.code === "invalid" && badNoMark.error.message.includes("blastMark"));
+  check("validateSession refuses a blast mark that is not a boolean", validateSession({ ...SP, sim: { ...SP.sim, blastMark: 1 } }) !== null);
   const Q = make();
   check("v9 reload: restore ok and the whole session prints identically", backP.ok && restoreSession(backP.save, Q).ok && print(Q) === print(P) && Q.enemies.groundFlagPointers[0] === cellFlagPointer(31, 30) && Q.enemies.groundFlagPointers.join() === P.enemies.groundFlagPointers.join());
   // continuation: respawn into free slot 0 and die pre-move on both sides
@@ -1005,6 +1037,46 @@ function junkInto(g) {
   const slotVariant = { legacy: false, effectsAssumedEmpty: false, effectSlotsAssumed: true, enemyPointersAssumed: false };
   const variants = [slotVariant, { legacy: false, effectsAssumedEmpty: false, effectSlotsAssumed: true, enemyPointersAssumed: true }, { legacy: false, effectsAssumedEmpty: true, enemyPointersAssumed: true }, { legacy: false, effectsAssumedEmpty: true, enemyPointersAssumed: false }, { legacy: false, effectsAssumedEmpty: false, enemyPointersAssumed: true }, { legacy: true, effectsAssumedEmpty: false, enemyPointersAssumed: false }];
   check("slot warning: variants name the unknown state and the longest label fits 31 columns", Math.max(...variants.map((s) => ("SLOT 8  31/12/2099" + slotWarning(s)).length)) <= 31 && slotWarning(variants[2]).includes("PTR") && slotWarning(variants[0]).includes("FX") && slotWarning({ legacy: false, effectsAssumedEmpty: false, enemyPointersAssumed: false }) === "");
+
+  // Combined flags (any migration can set several at once; version-less saves carry no FX or PTR). Every reachable combination
+  // names each assumption it holds, the label fits the 31-column line, and the established single and pair wordings are unchanged.
+  const combo = (fx, ptr, tbl, v1) => ({ legacy: v1, effectsAssumedEmpty: fx === "pool", effectSlotsAssumed: fx === "slots", enemyPointersAssumed: ptr, tableAssumed: tbl });
+  const exact = [
+    [combo(null, false, false, false), ""],
+    [combo(null, false, true, false), " TBL UNK"],
+    [combo("pool", false, false, false), " FX UNKNOWN"],
+    [combo("slots", false, false, false), " FX SLOT UNK"],
+    [combo(null, true, false, false), " PTR UNKNOWN"],
+    [combo(null, false, false, true), " V1"],
+    [combo("pool", true, false, false), " FX/PTR UNK"],
+    [combo("slots", true, false, false), " FX/PTR UNK"],
+    [combo("pool", false, true, false), " FX/TBL UNK"],
+    [combo("slots", false, true, false), " FX/TBL UNK"],
+    [combo(null, true, true, false), " PTR/TBL UNK"],
+    [combo(null, false, true, true), " V1/TBL UNK"],
+    [combo("pool", true, true, false), " FX/PTR/TBL"],
+    [combo("slots", true, true, false), " FX/PTR/TBL"],
+  ];
+  for (const [summary, want] of exact) {
+    const got = slotWarning(summary);
+    check(`slot warning: ${JSON.stringify(summary)} reads ${JSON.stringify(want)}`, got === want, JSON.stringify(got));
+  }
+  let tokensNamed = true;
+  let widest = 0;
+  let combos = 0;
+  for (const fx of [null, "pool", "slots"]) for (const ptr of [false, true]) for (const tbl of [false, true]) for (const v1 of [false, true]) {
+    if (v1 && (fx || ptr)) continue;
+    const summary = combo(fx, ptr, tbl, v1);
+    const label = slotWarning(summary);
+    combos++;
+    widest = Math.max(widest, ("SLOT 8  31/12/2099" + label).length);
+    const named = (token, on) => !on || label.includes(token);
+    if (!(named("FX", fx) && named("PTR", ptr) && named("TBL", tbl) && named("V1", v1))) tokensNamed = false;
+    if (!(label === "" || label.startsWith(" "))) tokensNamed = false;
+    if (!fx && !ptr && !tbl && !v1 && label !== "") tokensNamed = false;
+  }
+  check(`slot warning: all ${combos} reachable flag combinations name every assumption they hold`, tokensNamed);
+  check(`slot warning: the widest reachable label is ${widest} columns, within 31`, combos === 14 && widest <= 31 && widest === 30, String(widest));
 }
 
 // ---- 10. Game wiring (needs the user's Disk.1 / Disk.2)-------------------------------------------------------------------------------
@@ -1016,12 +1088,13 @@ const haveData = fs.existsSync(disk1Path) && fs.existsSync(disk2Path);
 if (haveData) {
   const { GameStrings } = await import("../dist/data/gamestrings.js");
   const { Game } = await import("../dist/game/game.js");
+  const { DISK_BUTTON, DISK_MENU_BUTTONS } = await import("../dist/game/disk-menu.js");
   const disk1 = new Uint8Array(fs.readFileSync(disk1Path));
   const disk2 = new Uint8Array(fs.readFileSync(disk2Path));
   const strings = new GameStrings(disk1, 0);
   const partsOf = (map) => ({ world: map.world, sim: map.sim, loop: map.loop, units: map.objects?.units ?? null, enemies: map.enemies, markers: map.objects?.markers ?? null, effectPool: map.objects?.pool ?? null, extras: map.objects?.extra ?? null, scroll: map.scrollRef, restoredFromDisk4: map.restoredFromDisk4 });
   const gprint = (game) => encodeSave(captureSession(partsOf(game.map), game.scenario).value);
-  const newGame = (scenario) => { const g = new Game(disk1, disk2); g.strings = strings; g.stage = "scenario"; g.startScenario(scenario); return g; };
+  const newGame = (scenario) => { const g = new Game(disk1, disk2); g.strings = strings; g.bootMenuOpen = false; g.stage = "scenario"; g.startScenario(scenario); return g; };
   store.clear();
 
   const game = newGame(2);
@@ -1042,7 +1115,7 @@ if (haveData) {
   const savedText = gprint(game);
 
   check("game: save to slot 2 succeeds and records no error", game.saveToSlot(2) === true && game.lastSaveError === null && store.has("utopia-remake-save-2"));
-  check("game: the stored save is a complete session (version 9, holes kept, 30 effect slots present)", (() => { const r = readSlot(2); return r.ok && !r.legacy && r.save.scenario === 2 && r.save.tanks[hole] === null && r.save.tanks[spawned[0].slot] !== null && r.save.enemies.ground.some((e) => e) && r.save.ships.some((s) => s) && Array.isArray(r.save.effectSlots) && r.save.effectSlots.length === 30 && encodeSave(r.save) === savedText; })());
+  check("game: the stored save is a complete session (version 12, holes kept, 30 effect slots present)", (() => { const r = readSlot(2); return r.ok && !r.legacy && r.save.scenario === 2 && r.save.tanks[hole] === null && r.save.tanks[spawned[0].slot] !== null && r.save.enemies.ground.some((e) => e) && r.save.ships.some((s) => s) && Array.isArray(r.save.effectSlots) && r.save.effectSlots.length === 30 && encodeSave(r.save) === savedText; })());
   check("game: the slot list names it", game.slotLabels()[2].label.startsWith("SLOT 3  ") && !/EMPTY|UNUSABLE|V1/.test(game.slotLabels()[2].label) && /EMPTY/.test(game.slotLabels()[0].label));
   {
     const old = JSON.parse(savedText);
@@ -1050,7 +1123,7 @@ if (haveData) {
     delete old.effectSlots;
     delete old.effectSlotsAssumed;
     store.set("utopia-remake-save-3", JSON.stringify(old));
-    check("game: a migrated v5 slot visibly marks its effect and enemy-pointer state unknown", game.slotLabels()[3].label.includes("FX/PTR UNK") && game.slotLabels()[3].label.length <= 31);
+    check("game: a migrated v5 slot visibly marks its effect, enemy-pointer and parity state (FX/PTR/TBL, all three)", game.slotLabels()[3].label.includes("FX/PTR/TBL") && game.slotLabels()[3].label.length <= 31);
     const v6 = JSON.parse(savedText);
     v6.version = 6;
     v6.effects = v6.effectSlots.filter((e) => e !== null);
@@ -1059,7 +1132,7 @@ if (haveData) {
     delete v6.enemies.groundPointers;
     delete v6.enemies.airPointers;
     store.set("utopia-remake-save-3", JSON.stringify(v6));
-    check("game: a migrated v6 slot marks only the enemy-pointer state unknown", game.slotLabels()[3].label.includes("PTR UNKNOWN") && game.slotLabels()[3].label.length <= 31);
+    check("game: a migrated v6 slot marks the enemy-pointer and parity state unknown (PTR/TBL UNK)", game.slotLabels()[3].label.includes("PTR/TBL UNK") && game.slotLabels()[3].label.length <= 31);
     store.delete("utopia-remake-save-3");
   }
 
@@ -1105,14 +1178,21 @@ if (haveData) {
   freshState[0x1429e - 0x13034] = 0; freshState[0x1429e - 0x13034 + 1] = 0; // and no own ships counted
   store.set("utopia-remake-save-6", JSON.stringify({ scenario: 3, sysFlags: 1, scrollX: 30, scrollY: 20, state: b64(freshState), cells: b64(freshCells), objects: b64(fresh.map.world.objects.slice()) }));
   const lv = game.loadFromSlot(6);
-  check("game: an old version-less slot made without units loads, with a V1 label", lv === true && game.scenario === 3 && game.map.scrollX === 30 && /V1$/.test(game.slotLabels()[6].label), game.lastLoadError ? `${game.lastLoadError.code}: ${game.lastLoadError.message}` : "");
+  check("game: an old version-less slot made without units loads, with a V1/TBL UNK label", lv === true && game.scenario === 3 && game.map.scrollX === 30 && / V1\/TBL UNK$/.test(game.slotLabels()[6].label), game.lastLoadError ? `${game.lastLoadError.code}: ${game.lastLoadError.message}` : "");
 
   // ---- the disk menu itself: failed save / load show an error screen (real Game.update clicks, not direct method calls) ----
   const press = (g, row, extra = {}) => { // one fresh left click on a menu row (the menu ignores the press that opened it)
-    const at = { pointerX: 50, pointerY: 40 + 16 + row * 12 + 4, rightButton: false, ...extra };
+    // The scenario page uses the list geometry (rows at $20 + 9 n, x $38..$88); the remake pages keep their panel (12 px rows).
+    const at = g.stage === "scenario" ? { pointerX: 100, pointerY: 0x20 + row * 9 + 4, rightButton: false, ...extra } : { pointerX: 50, pointerY: 40 + 16 + row * 12 + 4, rightButton: false, ...extra };
     g.update({ ...at, leftButton: false });
     g.update({ ...at, leftButton: true });
     if (g.stage !== "map") g.update({ ...at, leftButton: false }); // never tick a map scene: the tests compare its bytes
+    if (g.stage === "save" && g.nameEntry) {
+      // Existing save-page tests model accepting the original default date with a separate click; save-name.mjs covers the editor.
+      g.update({ pointerX: 0, pointerY: 0, leftButton: false, rightButton: false, keys: [] });
+      g.update({ pointerX: 0, pointerY: 0, leftButton: true, rightButton: false, keys: [] });
+      g.update({ pointerX: 0, pointerY: 0, leftButton: false, rightButton: false, keys: [] });
+    }
   };
   const rightClick = (g) => { g.update({ pointerX: 0, pointerY: 0, leftButton: false, rightButton: false }); g.update({ pointerX: 0, pointerY: 0, leftButton: false, rightButton: true }); g.update({ pointerX: 0, pointerY: 0, leftButton: false, rightButton: false }); };
   const labels = (g) => g.menu.entries.map((e) => e.label);
@@ -1132,23 +1212,114 @@ if (haveData) {
   check("menu: LOAD GAME opens the slot list", game.stage === "load" && labels(game)[4].includes("UNUSABLE"));
   press(game, 4);
   check("menu load: a corrupt slot opens an error screen instead of silently closing", game.stage === "sloterror" && game.menu !== null && game.screen === game.menu.screen);
-  check("menu load: the screen names the operation, slot, typed code and message", /^LOAD FAILED - SLOT 5$/.test(game.menu.title) && labels(game).includes("CODE: corrupt") && labels(game).some((l) => /JSON/i.test(l)) && game.menu.entries.filter((e) => e.enabled !== false).map((e) => e.label).join("|") === "RETRY SLOT 5|CHOOSE ANOTHER SLOT|DISK MENU|BACK TO GAME");
+  check("menu load: the screen names the operation, slot, typed code and message", /^LOAD FAILED - SLOT 5$/.test(game.menu.title) && labels(game).includes("CODE: corrupt") && labels(game).some((l) => /JSON/i.test(l)) && game.menu.entries.filter((e) => e.enabled !== false).map((e) => e.label).join("|") === "RETRY SLOT 5|CHOOSE ANOTHER SLOT|DISK MENU|BACK TO DISK MENU");
   check("menu load: error fields are kept and the active map, scenario and bytes are untouched", game.lastLoadError?.code === "corrupt" && intact(game, live, livePrint, liveScenario));
   pressLabel(game, "RETRY SLOT");
   check("menu load: retrying the same bad slot fails again with the same visible error", game.stage === "sloterror" && game.lastLoadError?.code === "corrupt" && labels(game).includes("CODE: corrupt") && intact(game, live, livePrint, liveScenario));
   pressLabel(game, "CHOOSE ANOTHER SLOT");
   check("menu load: CHOOSE ANOTHER SLOT returns to the load slot list with the map kept", game.stage === "load" && intact(game, live, livePrint, liveScenario));
   press(game, 7);
-  check("menu load: an empty slot is also explained (empty), not ignored", game.stage === "sloterror" && game.lastLoadError?.code === "empty" && labels(game).includes("CODE: empty") && /SLOT 8$/.test(game.menu.title) && intact(game, live, livePrint, liveScenario));
-  pressLabel(game, "BACK TO GAME");
-  check("menu load: BACK TO GAME closes the screen on the untouched map; the error stays readable", game.stage === "map" && game.menu === null && game.lastLoadError?.code === "empty" && intact(game, live, livePrint, liveScenario));
+  check("menu load: an empty slot stays on the load list with $143 on its prompt (no error screen), the map untouched", game.stage === "load" && game.menu !== null && game.lastLoadError?.code === "empty" && game.menu.promptCodes?.join() === strings.get(0x143).join() && intact(game, live, livePrint, liveScenario));
+  check("menu load: the list keeps its EXIT row and has no error screen BACK row", labels(game).includes("EXIT") && !labels(game).includes("BACK TO DISK MENU") && !labels(game).includes("CODE: empty"));
+  rightClick(game);
+  check("menu load: right click from the list returns to the disk-menu loop (not the map), the map untouched", game.stage === "disk" && game.menu === null && game.lastLoadError?.code === "empty" && intact(game, live, livePrint, liveScenario));
   toDiskMenu(game); press(game, 1); press(game, 4);
   rightClick(game);
   check("menu load: right click on the error screen goes back to the disk menu (the original picture scene)", game.stage === "disk" && game.diskMenu !== null && game.menu === null && intact(game, live, livePrint, liveScenario));
   toDiskMenu(game); press(game, 1); press(game, 4);
   store.set("utopia-remake-save-4", store.get("utopia-remake-save-2")); // the problem is fixed while the screen is open
   pressLabel(game, "RETRY SLOT");
-  check("menu load: retry after the cause is gone loads the save (new scene, map stage, error cleared)", game.stage === "map" && game.menu === null && game.lastLoadError === null && game.scenario === 2 && game.map !== live && gprint(game) === savedText);
+  // The retry builds the save and holds it behind the disk menu (original `$8828` returns to the loop `$7EF6` and prints "Game loaded.
+  // Select 'EXIT' to play."); the map stays the live one until the exit icon (`$802C`) enters it.
+  check("menu load: retry after the cause is gone builds the save and holds it behind the disk menu (stage disk, error cleared)", game.stage === "disk" && game.menu === null && game.lastLoadError === null && game.heldScene?.index === 2 && game.map === live);
+  const exit = DISK_MENU_BUTTONS[DISK_BUTTON.exit];
+  const exitAt = (leftButton) => ({ leftButton, rightButton: false, pointerX: exit.x0 + 16, pointerY: exit.y0 + 16, keys: [] });
+  const heldLoadPasses = game.heldScene.map.loop.passes; // the restored count; EXIT runs one immediate pass (game.ts enterHeldScene)
+  game.update(exitAt(true)); game.update(exitAt(true)); game.update(exitAt(false));
+  check("menu load: EXIT enters the loaded save (new scene, map stage, nothing held) and runs its one immediate pass", game.stage === "map" && game.scenario === 2 && game.map !== live && game.heldScene === null && game.map.loop.passes === heldLoadPasses + 1);
+
+  // Load refusals and their BACK (original `$85FE`/`$8804`: a refused load returns to the loop `$7EF6`; only EXIT leaves it).
+  // `leaveDiskMenu` is the exit's effect (the eclipse exchange), so it is counted: no refusal may run it, EXIT runs it once.
+  {
+    const cur = game.map;
+    const curPrint = gprint(game);
+    const curScenario = game.scenario;
+    let exitEffects = 0;
+    const realLeave = cur.sim.leaveDiskMenu;
+    cur.sim.leaveDiskMenu = () => { exitEffects += 1; realLeave.call(cur.sim); };
+    const same = () => intact(game, cur, curPrint, curScenario) && game.heldScene === null;
+    // corrupt (the remake's typed error for an unreadable slot): BACK
+    store.set("utopia-remake-save-4", "{oops");
+    toDiskMenu(game); press(game, 1); press(game, 4);
+    check("load refusals: a corrupt slot shows CODE: corrupt on the error screen", game.stage === "sloterror" && game.lastLoadError?.code === "corrupt" && labels(game).includes("CODE: corrupt") && same());
+    pressLabel(game, "BACK TO DISK MENU");
+    check("load refusals: corrupt -> BACK TO DISK MENU returns to the loop with no exit effect", game.stage === "disk" && game.menu === null && game.diskMenu !== null && exitEffects === 0 && same());
+    // unsupported version: RETRY fails again with the same code, then BACK
+    store.set("utopia-remake-save-4", JSON.stringify({ ...JSON.parse(savedText), version: 99 }));
+    toDiskMenu(game); press(game, 1); press(game, 4);
+    check("load refusals: an unsupported-version slot shows CODE: unsupported-version", game.stage === "sloterror" && game.lastLoadError?.code === "unsupported-version" && labels(game).includes("CODE: unsupported-version") && same());
+    pressLabel(game, "RETRY SLOT");
+    check("load refusals: RETRY on the unsupported slot fails again (same code) and writes nothing", game.stage === "sloterror" && game.lastLoadError?.code === "unsupported-version" && same() && store.get("utopia-remake-save-4") === JSON.stringify({ ...JSON.parse(savedText), version: 99 }));
+    pressLabel(game, "BACK TO DISK MENU");
+    check("load refusals: unsupported-version -> BACK TO DISK MENU returns to the loop with no exit effect", game.stage === "disk" && game.menu === null && exitEffects === 0 && same());
+    // empty slot: the list stays with `$143` (the original's EMPT check, mode 2 kept), another attempt refuses again, a right click
+    // returns to the loop, and only EXIT runs the exit effect
+    toDiskMenu(game); press(game, 1); press(game, 7);
+    check("load refusals: an empty slot keeps the list with $143 on its prompt (no CODE error screen)", game.stage === "load" && game.lastLoadError?.code === "empty" && game.menu.promptCodes?.join() === strings.get(0x143).join() && same());
+    press(game, 7);
+    check("load refusals: another attempt on the empty slot refuses again and the list stays", game.stage === "load" && game.lastLoadError?.code === "empty" && same());
+    rightClick(game);
+    check("load refusals: right click from the list returns to the loop; the map is not left and no exit effect ran", game.stage === "disk" && game.menu === null && exitEffects === 0 && same());
+    game.update(exitAt(true)); game.update(exitAt(true)); game.update(exitAt(false));
+    // Not a byte comparison: the in-game exit arms the map's immediate pass, which runs on the next update (the session changes by design).
+    check("load refusals: EXIT from the loop enters the same map (stage map, nothing held) and runs its exit effect once", game.stage === "map" && game.map === cur && game.heldScene === null && exitEffects === 1);
+    cur.sim.leaveDiskMenu = realLeave;
+    store.delete("utopia-remake-save-4");
+  }
+
+  // Visual and state regression of the load page after a refused EMPTY row (the list stays, with `$143`) and of the corrupt error page,
+  // both opened from the DISK ICON. REMAKE baselines, not original captures: the original keeps the list rows after a refused load
+  // (game-proper.md, "Load failure and return"); the remake's list page is its own MenuScene and does not draw those rows, and its
+  // corrupt error page is its own MenuScene (remake-save.md, "Disk menu behaviour on failure"). The pinned hashes below freeze THESE
+  // pages; they must be re-captured when a page is changed on purpose.
+  // Also checked: BACK redraws the disk-menu loop exactly as a fresh one, and no refusal ticks the map or changes its bytes.
+  {
+    const { DiskMenuScene } = await import("../dist/game/disk-menu.js");
+    const fnv = (pixels) => { let h = 0x811c9dc5; for (const v of pixels) h = Math.imul(h ^ v, 0x01000193) >>> 0; return h.toString(16).padStart(8, "0"); };
+    const PINNED = { corrupt: "5bd3e842", empty: "5dd860c5" };
+    const cur = game.map;
+    const curPrint = gprint(game);
+    const curScenario = game.scenario;
+    const passes0 = cur.loop.passes;
+    const freshLoop = () => fnv(new DiskMenuScene(disk1, strings).screen.pixels);
+    const openLoadIcon = () => {
+      game.openDiskMenu(); // the loop without the map's enterDiskMenu exchange: only the refusal is under test
+      const b = DISK_MENU_BUTTONS[DISK_BUTTON.load];
+      const at = (leftButton) => ({ leftButton, rightButton: false, pointerX: b.x0 + 8, pointerY: b.y0 + 8, keys: [] });
+      game.update(at(false)); game.update(at(true)); game.update(at(false));
+    };
+    const untouched = () => game.map === cur && gprint(game) === curPrint && cur.loop.passes === passes0 && game.scenario === curScenario && game.heldScene === null;
+
+    store.set("utopia-remake-save-4", "{oops");
+    openLoadIcon(); press(game, 4);
+    check("visual: a corrupt slot from the disk icon opens its error page (CODE: corrupt)", game.stage === "sloterror" && game.lastLoadError?.code === "corrupt" && labels(game).includes("CODE: corrupt") && untouched());
+    // The load row is chosen on its release, so this page is created by the release frame and draws its hover (the RETRY row under the
+    // pointer) on the next update, as any remake page does. One idle frame, then the pinned baseline (the pixels are otherwise unchanged).
+    game.update({ pointerX: 50, pointerY: 40 + 16 + 4 * 12 + 4, leftButton: false, rightButton: false, keys: [] });
+    const corruptHash = fnv(game.screen.pixels);
+    check("visual: the corrupt error page matches its pinned remake baseline", corruptHash === PINNED.corrupt, `(${corruptHash})`);
+    pressLabel(game, "BACK TO DISK MENU");
+    check("visual: BACK from the corrupt error redraws the disk-menu loop exactly as a fresh one", game.stage === "disk" && fnv(game.screen.pixels) === freshLoop() && untouched());
+    store.delete("utopia-remake-save-4");
+
+    openLoadIcon(); press(game, 7);
+    check("visual: an empty slot from the disk icon keeps the load list with $143 (no error screen)", game.stage === "load" && game.lastLoadError?.code === "empty" && game.menu.promptCodes?.join() === strings.get(0x143).join() && untouched());
+    const emptyHash = fnv(game.screen.pixels);
+    check("visual: the empty-refusal list matches its pinned remake baseline", emptyHash === PINNED.empty, `(${emptyHash})`);
+    check("visual: the empty-refusal list and the corrupt error page differ", emptyHash !== corruptHash);
+    rightClick(game);
+    check("visual: a right click from the empty-refusal list redraws the disk-menu loop exactly as a fresh one, the map untouched", game.stage === "disk" && fnv(game.screen.pixels) === freshLoop() && untouched());
+  }
 
   // failed SAVE: the storage refuses the write
   live = game.map; livePrint = gprint(game); liveScenario = game.scenario;
@@ -1165,7 +1336,9 @@ if (haveData) {
   check("menu save: retry while the storage still refuses stays on the error screen", game.stage === "sloterror" && game.lastSaveError?.code === "write-failed" && !store.has("utopia-remake-save-7"));
   failWrites = false;
   pressLabel(game, "RETRY SLOT");
-  check("menu save: retry after the storage recovers saves, closes to the map and clears the error", game.stage === "map" && game.menu === null && game.lastSaveError === null && readSlot(7).ok && intact(game, live, livePrint, liveScenario));
+  // A save from the remake submenu keeps its save page up with `$141` (the save page is kept for every origin; game-proper.md, "Save tail").
+  const onSavedPage = (g) => g.stage === "save" && g.menu !== null && g.diskMenu === null && g.menu.promptCodes?.join() === g.strings.get(0x141).join();
+  check("menu save: retry after the storage recovers saves, keeps the save page with $141 and clears the error", onSavedPage(game) && game.lastSaveError === null && readSlot(7).ok && intact(game, live, livePrint, liveScenario));
   failWrites = true;
   toDiskMenu(game); press(game, 0); press(game, 6);
   pressLabel(game, "DISK MENU");
@@ -1175,7 +1348,9 @@ if (haveData) {
   failWrites = false;
   check("menu save: CHOOSE ANOTHER SLOT returns to the save slot list", game.stage === "save" && game.menu.title === "SAVE GAME - REMAKE SLOTS");
   press(game, 6);
-  check("menu save: a successful save from the menu still closes to the map without an error screen", game.stage === "map" && game.lastSaveError === null && readSlot(6).ok);
+  check("menu save: a successful save from the menu keeps the save page with $141, without an error screen", onSavedPage(game) && game.lastSaveError === null && readSlot(6).ok && intact(game, live, livePrint, liveScenario));
+  rightClick(game); // BACK from the saved page: the disk picture (the submenu's picture), with $141 on its prompt
+  check("menu save: BACK from the saved page returns to the disk picture with $141 on its prompt", game.stage === "disk" && game.diskMenu !== null && game.diskMenu.promptIndex === 0x141 && intact(game, live, livePrint, liveScenario));
 
   // a refused save that comes from the session (pending Earth offer): the same screen, typed offer-pending
   game.map.sim.pending = { offer: { what: "tanks", count: 1, price: 1 }, apply: () => {} };
@@ -1183,7 +1358,9 @@ if (haveData) {
   toDiskMenu(game); press(game, 0); press(game, 2);
   check("menu save: a pending Earth offer is explained on the error screen and nothing is written", game.stage === "sloterror" && labels(game).includes("CODE: offer-pending") && store.get("utopia-remake-save-2") === before2);
   game.map.sim.pending = null;
-  pressLabel(game, "BACK TO GAME");
+  check("menu save: a save error's BACK goes to the disk-menu loop, not the game", labels(game).includes("BACK TO DISK MENU") && !labels(game).includes("BACK TO GAME"));
+  pressLabel(game, "BACK TO DISK MENU");
+  check("menu save: BACK TO DISK MENU returns to the loop with the map kept", game.stage === "disk" && intact(game, live, livePrint, liveScenario));
 
   // very long messages are wrapped and truncated, never wider than the panel
   game.openSlotErrorMenu("load", 0, { code: "invalid", message: `tanks[0].${"x".repeat(80)} ${"word ".repeat(60)}` });
@@ -1197,7 +1374,7 @@ if (haveData) {
   check("storage off: no slot label says EMPTY and each says STORAGE OFF", game.slotLabels().every((s, i) => /STORAGE OFF/.test(s.label) && !/EMPTY/.test(s.label) && s.label.startsWith(`SLOT ${i + 1}`)));
   live = game.map; livePrint = gprint(game); liveScenario = game.scenario;
   toDiskMenu(game); press(game, 1);
-  check("storage off: the load list shows STORAGE OFF", game.stage === "load" && labels(game).every((l) => /STORAGE OFF/.test(l)));
+  check("storage off: the load list shows STORAGE OFF (its slot rows; EXIT is the page's own row)", game.stage === "load" && labels(game).filter((l) => l !== "EXIT").every((l) => /STORAGE OFF/.test(l)));
   press(game, 0);
   check("storage off: loading explains no-storage and keeps the map", game.stage === "sloterror" && game.lastLoadError?.code === "no-storage" && labels(game).includes("CODE: no-storage") && intact(game, live, livePrint, liveScenario));
   pressLabel(game, "DISK MENU");
@@ -1205,8 +1382,29 @@ if (haveData) {
   check("storage off: saving explains no-storage and keeps the map", game.stage === "sloterror" && game.lastSaveError?.code === "no-storage" && /^SAVE FAILED/.test(game.menu.title) && intact(game, live, livePrint, liveScenario));
   globalThis.localStorage = realStorage;
   pressLabel(game, "RETRY SLOT");
-  check("storage off: after the storage returns, retry saves", game.stage === "map" && game.lastSaveError === null && readSlot(0).ok);
+  check("storage off: after the storage returns, retry saves and keep the save page with $141", game.stage === "save" && game.lastSaveError === null && readSlot(0).ok && game.menu.promptCodes?.join() === game.strings.get(0x141).join());
   check("storage back: slot 1 is a real save and an untouched slot is EMPTY again", !/EMPTY|STORAGE OFF/.test(game.slotLabels()[0].label) && /EMPTY/.test(game.slotLabels()[3].label));
+
+  // A held scene (a load that waits for EXIT behind the disk menu) is not the game: BACK on a load error screen returns to the disk
+  // menu, so its label must say so, and the scene stays held until EXIT (Game.closeMenu, `heldScene` branch).
+  game.menu = null; game.stage = "map";
+  check("held: a load holds its scene behind the disk menu", game.loadFromSlot(2, true) === true && game.stage === "disk" && game.heldScene?.index === 2);
+  // Original `$88CA` prints `$145` on the list prompt (`$8462`), then `bra $82B8` runs `$84F4`, which erases both prompt lines in the
+  // same handler (game-proper.md, "Load success message"). `$8462` prints after a VBL wait and `$84F4` erases after the next one, so the
+  // original's text is up for at most one frame; the remake draws none (not modelled). The check pins the remake's no-message state.
+  check("held: a load pick shows no message (the original's $145 is up for one VBL; the remake models no frame)",game.diskMenu.shownInfo.join() === "0,0" && game.diskMenu.shownPrompt.join() === "0,0" && game.diskMenu.infoFramesLeft === 0);
+  const heldMap = game.map, heldPrint = gprint(game), heldScenario = game.scenario;
+  toDiskMenu(game);
+  check("held: the remake menu offers SAVE GAME while a scene is held (the held session is what it saves)", game.menu.entries[0].enabled !== false && game.menu.entries[0].label === "SAVE GAME");
+  press(game, 1);
+  press(game, 3); // slot 4: empty (the storage check above leaves it untouched; slot 8 holds a retried save)
+  check("held: a refused empty load keeps the load list with $143 over the held state (no error screen)", game.stage === "load" && game.lastLoadError?.code === "empty" && intact(game, heldMap, heldPrint, heldScenario) && game.heldScene?.index === 2 && game.menu.promptCodes?.join() === strings.get(0x143).join());
+  check("held: the retained list keeps its EXIT row", labels(game).includes("EXIT"));
+  rightClick(game);
+  check("held: a right click returns to the disk menu and the scene stays held", game.stage === "disk" && game.menu === null && game.heldScene?.index === 2 && intact(game, heldMap, heldPrint, heldScenario));
+  const heldPasses = game.heldScene.map.loop.passes; // the restored count before EXIT
+  game.update(exitAt(true)); game.update(exitAt(true)); game.update(exitAt(false));
+  check("held: EXIT then enters the held save and runs its one immediate pass", game.stage === "map" && game.heldScene === null && game.scenario === 2 && game.map.loop.passes === heldPasses + 1);
 
   // the Disk.4 restriction stays: the SAVE entry cannot be activated from the menu at all
   game.disk4Session = { slot: 0, name: "X", scenario: 2, scenarioName: "X", scenarioBy: "caller", diskSource: {}, sourceLabel: "x", view: { x: 0, y: 0, clamped: false } };
@@ -1215,8 +1413,273 @@ if (haveData) {
   press(game, 0);
   check("menu: with a Disk.4 session the SAVE entry is disabled and a click opens neither the slot list nor a save", game.stage === "remake" && game.menu.entries[0].enabled === false && /DISK\.4/.test(game.menu.entries[0].label) && store.get("utopia-remake-save-1") === slot1Before);
   game.disk4Session = null; game.menu = null; game.stage = "map";
+
+  // Game over ($156AA bit 3, the original's $856C -> $18A): the REMAKE MENU save entry is off, the click opens no slot list, and
+  // the direct save path refuses with the typed code game-over without writing. The icon path prints $18A (game-music.mjs).
+  const overMap = game.map;
+  const slot3Before = store.get("utopia-remake-save-3");
+  overMap.sim.sysFlags |= SYS.gameOver;
+  toDiskMenu(game);
+  check("game over: the REMAKE MENU save entry is off and labelled GAME OVER", game.stage === "remake" && game.menu.entries[0].enabled === false && game.menu.entries[0].label === "SAVE GAME (OFF: GAME OVER)");
+  press(game, 0);
+  check("game over: a click on the off entry opens no slot list and writes nothing", game.stage === "remake" && store.get("utopia-remake-save-3") === slot3Before);
+  check("game over: the direct save path refuses (game-over), writes nothing, keeps the map", game.saveToSlot(3) === false && game.lastSaveError?.code === "game-over" && store.get("utopia-remake-save-3") === slot3Before && game.map === overMap);
+  game.menu = null; game.stage = "map";
+  game.disk4Session = { slot: 0, name: "X", scenario: 2, scenarioName: "X", scenarioBy: "caller", diskSource: {}, sourceLabel: "x", view: { x: 0, y: 0, clamped: false } };
+  toDiskMenu(game);
+  check("game over with a Disk.4 session: the entry reads GAME OVER too (checked first, as on the icon) and stays off", game.menu.entries[0].enabled === false && game.menu.entries[0].label === "SAVE GAME (OFF: GAME OVER)");
+  game.disk4Session = null; game.menu = null; game.stage = "map";
+  overMap.sim.sysFlags &= ~SYS.gameOver;
+  toDiskMenu(game);
+  check("game over cleared: the REMAKE MENU save entry is on again", game.menu.entries[0].enabled !== false && game.menu.entries[0].label === "SAVE GAME");
+  game.menu = null; game.stage = "map";
+
+  // Game over with an empty slot in the load list (SLOT 4): the refusal keeps the list over the game-over session (`$143`), and a right
+  // click returns to the disk-menu loop, which the game-over session stays live under.
+  store.delete("utopia-remake-save-3");
+  const overLive = game.map;
+  overLive.sim.sysFlags |= SYS.gameOver; // set before the snapshot: the printed session includes the flag
+  const overPrint = gprint(game), overScenario = game.scenario;
+  toDiskMenu(game);
+  check("game over load: the REMAKE MENU LOAD entry stays open (only SAVE is off)", game.menu.entries[1].enabled !== false && /LOAD/.test(game.menu.entries[1].label));
+  press(game, 1);
+  press(game, 3);
+  check("game over load: an empty slot keeps the load list with $143 over the game-over session, nothing loaded", game.stage === "load" && game.lastLoadError?.code === "empty" && intact(game, overLive, overPrint, overScenario) && game.menu.promptCodes?.join() === strings.get(0x143).join());
+  rightClick(game);
+  check("game over load: right click opens the disk menu (not the map); the game-over session is still live and unchanged", game.stage === "disk" && game.menu === null && game.diskMenu !== null && game.map === overLive && overLive.sim.gameOver && intact(game, overLive, overPrint, overScenario));
+  overLive.sim.sysFlags &= ~SYS.gameOver; // leave the wiring block as the other checks expect it
+  game.diskMenu = null; game.diskMenuFromTail = false; game.menu = null; game.stage = "map";
+
+  // Held load presentation (2026-11-13): the scene built for a load is drawn at construction from the scenario's default state, and a
+  // restore replaces that state afterwards. A save taken after passes stores no pending immediate pass, so EXIT shows the default
+  // picture until the first pass unless the restored state is presented at once. The saved descriptor parity must show in the view
+  // at once too. Parity 1 is hand-set here (the menu stores 0 for every UI save), so the check is that the view follows the value.
+  {
+    const sameFrame = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+    const idleInput = { pointerX: 0, pointerY: 0, leftButton: false, rightButton: false, keys: [] };
+    const src = newGame(2);
+    for (let i = 0; i < 9; i++) src.update(idleInput);
+    src.map.scrollX = 30; src.map.scrollY = 20;
+    src.map.sim.tileExchange = true;
+    check("held load: the source session has no pending immediate pass and the exchanged parity", src.map.loop.immediatePassPending === false && src.map.sim.tileExchange === true);
+    check("held load: the source session saves", src.saveToSlot(6) === true);
+    const reference = newGame(2); // the default picture and the unexchanged tiles of the scenario, as a new game shows them
+    const defaultFrame = reference.map.screen.pixels.slice();
+    const held = newGame(0);
+    check("held load: the load holds its scene behind the disk menu", held.loadFromSlot(6, true) === true && held.stage === "disk" && held.heldScene?.index === 2);
+    held.diskIcon(DISK_BUTTON.exit);
+    check("held load: EXIT enters the loaded scene at its saved view", held.stage === "map" && held.map.scrollX === 30 && held.map.scrollY === 20);
+    check("held load: the frame shown on EXIT is the loaded state, not the default scenario picture", !sameFrame(held.map.screen.pixels, defaultFrame));
+    check("held load: the descriptor view follows the restored parity at once (entry 4 holds tile 51's address)", held.map.tiles[4].source?.offset === reference.map.tiles[51].source?.offset);
+
+    // A right click on a save or load slot list returns to the disk menu (game.ts `case "save"` / `case "load"`), with the map kept.
+    const before = held.map;
+    held.openMapDiskMenu();
+    held.diskIcon(DISK_BUTTON.load);
+    check("slot list: the load list is open over the disk menu", held.stage === "load");
+    rightClick(held);
+    check("slot list: right click returns to the disk menu and keeps the map", held.stage === "disk" && held.menu === null && held.map === before);
+    held.diskIcon(DISK_BUTTON.exit);
+    check("slot list: EXIT then returns to the map", held.stage === "map" && held.map === before);
+  }
+
+  // Held load, first pass (static trace, 2026-11-13): `$8828` and `$88F0` both return into the disk-menu loop and leave through the
+  // same `$802C` rts, so EXIT on a held load runs the immediate first map pass like a held scenario pick (`freshScenario`). The
+  // restored state has no pending pass (the save stores none), so only `enterHeldScene` arms it. The next update consumes it once.
+  {
+    const idleInput = { pointerX: 0, pointerY: 0, leftButton: false, rightButton: false, keys: [] };
+    const timed = newGame(0);
+    check("held load pass: the saved slot 6 holds the load", timed.loadFromSlot(6, true) === true && timed.stage === "disk" && timed.heldScene?.index === 2);
+    const heldPasses = timed.heldScene.map.loop.passes;
+    check("held load pass: no pass is armed while the load is held", timed.heldScene.map.loop.immediatePassPending === false);
+    timed.diskIcon(DISK_BUTTON.exit);
+    check("held load pass: EXIT arms the immediate pass on the entered scene", timed.stage === "map" && timed.map.loop.immediatePassPending === true);
+    timed.update(idleInput);
+    check("held load pass: the first update runs exactly one pass (the saved phase is not advanced twice)", timed.map.loop.passes === heldPasses + 1 && timed.map.loop.immediatePassPending === false);
+  }
+
+  // In-game icon exit, first pass (static trace, 2026-11-13): the map icon `$15AE6` calls `$7E52`, and its exit returns through `$15AEC`
+  // (`$15EF0`), `rts`, the keyboard poll `$15B4A` and `bra $157BC`. That resumes the loop at its top, as a held scene's exit does, so the
+  // remake arms the immediate pass on it. The open menu runs no pass; a save stores none; a refused exit (game over) arms nothing.
+  {
+    const idleInput = { pointerX: 0, pointerY: 0, leftButton: false, rightButton: false, keys: [] };
+    const at = (i) => ({ pointerX: DISK_MENU_BUTTONS[i].x0 + 16, pointerY: DISK_MENU_BUTTONS[i].y0 + 16, rightButton: false, keys: [] });
+    // one released frame, then a press, a held frame and the release (the release runs the icon, as in the disk-menu tests)
+    const clickIcon = (g, i) => {
+      g.update({ ...at(i), leftButton: false });
+      g.update({ ...at(i), leftButton: true });
+      g.update({ ...at(i), leftButton: true });
+      g.update({ ...at(i), leftButton: false });
+    };
+    const settle = (g, n) => { for (let i = 0; i < n; i++) g.update(idleInput); };
+
+    // (a) a running scenario: the map icon opens the menu, EXIT resumes the loop with one immediate pass
+    const game = newGame(0);
+    settle(game, 9);
+    const scene = game.map;
+    const before = scene.loop.passes;
+    game.openMapDiskMenu();
+    game.update(idleInput);
+    check("in-game icon exit: the open disk menu holds the map and runs no pass", game.stage === "disk" && scene.loop.passes === before && scene.loop.immediatePassPending === false);
+    clickIcon(game, DISK_BUTTON.exit);
+    check("in-game icon exit: EXIT returns to the same map scene", game.stage === "map" && game.map === scene);
+    check("in-game icon exit: the EXIT update runs exactly one pass and clears the flag", scene.loop.passes === before + 1 && scene.loop.immediatePassPending === false);
+    // The immediate pass counts one video update of the cadence (MapScene's `vbl(true)` after the pass), so the next pass is three updates on.
+    const cadence = [];
+    for (let i = 0; i < 3; i++) { game.update(idleInput); cadence.push(scene.loop.passes); }
+    check("in-game icon exit: the next pass follows the cadence (none in the next two updates, one on the third)", cadence.join() === [before + 1, before + 1, before + 2].join(), cadence.join());
+
+    // (b) a saved session has no pending pass; an in-game load is held until EXIT, and that EXIT runs one pass on the restored count
+    const saved = newGame(2);
+    settle(saved, 9);
+    check("in-game load: the source session saves", saved.saveToSlot(6) === true);
+    const live = newGame(0);
+    settle(live, 5);
+    const liveScene = live.map;
+    live.openMapDiskMenu();
+    check("in-game load: the saved slot holds the load behind the open disk menu", live.loadFromSlot(6, true) === true && live.stage === "disk" && live.heldScene?.index === 2);
+    const loaded = live.heldScene.map;
+    const restored = loaded.loop.passes;
+    check("in-game load: the held load arms no pass and the live map is still the entered one", live.map === liveScene && loaded.loop.immediatePassPending === false);
+    live.update(idleInput);
+    clickIcon(live, DISK_BUTTON.exit);
+    check("in-game load: EXIT enters the loaded scene", live.stage === "map" && live.map === loaded);
+    check("in-game load: the exit update runs exactly one pass on the restored count", loaded.loop.passes === restored + 1 && loaded.loop.immediatePassPending === false);
+
+    // (c) an in-game scenario pick is held until EXIT, then the new scene runs its immediate pass (built with `freshScenario`).
+    // The list stays open after a pick; the remake's right click returns to the disk menu, where EXIT is.
+    const pickBackToDisk = (g) => { g.update(idleInput); g.update({ ...idleInput, rightButton: true }); g.update(idleInput); };
+    const pick = newGame(0);
+    settle(pick, 5);
+    pick.openMapDiskMenu();
+    pick.update(idleInput);
+    pick.diskIcon(DISK_BUTTON.scenario); pick.update({ pointerX: 0, pointerY: 0, leftButton: true, rightButton: false }); pick.update({ pointerX: 0, pointerY: 0, leftButton: false, rightButton: false }); // the wait's press opens the list
+    press(pick, 2); // the list's rows are the bare record names in order (row 2 = record 2)
+    check("in-game scenario pick: the chosen scene is held and the list stays open", pick.stage === "scenario" && pick.heldScene?.index === 2);
+    const chosen = pick.heldScene.map;
+    check("in-game scenario pick: nothing runs before EXIT", chosen.loop.passes === 0 && chosen.loop.immediatePassPending === true);
+    pickBackToDisk(pick);
+    check("in-game scenario pick: the right click is a no-op on the list (no original route): still listed, the scene still held", pick.stage === "scenario" && pick.heldScene?.index === 2);
+    pick.update(idleInput);
+    clickIcon(pick, DISK_BUTTON.exit);
+    check("in-game scenario pick: EXIT enters the chosen scene and runs exactly one pass", pick.stage === "map" && pick.map === chosen && chosen.loop.passes === 1 && chosen.loop.immediatePassPending === false);
+
+    // (d) the in-game tutorial enters at once, and its immediate pass runs on that click
+    const tut = newGame(0);
+    settle(tut, 5);
+    const tutOld = tut.map;
+    tut.openMapDiskMenu();
+    tut.update(idleInput);
+    clickIcon(tut, DISK_BUTTON.tutorial);
+    check("in-game tutorial: the click enters the tutorial scene and runs exactly one pass", tut.stage === "map" && tut.map !== tutOld && tut.map.loop.passes === 1 && tut.map.loop.immediatePassPending === false);
+
+    // (e) a game over refuses the exit (`$802C` bit 3): the menu stays open and nothing is armed
+    const over = newGame(0);
+    settle(over, 5);
+    over.openMapDiskMenu();
+    over.update(idleInput);
+    over.map.sim.sysFlags |= SYS.gameOver;
+    over.map.controls.mode = "build";
+    over.map.controls.selection = { tile: 0x45, type: 22 };
+    const overPasses = over.map.loop.passes;
+    clickIcon(over, DISK_BUTTON.exit);
+    check("in-game icon exit refused in game over: the menu stays open, no pass is armed or run", over.stage === "disk" && over.map.loop.immediatePassPending === false && over.map.loop.passes === overPasses);
+    check("in-game icon exit refused in game over: build mode and its selection are kept", over.map.controls.mode === "build" && over.map.controls.selection?.tile === 0x45);
+
+    // The mode icon box (x 272..303, rows 30..52) equals the given command tile over the scene's pristine picture (map-loop.mjs, section 5).
+    // The mode icon is painted on completed passes (`MapScene.drawPass`); step to the next pass so a pre-EXIT frame shows the mode in force.
+    const passFrame = (g, scene) => { const n = scene.loop.passes; for (let i = 0; i < 8 && scene.loop.passes === n; i++) g.update(idleInput); };
+    const modeIconExact = (scene, tileId) => {
+      const tile = scene.tiles[tileId - 1];
+      const planeBytes = tile.rows * 4;
+      const opaque = new Map();
+      for (let row = 0; row < tile.rows; row++) for (let px = 0; px < 32; px++) {
+        const at = row * 4 + (px >> 3), bit = 7 - (px & 7);
+        if (((tile.planes[5 * planeBytes + at] >> bit) & 1) === 0) continue;
+        let index = 0;
+        for (let p = 0; p < 5; p++) index |= ((tile.planes[p * planeBytes + at] >> bit) & 1) << p;
+        opaque.set((52 - row) * 320 + 272 + px, index);
+      }
+      let bad = 0;
+      for (let y = 30; y <= 52; y++) for (let x = 272; x <= 303; x++) {
+        const at = y * 320 + x;
+        const want = opaque.has(at) ? opaque.get(at) : scene.initialPicture[at];
+        if (scene.screen.pixels[at] !== want) bad++;
+      }
+      return bad === 0;
+    };
+
+    // (f) build mode: the in-game icon exit returns to select mode (`$15EF0`), drops the selection, and the next frame shows the select icon
+    const built = newGame(0);
+    settle(built, 5);
+    const builtScene = built.map;
+    builtScene.controls.mode = "build";
+    builtScene.controls.selection = { tile: 0x45, type: 22 };
+    passFrame(built, builtScene);
+    check("in-game icon exit, build mode: the pass before EXIT shows no select icon", !modeIconExact(builtScene, 0x39));
+    built.openMapDiskMenu();
+    built.update(idleInput);
+    const builtPasses = builtScene.loop.passes;
+    clickIcon(built, DISK_BUTTON.exit);
+    check("in-game icon exit, build mode: EXIT returns to the same map in select mode with no selection", built.stage === "map" && built.map === builtScene && builtScene.controls.mode === "select" && builtScene.controls.selection === null, `mode=${builtScene.controls.mode}`);
+    check("in-game icon exit, build mode: the EXIT update still runs exactly one pass", builtScene.loop.passes === builtPasses + 1 && builtScene.loop.immediatePassPending === false);
+    built.update(idleInput);
+    check("in-game icon exit, build mode: the next frame draws the select mode icon (tile $39)", modeIconExact(builtScene, 0x39));
+
+    // (g) demolish mode: the same exit leaves demolish mode; the demolish icon ($3A) is replaced by the select icon ($39)
+    const demolish = newGame(0);
+    settle(demolish, 5);
+    const demolishScene = demolish.map;
+    demolishScene.controls.mode = "demolish";
+    passFrame(demolish, demolishScene);
+    check("in-game icon exit, demolish mode: the pass before EXIT draws the demolish icon", modeIconExact(demolishScene, 0x3a));
+    demolish.openMapDiskMenu();
+    demolish.update(idleInput);
+    clickIcon(demolish, DISK_BUTTON.exit);
+    check("in-game icon exit, demolish mode: EXIT returns to select mode", demolish.stage === "map" && demolishScene.controls.mode === "select" && demolishScene.controls.selection === null);
+    demolish.update(idleInput);
+    check("in-game icon exit, demolish mode: the next frame draws the select mode icon, not the demolish icon", modeIconExact(demolishScene, 0x39) && !modeIconExact(demolishScene, 0x3a));
+
+    // (h) a held scenario pick made from build mode: the new scene starts in select mode (its own controls), and the old scene is not changed
+    const heldPick = newGame(0);
+    settle(heldPick, 5);
+    const heldOld = heldPick.map;
+    heldOld.controls.mode = "build";
+    heldOld.controls.selection = { tile: 0x45, type: 22 };
+    heldPick.openMapDiskMenu();
+    heldPick.update(idleInput);
+    heldPick.diskIcon(DISK_BUTTON.scenario); heldPick.update({ pointerX: 0, pointerY: 0, leftButton: true, rightButton: false }); heldPick.update({ pointerX: 0, pointerY: 0, leftButton: false, rightButton: false }); // the wait's press opens the list
+    press(heldPick, 2); // row 2 = record 2 (the list's rows are the bare record names)
+    heldPick.update(idleInput);
+    heldPick.update(idleInput);
+    heldPick.update({ ...idleInput, rightButton: true });
+    heldPick.update(idleInput);
+    clickIcon(heldPick, DISK_BUTTON.exit);
+    check("in-game scenario pick from build mode: EXIT enters a scene in select mode with no selection", heldPick.stage === "map" && heldPick.map !== heldOld && heldPick.map.controls.mode === "select" && heldPick.map.controls.selection === null);
+  }
 } else {
   console.log("skip game wiring checks: original data not found");
+}
+
+// ---- 10. an event-17 converted tank (enemies.md 7): its copied fields are saved and restored as ordinary enemy fields ------------
+{
+  const SRC = make();
+  const t = SRC.units.spawn(9, 20, 20, 3); // control $FF: waiting, as a fresh tank
+  t.dx = 2; t.dy = -3; t.hp = 5; t.tech = 1; t.targetX = 30; t.targetY = 31;
+  SRC.world.state.setByte(0x145a3, 7);
+  SRC.enemies.defect();
+  const saved = cap(SRC);
+  const slot = saved.enemies.ground.findIndex((e) => e !== null);
+  const rec = saved.enemies.ground[slot] ?? {};
+  check("defect save: the converted record stores waiting, mode $7F, pixel offset, tech, target and the damage byte",
+    slot === 0 && rec.type === 9 && rec.waiting === true && rec.mode === 0x7f && rec.dx === 2 && rec.dy === -3 && rec.tech === 1 && rec.targetX === 30 && rec.targetY === 31 && rec.dmg === 7 && rec.bombPct === 10,
+    JSON.stringify(rec));
+  const DST = make();
+  const r = restoreSession(saved, DST);
+  const g = DST.enemies.groundSlots[slot];
+  check("defect restore: the restored enemy carries the same fields, slot pointer and session text",
+    r.ok && !!g && g.waiting && g.mode === 0x7f && g.dx === 2 && g.dy === -3 && g.tech === 1 && g.targetX === 30 && g.targetY === 31 && g.dmg === 7 && g.bombPct === 10 &&
+    DST.enemies.groundFlagPointers[slot] === SRC.enemies.groundFlagPointers[slot] && print(DST) === print(SRC), r.ok ? "" : JSON.stringify(r.error));
 }
 
 if (failed) { console.log(`\n${failed} check(s) failed`); process.exit(1); }

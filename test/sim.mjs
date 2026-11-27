@@ -284,6 +284,54 @@ for (let sc = 0; sc < records.length; sc++) {
   }
 }
 
+// --- tank yard: exit search before the unit-list test ($A620 $A6D2-$A756, then $37CA) -----------------
+// A finished unit (counter $FF) on a yard with the list holding 99 tanks, with and without a free exit, and a normal
+// placement. Goods are not touched because the counter is already $FF (only the exit and the list decide).
+{
+  const yardCase = ({ exit, tanks }) => {
+    const placed = [];
+    const { state, world } = fresh(0, 5);
+    const sim = new Sim(world, {
+      rng: createRng(5),
+      yardExit: () => exit,
+      spawnUnit: (x, y, adv) => (placed.push([x, y, adv]), true),
+    });
+    const at = world.objectCount * 8;
+    world.objects.set([0, 0x45, 0, 0xff, 52, 36, 0xff, 0], at);
+    world.objectCount++;
+    state.setWord(0x133f8, 1);
+    state.setByte(0x144c8, 0);
+    state.setWord(0x1337a, 1);
+    state.setLong(0x143fa, 10);
+    state.setLong(0x13156, 100);
+    state.setLong(0x1315e, 100);
+    state.setWord(0x1429c, tanks);
+    const made0 = state.long(0x143b6);
+    sim.tankYard();
+    return {
+      placed,
+      counter: world.objects[at + 6],
+      made: state.long(0x143b6) - made0,
+      tanks: state.word(0x1429c),
+      messages: sim.messages.slice(),
+      good1: state.long(0x13156),
+    };
+  };
+
+  const blocked = yardCase({ exit: null, tanks: 99 });
+  check("tank yard full list, no free exit: message $95 and no $8F", blocked.messages.includes(0x95) && !blocked.messages.includes(0x8f), JSON.stringify(blocked.messages));
+  check("tank yard full list, no free exit: the finished unit keeps its counter ($FF), not counted", blocked.counter === 0xff && blocked.made === 0 && blocked.placed.length === 0);
+
+  const full = yardCase({ exit: { x: 50, y: 35 }, tanks: 99 });
+  check("tank yard full list, free exit: message $8F, no unit placed, tank count stays 99", full.messages.includes(0x8f) && full.placed.length === 0 && full.tanks === 99, JSON.stringify(full.messages));
+  check("tank yard full list, free exit: counter cleared and $143B6 counted before $37CA", full.counter === 0 && full.made === 1);
+
+  const normal = yardCase({ exit: { x: 51, y: 35 }, tanks: 5 });
+  check("tank yard normal: unit placed on the exit cell (not the yard cell)", normal.placed.length === 1 && normal.placed[0][0] === 51 && normal.placed[0][1] === 35 && normal.placed[0][2] === false);
+  check("tank yard normal: tank count +1, counter cleared, $143B6 +1, no message", normal.tanks === 6 && normal.counter === 0 && normal.made === 1 && normal.messages.length === 0, JSON.stringify(normal.messages));
+  check("tank yard: goods are untouched when the counter is already $FF", normal.good1 === 100);
+}
+
 // --- mine collapse ($11090) -----------------------------------------------------------------------
 {
   const hit = [];
@@ -391,6 +439,41 @@ for (let sc = 0; sc < records.length; sc++) {
     return [state.long(A.population), state.signedLong(A.money), state.signedLong(A.morale), sim.messages.length].join(",");
   };
   check("same seed, same result", run(7) === run(7));
+}
+
+// --- $11A5C random building draw (the invasion capture's `random-building` site, $11A74) -------------------------------
+// Static Disk.1: `move.w $142C2,d2`, `cmpi.w #$FE,d2 / ble`, else D2 = $FE, `ext.l`, then `$2DCC` (result 0..range-1). The scan
+// skips `result` used records (first word non-zero) and returns the next one's cell (+4/+5) and tile word (+0); no record = null.
+{
+  const { state, world } = fresh(0, 1);
+  world.objects.fill(0);
+  const put = (slot, t0, t1, x, y) => world.objects.set([t0, t1, 0, 0, x, y, 0, 0], slot * 8);
+  put(2, 0x00, 0x20, 10, 11);
+  put(5, 0x01, 0x07, 20, 21);
+  put(9, 0x00, 0x3f, 30, 31);
+  let asked = [];
+  let answer = 0;
+  const probe = new Sim(world, { rng: (range) => (asked.push(range), answer) });
+  const draw = (count, result) => {
+    state.setWord(0x142c2, count);
+    asked = [];
+    answer = result;
+    const r = probe.randomBuilding();
+    return { r, range: asked.length === 1 ? asked[0] : `${asked.length} draws` };
+  };
+  let d = draw(3, 0);
+  check("random building: range is the object count word", d.range === 3, `range ${d.range}`);
+  check("random building: result 0 picks the first used record (cell and tile word)", JSON.stringify(d.r) === JSON.stringify([10, 11, 0x20]), JSON.stringify(d.r));
+  d = draw(3, 1);
+  check("random building: result 1 skips one used record (empty records are skipped)", JSON.stringify(d.r) === JSON.stringify([20, 21, 0x107]), JSON.stringify(d.r));
+  d = draw(3, 2);
+  check("random building: result 2 picks the third used record", JSON.stringify(d.r) === JSON.stringify([30, 31, 0x3f]), JSON.stringify(d.r));
+  d = draw(300, 0);
+  check("random building: the range word is clamped to $FE", d.range === 0xfe, `range ${d.range}`);
+  d = draw(0, 0);
+  check("random building: a zero count still makes the draw (range 0) and picks the first used record", d.range === 0 && JSON.stringify(d.r) === JSON.stringify([10, 11, 0x20]), `range ${d.range}`);
+  d = draw(3, 3);
+  check("random building: a result past the used records is not found (null, no record)", d.r === null, JSON.stringify(d.r));
 }
 
 if (failed) {

@@ -19,9 +19,9 @@ const { loadCombatTables } = await import("../dist/data/combat.js");
 const { GameState, A } = await import("../dist/game/state.js");
 const { World, T, TYPE_TABLE, TYPE_SIZE } = await import("../dist/game/world.js");
 const { Sim } = await import("../dist/game/sim.js");
-const { UnitSystem } = await import("../dist/game/units.js");
+const { UnitSystem, NO_TARGET } = await import("../dist/game/units.js");
 const { cellFlagIndex } = await import("../dist/game/cell-flags.js");
-const { EnemySystem, dirToward } = await import("../dist/game/enemies.js");
+const { EnemySystem, SHIP_ORDER, dirToward } = await import("../dist/game/enemies.js");
 
 const disk1 = new Uint8Array(fs.readFileSync(disk1Path));
 const disk2 = new Uint8Array(fs.readFileSync(disk2Path));
@@ -65,7 +65,7 @@ function fresh({ fixed = 0, tod = fixed === null ? 0 : fixed, raster = 0 } = {})
   const units = new UnitSystem(world.cells, () => 1, {
     lost: (u) => enemies.tankLeft(u),
     combat: (u, t) => enemies.tankCombat(u, t),
-  });
+  }, world.cellFlags); // the production wiring (objects.ts): one flag array shared with the world and Fleet.createShip
   const enemies = new EnemySystem(sim, units, tables, {
     explode: (x, y, lift, high) => {
       if (explodeResult.value !== false) explosions.push({ x, y, lift, high });
@@ -241,7 +241,7 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
   const hpBefore = target.hp;
   for (let i = 0; i < 4; i++) env.run(1);
   check("defection preserves the source cell and converts only the first tank", !!converted && converted.x === former.x && converted.y === former.y &&
-    !env.units.units.includes(former) && env.units.units.includes(target) && defector?.type === 9 && defector.mode === 5);
+    !env.units.units.includes(former) && env.units.units.includes(target) && defector?.type === 9 && defector.mode === 0x7f && defector.waiting);
   check("defected tank's shared attack path damages a nearby own tank on the enemy tick", !!defector && defector.waiting &&
     target.hp === hpBefore - defector.dmg && defector.dmg === 2 && env.bombs.length === 0);
 }
@@ -285,6 +285,30 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
   a.targetY = y + 6;
   env.run(300);
   check("bomber: bombs active cells it flies over", env.bombs.length >= 1);
+  check("bomber: after its attacks the aircraft step leaves +$9 bit 7 clear (bclr after $1266A, enemies.md 3d)", env.bombs.length >= 1 && a.waiting === false, `waiting ${a.waiting}`);
+}
+// Target pick with no building record (enemies.md section 3d): $119AC returns +B = $FF and sets mode 1, the walk step
+// returns on a negative +B, and the next pass sends the unit back to mode 6, so it picks again. One draw per pick.
+{
+  const env = fresh({ fixed: 0 });
+  env.world.objects.fill(0); // no used object record: the scan runs out
+  const rolls = [];
+  env.sim.rng = (range) => (rolls.push(range), 0);
+  const { x, y } = freeArea(env.world);
+  const g = spawn(env, false, 22, x + 5, y + 5, 0);
+  g.mode = 6;
+  env.run(1);
+  check("target pick miss (walker): mode 1 with +B = $FF", g.mode === 1 && g.targetX === NO_TARGET, `mode ${g.mode} tx ${g.targetX}`);
+  check("target pick miss (walker): one draw, range min($142C2, $FE)", rolls.length === 1 && rolls[0] === Math.min(env.state.word(0x142c2), 0xfe), rolls.join());
+  env.run(1);
+  check("target pick miss (walker): the walk step ignores the cleared target and the unit returns to mode 6, cell unchanged", g.mode === 6 && g.x === x + 5 && g.y === y + 5, `mode ${g.mode}`);
+  const c = spawn(env, false, 24, x + 8, y + 8, 2);
+  c.mode = 6;
+  c.steps = 7;
+  env.run(1);
+  check("target pick miss (crusher): +D cleared, mode 1, +B = $FF", c.steps === 0 && c.mode === 1 && c.targetX === NO_TARGET);
+  env.run(1);
+  check("target pick miss (crusher): +D counts the step, the cleared target sends it back to mode 6", c.steps === 1 && c.mode === 6, `steps ${c.steps} mode ${c.mode}`);
 }
 {
   // kamikaze: dives onto an active building and detonates it
@@ -300,6 +324,37 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
     check("kamikaze: +50 morale and an explosion at altitude", env.morale.includes(50));
   } else {
     check("kamikaze: scenario has a building", false);
+  }
+}
+{
+  // kamikaze dive height (enemies.md section 3c): the hook receives the tile word of the picked object RECORD, not the
+  // map cell, and +$13 = (stored rows - 1) - 10 as a byte. Every building cell is given its gun-flash tile (+8) so a
+  // cell read would give the wrong tile; with the RNG fixed at 0 the pick is the first non-empty record.
+  const env = fresh({ fixed: 0 });
+  const o = env.world.objects;
+  let first = null;
+  for (let at = 0; at < o.length; at += 8) {
+    const tile = (o[at] << 8) | o[at + 1];
+    if (tile === 0) continue;
+    const index = o[at + 5] * MAP_WIDTH + o[at + 4];
+    if (!first) first = { x: o[at + 4], y: o[at + 5], tile };
+    env.cells[index] = (env.cells[index] & ~0xff) | ((tile + 8) & 0xff);
+  }
+  if (!first) {
+    check("kamikaze dive height: scenario has a building record", false);
+  } else {
+    const cellTile = env.cells[first.y * MAP_WIDTH + first.x] & 0xff;
+    const seen = [];
+    env.enemies.hooks.buildingHeight = (tile) => {
+      seen.push(tile);
+      return 30; // stored rows - 1
+    };
+    const k = spawn(env, true, 26, Math.max(0, Math.min(MAP_WIDTH - 1, first.x + 4)), first.y, 6);
+    k.mode = 6;
+    for (let i = 0; i < 200 && seen.length === 0; i++) env.run(1);
+    check("kamikaze dive height: the hook gets the record's tile word, not the flashing map cell",
+      seen.length >= 1 && seen[0] === first.tile && cellTile !== first.tile, `record=${first.tile} cell=${cellTile} seen=${seen.join(",")}`);
+    check("kamikaze dive height: +$13 = stored - 10 (20 for a stored 30)", k.aux === 20, `aux=${k.aux}`);
   }
 }
 
@@ -338,10 +393,66 @@ check("dirToward matches the compass of $11B70", dirToward(5, 5, 5, 3) === 0 && 
   t.hp = 7;
   const cell = env.enemies.defect();
   check("defect: returns the cell, the tank becomes an enemy ground unit", cell && cell.x === x + 3 && cell.y === y + 3 && env.units.units.length === 0 && env.enemies.ground.length === 1);
-  check("defected tank keeps its type and is idle (mode 5)", env.enemies.ground[0].type === 9 && env.enemies.ground[0].mode === 5);
-  env.run(1);
-  check("defected tank spins", env.enemies.ground[0].dir !== 4);
+  const g9 = env.enemies.ground[0];
+  check("defected tank keeps its type; a fresh tank's waiting bit and raw mode carry over (control $FF)", g9.type === 9 && g9.waiting && g9.mode === 0x7f);
+  env.run(1); // clock sub-tick 1: the enemy pass skips a waiting record off the enemy tick
+  check("waiting defected tank does not spin before the enemy tick", g9.dir === 4 && g9.waiting);
+  env.run(3); // sub-tick 4: the enemy tick clears the wait and steps it once
+  check("waiting defected tank spins on its first enemy tick", g9.dir === 3 && !g9.waiting);
   check("defect: no tank, no defection", env.enemies.defect() === null);
+}
+
+// Event 17 copy ($115BA-$115FE, enemies.md 7): what the converted record takes from the tank and what it does to the
+// flag and map bytes. The tank's own reservation and map bit are not released; only the flag byte (bit 2 off, bit 0 on)
+// of the tank's (x, y) is written, and +$16 names that cell.
+{
+  const FLAG_GROUND = 1, FLAG_OWN = 4;
+  const POINTER_BASE = 0x3d3a6; // $3D3A6 + y * $66 + x (the flag byte of cell (x, y))
+  const pointerOf = (cx, cy) => POINTER_BASE + cy * 102 + cx;
+  // A non-waiting, moving tank: copies the pixel offset, facing, hit points, tech, target; velocity is cleared.
+  {
+    const env = fresh();
+    const { x, y } = freeArea(env.world);
+    const t = env.units.spawn(10, x + 3, y + 3, 6);
+    t.dx = 3; t.dy = -2; t.vx = 2; t.vy = -1; t.hp = 6; t.tech = 2; t.targetX = x + 9; t.targetY = y + 1;
+    t.control = 0x7f; // not waiting (the first move tick already cleared bit 7)
+    env.state.setByte(0x145a3, 4);
+    env.enemies.defect();
+    const g = env.enemies.ground[0];
+    check("defect copy: type 10, cell, facing, hit points and tech come from the tank", g.type === 10 && g.x === x + 3 && g.y === y + 3 && g.dir === 6 && g.hp === 6 && g.tech === 2);
+    check("defect copy: pixel offset (+3/+4) is kept, velocity (+6/+7) cleared, target (+B/+C) kept", g.dx === 3 && g.dy === -2 && g.vx === 0 && g.vy === 0 && g.targetX === x + 9 && g.targetY === y + 1);
+    check("defect copy: non-waiting tank gives a non-waiting record, mode $7F, +$E 10, +$F $145A3, steps 0", !g.waiting && g.mode === 0x7f && g.bombPct === 10 && g.dmg === 4 && g.steps === 0);
+    check("defect copy: flag byte of (x, y) loses bit 2 and gains bit 0; +$16 names (x, y)", (env.world.cellFlags[cellFlagIndex(x + 3, y + 3)] & (FLAG_OWN | FLAG_GROUND)) === FLAG_GROUND && env.enemies.groundFlagPointers[0] === pointerOf(x + 3, y + 3) && g.reserveX === x + 3 && g.reserveY === y + 3);
+    env.run(1); // non-waiting: the first pass steps it at once
+    check("defect copy: a non-waiting defected tank spins on the first pass", g.dir === 5 && !g.waiting);
+  }
+  // A stationary tank holds bit 14 on its own cell (units.md 5): the converted cell keeps it.
+  {
+    const env = fresh();
+    const { x, y } = freeArea(env.world);
+    env.units.spawn(9, x + 3, y + 3, 0);
+    env.enemies.defect();
+    check("defect stationary: the cell keeps bit 14 (occupied) and the flag is ground, not own", (env.cells[(y + 3) * MAP_WIDTH + x + 3] & OCCUPIED) !== 0 && (env.world.cellFlags[cellFlagIndex(x + 3, y + 3)] & (FLAG_OWN | FLAG_GROUND)) === FLAG_GROUND);
+  }
+  // A tank between cells: its reservation is the NEXT cell, which keeps the tank's marks (the original does not release them).
+  {
+    const env = fresh();
+    const { x, y } = freeArea(env.world);
+    const t = env.units.spawn(9, x + 3, y + 3, 2);
+    const nx = x + 4;
+    // mid-move: the tank started towards (x+4, y+3): departure cell released, next cell reserved
+    env.cells[(y + 3) * MAP_WIDTH + x + 3] &= ~OCCUPIED;
+    env.world.cellFlags[cellFlagIndex(x + 3, y + 3)] &= ~FLAG_OWN;
+    env.cells[(y + 3) * MAP_WIDTH + nx] |= OCCUPIED;
+    env.world.cellFlags[cellFlagIndex(nx, y + 3)] |= FLAG_OWN;
+    t.reserveX = nx;
+    t.reserveY = y + 3;
+    env.enemies.defect();
+    const g = env.enemies.ground[0];
+    check("defect mid-move: the converted record names the departure cell (x, y), not the reservation", g.x === x + 3 && g.y === y + 3 && env.enemies.groundFlagPointers[0] === pointerOf(x + 3, y + 3) && g.reserveX === x + 3);
+    check("defect mid-move: the reserved cell keeps its bit 14 and own-unit flag (not released)", (env.cells[(y + 3) * MAP_WIDTH + nx] & OCCUPIED) !== 0 && (env.world.cellFlags[cellFlagIndex(nx, y + 3)] & FLAG_OWN) !== 0);
+    check("defect mid-move: no map bit 14 is set on the departure cell; its flag is ground", (env.cells[(y + 3) * MAP_WIDTH + x + 3] & OCCUPIED) === 0 && env.world.cellFlags[cellFlagIndex(x + 3, y + 3)] === FLAG_GROUND);
+  }
 }
 {
   const env = fresh();
@@ -538,6 +649,76 @@ for (const air of [false, true]) {
   }
 }
 
+// ---- ship destruction blast ($46CC -> $4732 -> $1237C, enemies.md 6 and ship-control.md 5e) -----------------------------------
+// $4732 blasts at the ship (lift as the height, high sound) before $46CC's bclr of the map bit, which goes through the A6
+// the blast left behind; the flag bit at +$14 is always freed. Statically traced; no live ship capture.
+
+{
+  const FLAG_OWN = 4, FLAG_SHIP = 8;
+  const shipEnv = (result, { airborne = false } = {}) => {
+    const env = fresh();
+    env.explodeResult.value = result;
+    const { x, y } = freeArea(env.world);
+    const cx = x + 4, cy = y + 4;
+    const ship = env.sim.fleet.createShip(12, cx, cy, 8); // yard-built: occupied cell, own flag, +$14 = this cell
+    ship.fuel = 100;
+    if (airborne) {
+      env.enemies.commandShip(ship, SHIP_ORDER.hover, null); // $4152: ground marks move to the air layer
+      ship.lift = 0x22; // a climbed ship (the climb itself is not stepped here)
+      ship.mode = 1;
+    }
+    return { env, ship, cx, cy, i: cy * MAP_WIDTH + cx, f: cellFlagIndex(cx, cy) };
+  };
+  const occ = (s) => (s.env.cells[s.i] & OCCUPIED) !== 0;
+  const air = (s) => (s.env.cells[s.i] & AIR) !== 0;
+  const flagOwn = (s) => (s.env.units.flags[s.f] & FLAG_OWN) !== 0;
+  const flagShip = (s) => (s.env.units.flags[s.f] & FLAG_SHIP) !== 0;
+
+  {
+    const s = shipEnv(true);
+    check("ship fixture: landed ship holds its occupancy bit and own flag", occ(s) && flagOwn(s));
+    s.env.enemies.destroyShip(s.ship, true);
+    check("landed ship destroyed with an explosion that clobbers A6: one high blast at the ship (lift 0), map bit STAYS, own flag freed",
+      s.env.explosions.length === 1 && s.env.explosions[0].lift === 0 && s.env.explosions[0].high === true && occ(s) && !flagOwn(s) &&
+      s.env.enemies.groundSlots.length === 60 && s.env.sim.fleet.slots.every((x) => x !== s.ship));
+  }
+  {
+    const s = shipEnv(false);
+    s.env.enemies.destroyShip(s.ship, true);
+    check("landed ship, explosion that does not clobber A6 (effect list full): nothing recorded, map bit and own flag freed",
+      s.env.explosions.length === 0 && !occ(s) && !flagOwn(s));
+  }
+  {
+    const s = shipEnv(true);
+    s.env.enemies.destroyShip(s.ship, false);
+    check("landed ship, no explosion: no blast, map bit and own flag freed", s.env.explosions.length === 0 && !occ(s) && !flagOwn(s));
+  }
+  {
+    const s = shipEnv(true, { airborne: true });
+    check("airborne fixture: take-off moved the marks to the air layer and the ship flag", air(s) && flagShip(s) && !occ(s) && !flagOwn(s));
+    s.env.enemies.destroyShip(s.ship, true);
+    check("airborne ship destroyed with a clobbering blast: blast at lift $22 (high), air mark STAYS, ship flag freed",
+      s.env.explosions.length === 1 && s.env.explosions[0].lift === 0x22 && s.env.explosions[0].high === true && air(s) && !flagShip(s));
+  }
+  {
+    const s = shipEnv(false, { airborne: true });
+    s.env.enemies.destroyShip(s.ship, true);
+    check("airborne ship, explosion with no clobber: air mark and ship flag freed", !air(s) && !flagShip(s));
+  }
+  {
+    // Fleet-owned destruction: $ACE2 sets bit 5 and $46CC blasts with the ship's lift (not the bomb blast at lift 0).
+    const s = shipEnv(false, { airborne: true });
+    const blasts = [];
+    const messages0 = s.env.sim.messages.length;
+    s.env.sim.bindRuntimeHooks({ blast: (x, y, lift, high) => (blasts.push([x, y, lift, high]), true) });
+    s.ship.fuel = 1; // one hovering burn empties it
+    s.env.sim.fleet.dailyFuel();
+    check("fuel out ($ACE2): one blast at the ship with its lift and the high volume, message $40",
+      blasts.length === 1 && blasts[0].join() === `${s.cx},${s.cy},34,true` && s.env.sim.messages.slice(messages0).includes(0x40) && s.env.sim.fleet.slots.every((x) => x !== s.ship));
+    check("fuel out with a clobbering blast: air mark STAYS, ship flag freed", air(s) && !flagShip(s));
+  }
+}
+
 // ---- missiles and ships ---------------------------------------------------------------------------------------------
 
 {
@@ -564,6 +745,11 @@ for (const air of [false, true]) {
   env.run(600);
   check("missile: hits the ground enemy, both gone", env.enemies.ground.length === 0 && env.sim.fleet.ships.length === ships);
   check("missile: no morale loss for the lost missile", !env.morale.includes(-100));
+  // $4408 removes the missile with $46CC before `bset #5,$156A9`: the missile is silent, only the occupant's $11C5C blasts.
+  const boom = env.explosions;
+  check("missile hit (ground): one explosion, at the enemy's cell, high volume (the missile itself is silent)",
+    boom.length === 1 && boom[0].x === target.enemy.x && boom[0].y === target.enemy.y && boom[0].high === true,
+    JSON.stringify(boom));
   check("missile: its map marks are gone", env.cells.every((w) => !(w & AIR)) && env.units.flags.every((f) => !(f & 8)));
 }
 {
@@ -578,6 +764,9 @@ for (const air of [false, true]) {
   env.run(600);
   check("missile: hits an aircraft", env.enemies.air.length === 0 && env.sim.fleet.ships.length === 0,
     `air ${env.enemies.air.map((e) => `${e.slot}:${e.x},${e.y},mode${e.mode}`).join("|")} fleet ${env.sim.fleet.ships.map((s) => `${s.type}:${s.x},${s.y},mode${s.mode},lift${s.lift},target${s.targetX},${s.targetY}`).join("|")}`);
+  // Same $4408 order as the ground hit: one explosion, at the aircraft (its $11C30 $4732 with bit 5), none for the missile.
+  check("missile hit (air): one explosion, at the aircraft's cell, high volume", env.explosions.length === 1 && env.explosions[0].x === a.x && env.explosions[0].y === a.y && env.explosions[0].high === true,
+    JSON.stringify(env.explosions));
 }
 {
   const env = fresh();
@@ -633,6 +822,19 @@ for (const air of [false, true]) {
   e.mode = 5;
   env.run(30);
   check("attack: an enemy shoots a hovering ship down (-100 morale)", !env.sim.fleet.ships.includes(ship) && env.morale.includes(-100));
+}
+{
+  // a ship built at a yard ($387E) and still landed on its pad carries the own flag (bit 2) on its cell, so a ground enemy
+  // scanning that cell finds it, exactly like a landed ship that arrived by order; no order is given here
+  const env = fresh();
+  const { x, y } = freeArea(env.world);
+  const ship = env.sim.fleet.createShip(11, x + 5, y + 6, 8);
+  ship.hp = 2;
+  check("yard-built ship: launch cell has the own flag (bit 2) and the ground mark", (env.units.flags[cellFlagIndex(x + 5, y + 6)] & 4) !== 0 && (env.cells[(y + 6) * MAP_WIDTH + x + 5] & OCCUPIED) !== 0);
+  const e = spawn(env, false, 22, x + 5, y + 4, 0, [0, 6, 0, 4, 0, 5, 50, 0]);
+  e.mode = 5;
+  env.run(30);
+  check("yard-built ship: a landed ship on the launch cell is shot by the enemy next to it", !env.sim.fleet.ships.includes(ship) && env.morale.includes(-100), `ships ${env.sim.fleet.ships.length}`);
 }
 
 // ---- stable fixed slots: first-free allocation, destroy never shifts survivors, capacity counts occupancy ---------------

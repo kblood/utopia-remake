@@ -28,6 +28,7 @@ const { World } = await import("../dist/game/world.js");
 const { Builder } = await import("../dist/game/build.js");
 const { Controls, BUTTON } = await import("../dist/game/controls.js");
 const { GameStrings } = await import("../dist/data/gamestrings.js");
+const { Ui } = await import("../dist/game/screens/ui.js");
 const { readFlagTable, readWeights } = await import("../dist/data/gameimage.js");
 const { Game } = await import("../dist/game/game.js");
 const { SFX } = await import("../dist/audio/sfx.js");
@@ -96,12 +97,21 @@ check("button 9 of the command column is the pause button (table $5DDA entry 9 =
   };
   const game = new Game(disk1, disk2, null, sfx);
   game.strings = strings;
+  game.bootMenuOpen = false; // the game proper is running (the boot session is test/boot-menu.mjs)
   game.stage = "scenario";
   game.startScenario(2);
   const map = game.map;
   const input = { leftButton: false, rightButton: false, pointerX: 0, pointerY: 0, keys: [] };
   const run = (n) => {
     for (let i = 0; i < n; i++) game.update(input);
+  };
+  // A window key is taken by the first completed pass's poll after it arrives ($15B4A), so run until a pass has completed. The one
+  // more update lets the window's first update see the button up (Pointer: a button held when the scene opens is not a press).
+  const pressF = (key) => {
+    input.keys.push(key);
+    const passes = map.loop.passes;
+    for (let i = 0; i < 8 && map.loop.passes === passes; i++) run(1);
+    run(1);
   };
   const n4 = () => log.filter((e) => e.id === SFX.CLICK).length; // other effects (alerts, explosions) may occur on the running map
   check("game: the scenario starts on the map screen", game.stage === "map" && map.sim.paused === false);
@@ -138,26 +148,35 @@ check("button 9 of the command column is the pause button (table $5DDA entry 9 =
   check("pause button on the map: pressing it again resumes without a click", map.sim.paused === false && n4() === 1);
 
   // $15B68-$15BE6 -> $15C1A: back from an F-key window while paused, the pause button is pressed again (one click).
+  // The report windows leave through their exit button only (reports.ts, `$B99C` -> `$58F8`): Escape is not read, so the
+  // close is a press on the exit button, which clicks on its own ($5756), then its release. The counts below are deltas
+  // of the click log, so the exit click is part of each close.
+  const exit = new Ui(disk1, strings).buttonPosition(9);
   const closeWindow = () => {
-    input.keys.push("Escape");
+    input.pointerX = exit.x + 4;
+    input.pointerY = exit.y + 4;
+    input.leftButton = true;
+    run(2);
+    input.leftButton = false;
     run(2);
   };
   log.length = 0;
-  input.keys.push("F1");
-  run(2);
+  pressF("F1");
   check("F1 opens the window with no click", game.stage === "screen" && n4() === 0);
-  closeWindow();
-  check("F-key window closed while running: no click", game.stage === "map" && n4() === 0);
-  map.sim.paused = true;
-  input.keys.push("F1");
+  input.keys.push("Escape");
   run(2);
-  check("F-key window opened while paused: still no click on opening", game.stage === "screen" && n4() === 0);
+  check("F1 window: Escape does not close it (no key leaves a report)", game.stage === "screen" && n4() === 0);
   closeWindow();
-  check("F-key window closed while paused: the pause button is re-pressed (one click)", game.stage === "map" && n4() === 1);
+  check("F-key window closed while running: only the exit button's own click", game.stage === "map" && n4() === 1);
+  map.sim.paused = true;
+  pressF("F1");
+  check("F-key window opened while paused: still no click on opening", game.stage === "screen" && n4() === 1);
+  closeWindow();
+  check("F-key window closed while paused: exit click, then the pause button is re-pressed (one click)", game.stage === "map" && n4() === 3);
   game.openScreen("f1"); // an icon-button window returns through $15A74, which does not touch the pause button
   run(1);
   closeWindow();
-  check("icon-button window closed while paused: no click", game.stage === "map" && n4() === 1);
+  check("icon-button window closed while paused: exit click only", game.stage === "map" && n4() === 4);
   map.sim.paused = false;
 
   // Disk menu: $7FC0 -> $5948 requests the click on the press of ANY of the nine rectangles, before the handler picked by the $7FE4

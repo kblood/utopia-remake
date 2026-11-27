@@ -35,7 +35,7 @@ Tre adskilte niveauer. Kun den understøttede WHDLoad 1.2 (0757)-profil er imple
 - **Genkendelse** (`src/data/detect.ts`): kun filnavne (versalfølsomhed ignoreres) og størrelser: `Disk.1` 970 752, `Disk.2` 983 040, `Utopia.Slave` 1 264. `disk.4` er valgfri og uden størrelseskrav (WHDLoad udvider seed-filen, og spillet starter uden den). Den tidligere kontrol, der krævede `disk.4`, var i modstrid med `src/main.ts` og er fjernet.
 - **Valideret ressourcetilgængelighed** (`src/data/profile-input.ts`, `src/startup.ts`): de indlæste bytes kontrolleres, før lyd og `Game` oprettes. `Disk.1` skal begynde med `DOS\0`. `Disk.2` skal være mindst `$3C2` sektorer, have magic `UTOPSCEN` ved sektor `$3C0`, og alle ti scenarieposters sprites-, tile-, descriptor-, map-, block-, intel- og fire tekstområder skal have `first <= last` og slutte inden for filen. Fejl returneres som typede, handlingsbare `InputError`s uden at kaste. Kontrollen læser kun filens egne bytes ved kørsel; intet indhold eller nogen hash gemmes. Ikke kontrolleret: Disk.1's interne sektortabeller og indholdet af områderne. Områdegrænsen kommer fra de verificerede loader-noter (`game-proper.md`, afsnit 6). Et område med `last < first` afvises som korrupt; hvis en ægte kopi viser sig at bruge sådan en tom post, skal reglen lempes efter en emulatorobservation.
 - **Bevist kørselskompatibilitet**: ikke opnået ved nogen af kontrollerne. En bestået validering siger kun, at de deklarerede ressourcer findes og er i bounds.
-- ADF A og ADF B er stadig ikke accepteret som input. `Disk.1`/`Disk.2`-layouts er ikke lempet; ADF A kræver et emulatorspor (dens game-image-sektorer `$14C-$208` afviger).
+- ADF A og ADF B er stadig ikke accepteret som input. `Disk.1`/`Disk.2`-layouts er ikke lempet; ADF A's kode er pakket og fra en anden version (se afsnittet om ADF-parret nedenfor).
 
 ## Originale ADF-filer (rå sektorsammenligning)
 
@@ -44,8 +44,46 @@ De to ADF-filer, der er listet i README, er hver 901 120 bytes (1 760 sektorer).
 - ADF B er byte-for-byte identisk med de første 1 760 sektorer af WHDLoad `Disk.2`; WHDLoad-filen har yderligere 80 KiB.
 - Verificeret mod den lokale ADF B og parseren: alle ti scenariers registrerede sprites-, tile-, descriptor-, map-, parameter-, intelligence- og tekstområder slutter senest ved sektor 1 588. De ligger dermed inden for ADF B's 1 760 sektorer; ingen af de deklarerede scenarioranges kræver WHDLoad-filen's sidste 160 sektorer.
 - Exhaustive sector comparison within ADF A's length: it differs from WHDLoad `Disk.1` only in sectors `$000-$059` and `$14C-$208` (279 sectors total). The whole game-image region `$14C-$208` differs; 94 542 of its 96 768 bytes differ. The intervening sectors `$05A-$14B` and all other shared sectors match byte for byte.
-- ADF A ends after sector `$6DF`. Under the current WHDLoad layout it ends partway through the music range `$618-$6EB`; German strings `$6EC-$707`, title `$70A-$728` and logo `$729-$733` are entirely beyond EOF. The current engine also reads Disk.1's boot font and language tables directly, so a recovered game-image alone would not establish ADF compatibility.
-- ADF B kan derfor fungere som kilde til de scenariodata, som den nuværende Disk.2-parser deklarerer, men den eksisterende picker/loader har endnu ingen ADF-profil. ADF A kan ikke erstatte den nuværende WHDLoad `Disk.1` endnu: dens game-image-sektorer `$14C-$208` afviger, og motoren læser tabeller fra det område. De to ADF'er er derfor ikke en verificeret drop-in-parring til browsermotoren; ADF A's variant kræver særskilt analyse.
+- Se det næste afsnit: data efter ADF A's slutning er flyttet, og koden er pakket.
+
+## ADF pair: relocated and packed data (2026-11-26)
+
+Reproduce with `python tools/adf_compare.py <Utopia-a.adf> <Utopia-b.adf>` (read only). This replaces the earlier reading that data past the end of ADF A is missing: the sector-by-sector comparison below only compared equal offsets.
+
+VERIFIED (byte comparison and unpacking of the local files):
+
+- ADF B equals `Disk.2` sectors `$000-$6DF`. The remaining 160 sectors of `Disk.2` are a four-byte filler pattern, so ADF B holds all of `Disk.2`'s data.
+- ADF A `$05A-$14B` and `$209-$6DF` equal `Disk.1` at the same sectors.
+- The `Disk.1` data that lies past the end of an ADF is stored near the start of ADF A:
+
+| `Disk.1` sectors | Content | ADF A sectors | Check |
+|---|---|---|---|
+| `$6E0-$6EB` | music 3, tail | `$007-$012` | identical bytes |
+| `$6EC-$707` | German strings | `$013-$02E` | identical bytes |
+| `$70A-$728` | title picture (packed) | `$031-$04E` | packed differently; 72 of 40,064 unpacked bytes differ |
+| `$729-$733` | logo picture (packed) | `$04F-$059` | identical unpacked |
+
+- The two code blocks are packed. Each starts with an unpacker stub whose stream header (packed length, unpacked length, XOR checksum) is `$10C` bytes into the sector; the data is read backwards (ByteKiller layout, identified from the traced stub). Both checksums close:
+  - game program: sector `$14C`, 56,380 bytes to 96,768 bytes (the size of `Disk.1` `$14C-$208`);
+  - boot stage: sector `$1BB`, 16,360 bytes to 24,576 bytes.
+- The stub at sector `$14C` carries a cracking group's signature (Fairlight, 1991), so ADF A is a cracked copy. The ADF A boot block loads further code from sectors `$1BB-$202`.
+
+HYPOTHESIS (strong, static only): ADF A's code is the second game version that `Utopia.Slave` supports (boot-block CRC `$5E14`), with the crack's changes on top.
+
+- At ADF boot address `$78C8A` the unpacked code has the same eight bytes as the `$D9C1` version at `$78C70`; these are the slave's two code-check patch addresses.
+- At `$7886C` (the `$5E14` patch address) the unpacked code holds NOPs, and at `$789BE` the final jump is redirected to `$E00`.
+- The CRC itself was not reproduced, because the crack changed the block.
+- Aligned against `Disk.1`, 84.6% of the game program lies in identical runs of 8 bytes or more at shifted positions (65.2% with 24 bytes or more). The remaining differences were not classified.
+
+VERIFIED (2026-11-26, unpacked comparison): the unpacked game program differs from `Disk.1` `$14C-$208` in 72,097 of 96,768 bytes, and the unpacked boot stage differs from `Disk.1` `$3000` in 20,681 of 24,576 bytes. These are not patch-sized differences, so ADF A is a different build, not `Disk.1` with a few changes. Rebuilding a `Disk.1`-shaped image from the ADFs would therefore not reproduce the WHDLoad game and would break the engine's fixed table addresses silently.
+
+The IPF images `Utopia-TheCreationofaNation_757.zip` and `_758.zip` contain `Utopia_Disk1.ipf` and `Utopia_Disk2.ipf` (CAPS container). No IPF decoder is installed here, and none was written.
+
+Consequence: ADF A and B together appear to hold all the data the engine reads. Support would need the relocation table above, the unpacker, and a per-version map for every table the engine reads from the boot stage and the game program, whose addresses differ. Not implemented. The IPF images listed in `README.md` have not been examined.
+
+## Leftover data on `Disk.1` (2026-11-26)
+
+VERIFIED: `Disk.1` has no AmigaDOS root, directory or file-header block with a valid checksum at any 4-byte offset (ADF A and B have none either). Sectors `$003-$007` are five OFS data blocks with valid checksums (blocks 40-44 of a file whose header is absent) containing a fragment of commented 68000 assembly source. Sector 8 starts with a small hunk executable header. The game is not known to read either; the source text is not reproduced here.
 
 ### Disk.2 – entropikort (målt, pr. 8 000-byte blok)
 
@@ -117,6 +155,17 @@ Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er
 - Destinationen `$077F18` er den samme som boot-kodens kald til `$077F18` i Disk.1. Slaven og boot-koden indlæser altså samme kode.
 - Efter indlæsningen skriver slaven patches (16- og 32-bit) til adresser i og omkring det indlæste område og til lavt RAM. Det er rettelser af kode og ikke data.
 
+### Slave patches of the verified CRC path (VERIFIED, static, 2026-11-10)
+
+The slave's code (hunk code of `Utopia.Slave`, disassembled with capstone) branches on the CRC16 of the boot-stage block at `$77F18`: `$D9C1` (this profile) or `$5E14`. The `$D9C1` path writes, before the boot stage runs:
+
+- `move.l #$00080000,$904`: the boot stage reads `$904` (`tst.l`) and draws "EXPANSION MEMORY DETECTED." when it is not zero (`graphics-and-music-blocks.md`, text step G). No boot-image code writes `$904`.
+- `move.b #$32,$910`: the boot stage's tick-skip flag (`graphics-and-music-blocks.md`, the player).
+- `move.w #$4E71,$78C70` (NOP) and `move.w #$6022,$78856` (`bra.b` +$22 to `$7887A`): the code check's empty-entry test is removed and its compare branch is unconditional, so every typed number reaches the success path (`text.md`, step E).
+- `move.w #$4E75,$77F32` (`rts`), `move.w #$4EB9/$4EF9` jumps to slave routines for the loader (`$77F84` -> `$42A`, the resload disk read) and the final jump (`$789A4` -> `$1A0`, which patches the game proper and then jumps to `$1000`).
+
+The `$D9C1` path also writes patches to the game proper (`$1E6E`, `$7D88`, `$93F8`, ...). These are not traced here. The `$5E14` path writes the same code-check patch at `$7886C`/`$78C8A` and `$789BE`. The remake implements step E under the `$D9C1` profile only.
+
 ## disk.4 (656 bytes)
 
 - Begynder med `XPKF`. Pakket med XPK-biblioteket, sub-bibliotek `MASH`.
@@ -143,6 +192,28 @@ Slaven kalder WHDLoads `resload`-funktioner via en basepointer i BSS. Kaldene er
 1. (Delvist løst) Den sparse region er `UTOPSAVE`-headeren; hvad originalen skriver i slotnavne og områder ved save er stadig uverificeret mod en kørsel.
 2. Undersøg Disk.4 save-slot dataenes faktiske opbygning og skriveforløb mod originalen, før der implementeres gendannelse/eksport. Headerparseren i `src/data/disk4.ts` dækker kun et udpakket råt billede (`parseDisk4`); `parseDisk4Input` udpakker først XPK/MASH-frøet.
 3. ADF/IPF-mounting og kompatibilitet med andre udgivelser er ikke implementeret i browsermotoren.
+
+## Table locations by content (2026-11-26)
+
+Code: `src/data/locate.ts` (pattern search, `??` wildcards, unique match only) and `src/data/anchors.ts` (content lookup). Test: `test/locate.mjs`.
+
+VERIFIED: for eight tables the engine reads from the game program, the first 16 bytes occur exactly once in the WHDLoad program image and exactly once in the unpacked ADF A game program:
+
+| Table | WHDLoad address | ADF A address |
+|---|---|---|
+| flag table | $16408 | $163F4 |
+| weights | $B0EC | $B0D4 |
+| inventions | $B1CC | $B1B4 |
+| music labels | $1530 | $15C8 |
+| font character table | $62D8 | $636A |
+| font glyphs | $6354 | $63E6 |
+| money template | $2F48 | $2FF4 |
+| title template | $6532 | $65C4 |
+
+- The shifts differ per table (from -$18 to +$98), so the tables were moved one by one, not by one global offset.
+- A matching 16-byte run shows identical data, not identical code that reads it. Each table still needs its reader checked against the ADF build.
+- The reference bytes come from the user's own WHDLoad file at run time; no game bytes are stored in the repository.
+
 
 ## Reference run: WHDLoad boot tree (verified)
 

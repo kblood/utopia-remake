@@ -162,9 +162,6 @@ export class TradeScreen extends PanelScene {
       this.apply(this.target!, entry.done);
       this.entry = null;
       this.target = null;
-    } else if (entry.cancelled) {
-      this.entry = null;
-      this.target = null;
     }
     return true;
   }
@@ -359,9 +356,6 @@ export class MarketScreen extends PanelScene {
     if (entry.done !== null) {
       this.entry = null;
       this.finish(this.mode, entry.done);
-    } else if (entry.cancelled) {
-      this.entry = null;
-      this.say(167);
     }
     return true;
   }

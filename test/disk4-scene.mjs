@@ -532,8 +532,10 @@ if (!fs.existsSync(disk1Path) || !fs.existsSync(disk2Path)) {
     const img = sceneImage();
     const early = game.activateDisk4({ bytes: img, slot: SLOT });
     check("Game.activateDisk4: not ready before the language is chosen", !early.ok && early.error.stage === "not-ready" && game.lastDisk4Error?.stage === "not-ready");
-    // The test jumps straight to the scenario menu stage (private fields are plain properties at runtime).
+    // The test jumps straight to the scenario menu stage (private fields are plain properties at runtime). The boot session is
+    // closed: these checks are about the game proper; the boot hold of a Disk.4 continuation is section 2d.
     game.strings = strings;
+    game.bootMenuOpen = false;
     game.stage = "scenario";
     const expected = identifyDisk4Scenario(baseCells, disk2);
     check("scenario-0 fixture independently identifies as scenario 0", expected.ok && expected.value.status === "identified" && expected.value.scenario === 0);
@@ -566,6 +568,7 @@ if (!fs.existsSync(disk1Path) || !fs.existsSync(disk2Path)) {
       const music = { trackCount: 4, current: 2, active: true, setActive() { return false; }, play(t) { played.push(t); if (t >= 0 && t < 4) music.current = t; }, stop() { music.current = -1; }, fadeOut() {}, setVolume() {}, setChannelMuted() {}, resume() {}, title: () => "", dispose() {} };
       const mgame = new Game(disk1, disk2, music, null);
       mgame.strings = strings;
+      mgame.bootMenuOpen = false;
       mgame.stage = "scenario";
       const res = mgame.activateDisk4({ bytes: img, slot: SLOT });
       check("Game.activateDisk4: the playing track continues untouched (no play call)", res.ok && music.current === 2 && played.length === 0);
@@ -597,7 +600,7 @@ if (!fs.existsSync(disk1Path) || !fs.existsSync(disk2Path)) {
     // Valid saved metadata wins even if the mutable map looks like no scenario.
     const blank = new Uint16Array(7500).fill(0x3ff);
     const metadataGame = new Game(disk1, disk2);
-    metadataGame.strings = strings; metadataGame.stage = "scenario";
+    metadataGame.strings = strings; metadataGame.bootMenuOpen = false; metadataGame.stage = "scenario";
     const editedMap = metadataGame.activateDisk4({ bytes: sceneImage(undefined, undefined, blank), slot: SLOT });
     check("Game.activateDisk4: valid saved scenario metadata wins when the mutable map matches no scenario",
       editedMap.ok && editedMap.value.scenario === 0 && editedMap.value.scenarioBy === "saved");
@@ -627,6 +630,60 @@ if (!fs.existsSync(disk1Path) || !fs.existsSync(disk2Path)) {
 
     game.startScenario(0);
     check("a new game clears the Disk.4 session (Save is available again)", game.importedDisk4 === null && !game.map.restoredFromDisk4);
+  }
+
+  // ---- 2d. Game.activateDisk4 in the boot session: the continuation is held until the boot exit (icon 5, $802C) ---------------
+  // Static trace (game-proper.md): a load returns to the boot disk menu, and only its exit enters the game proper.
+  {
+    const { DISK_BUTTON, DISK_MENU_BUTTONS } = await import("../dist/game/disk-menu.js");
+    const game = new Game(disk1, disk2);
+    game.strings = strings;
+    game.openDiskMenu(); // the boot disk menu; bootMenuOpen stays true
+    const img = sceneImage();
+    const at = (i) => [DISK_MENU_BUTTONS[i].x0 + 16, DISK_MENU_BUTTONS[i].y0 + 16];
+    const pointer = (down, x = 0, y = 0) => game.update({ leftButton: down, rightButton: false, pointerX: x, pointerY: y, keys: [] });
+    pointer(false);
+    const held = game.activateDisk4({ bytes: img, slot: SLOT, source: "synthetic" });
+    check("boot Disk.4 activation succeeds but is held: disk menu stays, no map, no session yet",
+      held.ok && game.stage === "disk" && game.map === null && game.importedDisk4 === null && game.lastDisk4Error === null && game.bootMenuOpen === true);
+    const heldScene = game.heldScene;
+    check("the held continuation is a restored scene (not yet entered)", heldScene !== null && heldScene.map.restoredFromDisk4 === true && heldScene.disk4 === held.value);
+    const refused = game.activateDisk4({ bytes: img, slot: 0, scenario: 0 });
+    check("a refused boot Disk.4 activation (empty slot) keeps the held continuation untouched",
+      !refused.ok && refused.error.stage === "inspect" && game.heldScene === heldScene && game.stage === "disk" && game.importedDisk4 === null);
+    pointer(false, ...at(DISK_BUTTON.save)); pointer(true, ...at(DISK_BUTTON.save)); pointer(true, ...at(DISK_BUTTON.save)); pointer(false, ...at(DISK_BUTTON.save));
+    check("the held Disk.4 continuation's save icon shows the Disk.4 remake note on the second line and opens no slot page",
+      game.stage === "disk" && game.diskMenu.shownInfo[1] === -1 && game.heldScene === heldScene && game.map === null);
+    pointer(false, ...at(5)); pointer(true, ...at(5)); pointer(true, ...at(5)); pointer(false, ...at(5));
+    check("the boot exit enters the held Disk.4 continuation once, as the imported session",
+      game.stage === "map" && game.map === heldScene.map && game.importedDisk4 === held.value && game.map.restoredFromDisk4 === true && game.bootMenuOpen === false && game.heldScene === null);
+    const saved = game.saveToSlot(0);
+    check("the entered boot continuation is refused by the remake save (provenance)", saved === false && game.lastSaveError?.code === "disk4-session");
+  }
+
+  // ---- 2e. Game.activateDisk4 as a disk-menu pick (the original's mode-2 load `$8828`) -----------------------------------------
+  // Static trace (Disk.1, game-proper.md "Load success message"): `$88CA` prints `$145` on the list prompt and `$88EA` `bra $82B8`
+  // erases it at the next VBL (one frame, not modelled), so the remake's held disk menu shows no message. The remake's Disk.4 pick printed `$145` on the result line
+  // before this check was added (it failed then). The continuation is held until EXIT (`$802C`), as the other picks are.
+  {
+    const { DISK_BUTTON, DISK_MENU_BUTTONS } = await import("../dist/game/disk-menu.js");
+    const game = new Game(disk1, disk2);
+    game.strings = strings;
+    game.bootMenuOpen = false;
+    game.openDiskMenu();
+    const img = sceneImage();
+    const at = (i) => [DISK_MENU_BUTTONS[i].x0 + 16, DISK_MENU_BUTTONS[i].y0 + 16];
+    const pointer = (down, x = 0, y = 0) => game.update({ leftButton: down, rightButton: false, pointerX: x, pointerY: y, keys: [] });
+    pointer(false);
+    const picked = game.activateDisk4({ bytes: img, slot: SLOT, source: "synthetic", pick: true });
+    check("Disk.4 pick: succeeds, holds the scene behind the game-proper disk menu, and enters nothing yet",
+      picked.ok && game.stage === "disk" && game.heldScene !== null && game.heldScene.map.restoredFromDisk4 === true && game.map !== game.heldScene.map && game.importedDisk4 === null);
+    check("Disk.4 pick: no result line and no list prompt remain (the original's $145 is erased by $82B8 in the same handler)",
+      game.diskMenu.shownInfo.join() === "0,0" && game.diskMenu.shownPrompt.join() === "0,0" && game.diskMenu.infoFramesLeft === 0);
+    const heldScene = game.heldScene;
+    pointer(false, ...at(5)); pointer(true, ...at(5)); pointer(true, ...at(5)); pointer(false, ...at(5));
+    check("Disk.4 pick: EXIT enters the held continuation once and clears the hold",
+      game.stage === "map" && game.map === heldScene.map && game.importedDisk4 === picked.value && game.heldScene === null);
   }
 }
 

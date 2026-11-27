@@ -27,6 +27,11 @@
 //   - Arithmetic: matches 50 raw calls of one local Copperline capture (zero mismatches in an independent recomputation and in
 //     test/original-rng.mjs when UTOPIA_PRODUCTION_TRACE_DIR is set). In that capture D0 bits 8..15 were always zero, so the
 //     nonzero-byte-1 behaviour is derived from the instruction semantics above and covered by synthetic vectors only.
+//   - Tutorial first-pass capture (2026-11-12, OBSERVED numbers, INFERRED TOD): the 32 recorded `$2DCC` entries form one
+//     continuous seed chain of 31 links, and the births draw (`$9BCC`, D0 = D2 = 30) returns 26 with seed $51DE46DF. Each link
+//     is reproduced by exactly one TOD byte, $DB at frame 14321 and $E1 at frame 14327 (inferred: the capture has no TOD
+//     column). See test/original-rng-tutorial.mjs (optional chain via UTOPIA_TUTORIAL_CAPTURE_DIR) and game-proper.md.
+//     The first recorded seed ($BFE0450D) equals the image default at `$2EA0`, observed at the tutorial click only.
 //   - Static call-site inventory and per-site context audit: 62 direct sites in the loaded image (44 call `$2DCA`, 18 call
 //     `$2DCC`); only 7 appear in the capture. See `notes/formats/original-rng-callers.md` for D0/D2 setup, premises and
 //     unresolved paths. The audit is static, not a reachability proof; many contexts remain data- or caller-dependent, so

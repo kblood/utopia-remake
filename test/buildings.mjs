@@ -80,6 +80,15 @@ const input = { leftButton: false, rightButton: false, pointerX: 0, pointerY: 0,
 
 const primed = new WeakSet();
 
+// A right press and its release on a scene, with the left button up (the right button alone).
+function rightClick(scene) {
+  input.leftButton = false;
+  input.rightButton = true;
+  scene.update(input);
+  input.rightButton = false;
+  return scene.update(input);
+}
+
 function click(scene, x, y) {
   // The first frame of a scene must see the buttons up (a press held at open does not count).
   if (!primed.has(scene)) {
@@ -185,6 +194,8 @@ const differs = (a, b2) => a.some((v, i) => v !== b2[i]);
   plant(world, 0x30, 33, 20);
   plant(world, 0x31, 35, 20);
   plant(world, 0x36, 37, 20);
+  // Every window here runs a traced loop (building-screens.md 3): no key is read, so Escape and a right click leave none of
+  // them. Only the exit button (9) closes, and window-input.mjs checks each control of these loops.
   for (const [name, x, y] of [["power storage", 10, 10], ["fuel tank", 12, 10], ["large fuel tank", 14, 10], ["command centre", 20, 20], ["hospital", 24, 20], ["sports", 28, 20], ["missile launcher", 33, 20], ["large launcher", 35, 20], ["ship yard order", 37, 20]]) {
     const scene = b.createBuildingScreen(ctx, x, y);
     if (!scene) {
@@ -197,7 +208,9 @@ const differs = (a, b2) => a.some((v, i) => v !== b2[i]);
     check(`${name}: exit button closes`, clickButton(scene, 9) === "close");
     const again = b.createBuildingScreen(ctx, x, y);
     input.keys.push("Escape");
-    check(`${name}: Escape closes`, again.update(input) === "close");
+    const escaped = again.update(input);
+    check(`${name}: Escape does nothing (traced loop reads no key)`, escaped === "running");
+    check(`${name}: a right click does nothing`, rightClick(again) === "running");
   }
 }
 
@@ -352,6 +365,31 @@ const differs = (a, b2) => a.some((v, i) => v !== b2[i]);
   click(scene, rects[0].x, rects[0].y);
   clickButton(scene, 9);
   check("ship yard: exit keeps the yard idle", world.objects[yard + 6] === 0);
+}
+
+// The locked index is stored before the lock test (static $D91C) and is ordered with the work of the last unlocked choice
+// made in this window (static $D98E-$D99C, $D8DE): the drawn selection does not change.
+{
+  const { world, state, ctx } = fresh();
+  const yard = plant(world, 0x36, 37, 20);
+  setTypeC(world, 29, 1);
+  setTypeC(world, 27, 1);
+  state.setLong(0x14472, 0);
+  const rects = Array.from({ length: 6 }, (_, k) => ({ x: ui.image.word(0xefe0 + 8 * k) + 8, y: ui.image.word(0xefe0 + 8 * k + 4) + 8 }));
+  const scene = b.createBuildingScreen(ctx, 37, 20);
+  click(scene, rects[1].x, rects[1].y);
+  const chosen = drawn(scene);
+  click(scene, rects[4].x, rects[4].y);
+  check("ship yard: a locked click after a choice draws nothing new", !differs(chosen, drawn(scene)));
+  check("ship yard: the locked index is ordered with the work of the last unlocked choice", clickButton(scene, 8) === "close" && world.objects[yard + 6] === 5 && world.objects[yard + 7] === ui.image.word(0xf012 + 2));
+  // a later unlocked choice replaces the work value, and the order follows the index
+  world.objects[yard + 6] = 0;
+  world.objects[yard + 7] = 0;
+  const again = b.createBuildingScreen(ctx, 37, 20);
+  click(again, rects[0].x, rects[0].y);
+  click(again, rects[4].x, rects[4].y);
+  click(again, rects[2].x, rects[2].y);
+  check("ship yard: the last press before the order decides the type, the last unlocked choice the work", clickButton(again, 8) === "close" && world.objects[yard + 6] === 3 && world.objects[yard + 7] === ui.image.word(0xf012 + 4));
 }
 
 // --- tank teleporter ---------------------------------------------------------------------------------

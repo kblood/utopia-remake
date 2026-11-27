@@ -89,9 +89,11 @@ function fakeSfx() {
   };
   return s;
 }
+// A game already in the game proper: the boot session is closed, so scenes enter at once (the held boot session is test/boot-menu.mjs).
 const newGame = (music, sfx = null) => {
   const g = new Game(disk1, disk2, music, sfx);
   g.strings = strings;
+  g.bootMenuOpen = false;
   g.stage = "scenario";
   return g;
 };
@@ -112,7 +114,7 @@ const scenarioCount = new Game(disk1, disk2, null, null).records.length;
     simulation: { rng: (range) => (rngRanges.push(range), 0) },
   });
   game.strings = strings;
-  game.startScenario(0);
+  game.enterScene(0, game.createScene(0)); // the boot session's first entry (the exit): it draws the apparition
   const initialMarkers = game.map.world.state.word(0x144a6);
   const initialAlien = game.map.sim.aliens.alien;
   const alienIsAtMarker = initialAlien && Array.from({ length: initialMarkers }, (_, i) => [
@@ -145,15 +147,28 @@ const scenarioCount = new Game(disk1, disk2, null, null).records.length;
   check("first-pass date work consumes the old queued day before a same-update VBL queues the next day", game.map.world.state.dateText() === "01/07/2090" && game.map.sim.dayQueued && game.map.world.state.byte(A.frameCountdown) === 90);
 }
 
-// The real menu route must finish the immediate first pass before the browser presents the newly selected map.
+// The real menu route must finish the immediate first pass before the browser presents the newly selected map (in the game proper;
+// from the boot session the pass runs at the boot exit, test/boot-menu.mjs).
 {
   const game = new Game(disk1, disk2, null, null);
   game.strings = strings;
-  game.openScenarioMenu();
-  const input = (leftButton) => ({ leftButton, rightButton: false, pointerX: 50, pointerY: 60, keys: [] });
+  game.bootMenuOpen = false;
+  game.openDiskMenu();
+  game.openScenarioList(false); // the remake submenu's NEW SCENARIO route: the list on the disk picture, nothing pending
+  const input = (leftButton) => ({ leftButton, rightButton: false, pointerX: 100, pointerY: 36, keys: [] }); // row 0 of the list ($20 + 9 n)
   game.update(input(false)); // release ignored while the menu is opening
-  game.update(input(true)); // choose scenario 1
-  check("scenario choice runs the queued first pass before returning the map frame", game.stage === "map" && game.map.loop.passes === 1 && !game.map.sim.dayQueued && game.map.world.state.dateText() === "01/07/2090");
+  game.update(input(true)); // press on the first row: the pick waits for the release (the original's `$2E52` after `$7FCE`)
+  check("a press alone does not pick: the list is still open with no held scene", game.stage === "scenario" && game.heldScene === null && game.map === null);
+  game.update(input(false)); // release: choose the first row (scenario index 0): held until EXIT; the list stays open after the pick ($88F0, mode 3)
+  check("the scenario pick is held and the list stays open: stage scenario, no map yet, the first pass not run", game.stage === "scenario" && game.map === null && game.heldScene?.index === 0 && game.heldScene.map.loop.passes === 0);
+  game.update(input(false));
+  game.update({ leftButton: false, rightButton: true, pointerX: 50, pointerY: 60, keys: [] }); // right click on the list: no original route, nothing happens
+  game.update(input(false));
+  check("right click on the list is a no-op: the list stays open with the scene held (stage scenario, no map yet)", game.stage === "scenario" && game.map === null && game.heldScene?.index === 0);
+  const exit = DISK_MENU_BUTTONS[DISK_BUTTON.exit];
+  const exitAt = (leftButton) => ({ leftButton, rightButton: false, pointerX: exit.x0 + 16, pointerY: exit.y0 + 16, keys: [] });
+  game.update(exitAt(false)); game.update(exitAt(true)); game.update(exitAt(true)); game.update(exitAt(false)); // EXIT ($802C) enters the held scene
+  check("EXIT runs the queued first pass before the browser presents the map frame", game.stage === "map" && game.map.loop.passes === 1 && !game.map.sim.dayQueued && game.map.world.state.dateText() === "01/07/2090");
 }
 
 for (let scenario = 0; scenario < scenarioCount; scenario++) {
@@ -175,27 +190,36 @@ for (let scenario = 0; scenario < scenarioCount; scenario++) {
   check("later scenario selection queues its fresh day but does not rerun boot-only alien placement", game.map.sim.dayQueued && game.map.sim.aliens.alien === null);
 }
 
-// ---- 3. The remake's language-screen tune ends at the first map entry only ------------------------------------------------
+// ---- 2b. The boot-menu exit ($157B8 -> $11476) is covered in test/boot-menu.mjs (held scenes, one-shot apparition, load-first order).
+// Only the in-game consequence is checked here: a later entry from the game proper draws no apparition.
+{
+  const game = newGame(null);
+  game.startScenario(0);
+  const first = game.map.sim.aliens.alien;
+  game.startScenario(1);
+  check("a later scenario entry in the game proper does not draw an apparition", first === null && game.map.sim.aliens.alien === null && game.bootMenuOpen === false);
+}
+
+// ---- 3. The boot module is stopped by the boot ramp (test/boot-stages.mjs, test/boot-music.mjs), so a scene entry changes no track
 {
   const music = fakeMusic();
   const game = newGame(music);
-  music.play(0); // what the language stage started
-  game.introTune = true;
+  music.play(3); // the boot module the credit roll started (the boot ramp would already have stopped it by the first map entry)
+  music.stop();
   music.calls.length = 0;
   game.startScenario(0);
-  check("first map entry fades the language-screen tune out once", music.fades === 1 && music.calls.length === 0 && game.introTune === false);
+  check("first map entry fades nothing and starts nothing (no track is playing, none is started)", music.fades === 0 && music.calls.length === 0 && music.current === -1);
   game.startScenario(1);
-  check("later scenarios do not fade again", music.fades === 1);
+  check("later scenarios do not fade or start anything", music.fades === 0 && music.calls.length === 0);
 }
 {
   const music = fakeMusic();
   const game = newGame(music);
   music.play(2);
-  game.introTune = true; // a pick in the list first (not reachable before the map, but the flag must clear)
   game.chooseTrack(1);
   music.fades = 0;
   game.startScenario(0);
-  check("a chosen track is not faded by the scenario start", game.introTune === false && music.fades === 0 && music.current === 1);
+  check("a chosen track is not faded by the scenario start", music.fades === 0 && music.current === 1);
 }
 
 // ---- 4. Remake load keeps the playing track and starts nothing ------------------------------------------------------------
@@ -413,6 +437,10 @@ for (let scenario = 0; scenario < scenarioCount; scenario++) {
   check("game over: the exit icon is refused (the menu stays)", game.stage === "disk");
   iconClick(DISK_BUTTON.save);
   check("game over: the save icon prints $18A (first result line) and opens nothing", game.stage === "disk" && info() === "394,0");
+  rightClick();
+  check("game over: the REMAKE MENU save entry is off (labelled GAME OVER), the same refusal as the icon", game.stage === "remake" && game.menu.entries[0].enabled === false && game.menu.entries[0].label === "SAVE GAME (OFF: GAME OVER)");
+  rightClick();
+  check("game over: leaving the REMAKE MENU returns to the disk menu", game.stage === "disk");
   game.map.sim.sysFlags &= ~SYS.gameOver;
 
   // The save-disk family and the remake pages: icons 0-2 open the remake's own pages (named as such), 3 is a labelled no-op.
@@ -424,10 +452,10 @@ for (let scenario = 0; scenario < scenarioCount; scenario++) {
   iconClick(DISK_BUTTON.save);
   check("icon 1 (save game, $856C): the remake's save slot page", game.stage === "save" && /REMAKE/.test(game.menu.title));
   rightClick();
-  iconClick(DISK_BUTTON.scenario);
-  check("icon 2 (load scenario, $8632): the scenario list", game.stage === "scenario" && game.menu.title === "CHOOSE A SCENARIO");
+  iconClick(DISK_BUTTON.scenario); frame(true, 0, 0); frame(false, 0, 0); // the wait's press opens the list
+  check("icon 2 (load scenario, $8632): the scenario list", game.stage === "scenario" && game.diskMenu?.listKind === "scenario");
   rightClick();
-  check("right click on the scenario list while a game exists: back to the disk menu", game.stage === "disk");
+  check("right click on the scenario list while a game exists is a no-op: the list stays open", game.stage === "scenario" && game.diskMenu?.listKind === "scenario");
   sfx.log.length = 0;
   iconClick(DISK_BUTTON.format);
   check("icon 3 (format, $8314): clicks, then a remake note in the second result line; nothing opens, nothing is written", sfx.log.length === 1 && info() === "0,-1" && game.stage === "disk");

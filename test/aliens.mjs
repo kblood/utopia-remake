@@ -17,6 +17,7 @@ const { GameState, A } = await import("../dist/game/state.js");
 const { World } = await import("../dist/game/world.js");
 const { Sim, SYS } = await import("../dist/game/sim.js");
 const { createRng } = await import("../dist/game/sim-math.js");
+const { LIGHT } = await import("../dist/game/sim-alerts.js");
 
 const disk2 = new Uint8Array(fs.readFileSync(disk2Path));
 const records = readScenarioRecords(disk2);
@@ -74,6 +75,7 @@ function addRecord(world, tile, x, y, byte3 = 0xff) {
   const ships = sim.fleet.ships;
   check("ship launched on the first pad cell", ships.length === 1 && ships[0].type === 12 && ships[0].x === 24 && ships[0].y === 22, JSON.stringify(ships[0]));
   check("ship bookkeeping", state.word(0x1429e) === 1 && state.long(0x14254 + 12) === 1 && state.long(0x143b2) === 1 && (world.cells[22 * W + 24] & 0x4000) !== 0);
+  check("launch sets own-ground flag bit 2 on the launch cell ($387E), not on the neighbour", (world.cellFlags[24 + 22 * 102] & 4) !== 0 && (world.cellFlags[25 + 22 * 102] & 4) === 0, `flag ${world.cellFlags[24 + 22 * 102]}`);
   check("new ship has empty tank, class and hit points from the table", ships[0].fuel === 0 && ships[0].cls === 1 && ships[0].hp === 0x14 && ships[0].dir === 8);
   check("launch event and effect", sim.events.some((e) => e.kind === "ship" && e.what === "launched") && log.some((l) => l[0] === "launch"));
 
@@ -175,19 +177,75 @@ function addRecord(world, tile, x, y, byte3 = 0xff) {
 // ---- events 12 and 17 -------------------------------------------------------------------------------------
 {
   const log = [];
-  const { state, sim } = fresh({ effect: (k, x, y) => log.push([k, x, y]), defectUnit: () => ({ x: 5, y: 6 }) });
+  const blasts = [];
+  const { state, sim } = fresh({ effect: (k, x, y) => log.push([k, x, y]), defectUnit: () => ({ x: 5, y: 6 }),
+    blast: (x, y, lift, high) => (blasts.push([x, y, lift, high]), false) });
   const a = sim.fleet.createShip(12, 30, 30);
   sim.fleet.eventShipExplosion(100);
-  check("ship explosion needs an airborne ship", sim.fleet.ships.length === 1 && !sim.messages.includes(0x109));
+  check("ship explosion needs an airborne ship", sim.fleet.ships.length === 1 && !sim.messages.includes(0x109) && blasts.length === 0);
   a.lift = 1;
   sim.fleet.eventShipExplosion(100);
-  check("airborne first ship explodes", sim.fleet.ships.length === 0 && sim.messages.includes(0x109) && log.some((l) => l[0] === "explosion") && log.some((l) => l[0] === "focus"));
+  // $113A6 -> $46CC -> $4732: the blast at the ship with its lift as height and the high volume (not the bomb blast)
+  check("airborne first ship explodes: one high blast at the ship with its lift, then message $109, focus",
+    sim.fleet.ships.length === 0 && sim.messages.includes(0x109) && blasts.join("|") === "30,30,1,true" && !log.some((l) => l[0] === "explosion") && log.some((l) => l[0] === "focus"));
   state.setWord(0x1429c, 3);
   sim.aliens.eventTankDefect(100);
   check("tank defects to the enemy", state.word(0x1429c) === 2 && state.word(0x142a2) === 1 && sim.messages.includes(0x181));
   state.setWord(0x142a2, 60);
   sim.aliens.eventTankDefect(100);
   check("enemy list full: nothing happens", state.word(0x1429c) === 2);
+}
+
+// ---- $11432 callers (static Disk.1: $10D6C event 19, $110E6 event 4, $113E4 event 12, $115E6 event 17, $11650 event 8) -----
+// The routine stores the bookmark only: x-4 / y-4 clamped to 0..$5C / 0..$43 at $144E8/$144EA, light $15644, countdown $144BD = 6.
+// It writes no view word ($144E4/$144E6), so the view must stay where it was for every caller.
+{
+  const cases = [
+    [0, 0, 0, 0], [3, 3, 0, 0], [4, 4, 0, 0], [5, 6, 1, 2], [96, 71, 92, 67], [97, 75, 92, 67], [99, 74, 92, 67], [99, 0, 92, 0], [0, 74, 0, 67],
+  ];
+  for (const [x, y, bx, by] of cases) {
+    const { state, sim } = fresh({ defectUnit: () => ({ x, y }) });
+    state.setWord(0x144e4, 30);
+    state.setWord(0x144e6, 20);
+    state.setWord(0x1429c, 1);
+    sim.aliens.eventTankDefect(100);
+    check(`event 17 focus at (${x},${y}): bookmark (${bx},${by}), light on, countdown 6, view words untouched`,
+      state.word(0x144e8) === bx && state.word(0x144ea) === by && sim.alerts.lit(LIGHT.focus) && state.byte(0x144bd) === 6 &&
+      state.word(0x144e4) === 30 && state.word(0x144e6) === 20, `${state.word(0x144e8)},${state.word(0x144ea)}`);
+  }
+  const { state, sim } = fresh();
+  state.setWord(0x1429c, 3);
+  sim.aliens.eventTankDefect(100);
+  check("no defection hook: no tank to convert, so counters, message and bookmark stay as they were",
+    state.word(0x1429c) === 3 && state.word(0x142a2) === 0 && !sim.messages.includes(0x181) && !sim.alerts.lit(LIGHT.focus));
+}
+{
+  // Event 4 ($11090): the focus at the mine's cell comes after the demolition and before message $DF.
+  const seq = [];
+  const { state, world, sim } = fresh({ effect: (k, x, y) => seq.push(`${k}${x},${y}`) });
+  world.objects.fill(0);
+  world.objects.set([0x00, 0x60, 0, 0, 20, 21, 0, 0], 3 * 8);
+  state.setWord(0x133c2, 1);
+  const msg = sim.msg.bind(sim);
+  sim.msg = (i) => { seq.push(`msg${i}`); msg(i); };
+  sim.eventMineCollapse(100);
+  const at = seq.indexOf("focus20,21");
+  check("event 4 (mine collapse): bookmark on the mine cell (20,21) before message $DF", at >= 0 && at < seq.indexOf("msg223") && state.word(0x144e8) === 16 && state.word(0x144ea) === 17, seq.join(" "));
+}
+{
+  // Event 19 ($10D00, arson): the bomb, then the focus on the bombed building's cell, then the caller's message $119.
+  const seq = [];
+  const { state, world, sim } = fresh({ effect: (k, x, y) => seq.push(`${k}${x},${y}`) });
+  world.objects.fill(0);
+  world.objects.set([0x00, 0x20, 0, 0, 10, 11, 0, 0], 2 * 8);
+  state.setWord(0x142c2, 1);
+  state.setLong(0x14472, 0); // invention bit 3 clear: arson can happen
+  state.setByte(0x144c6, 0); // security 0: the percentage roll always takes the bombing branch
+  state.setByte(0x144bc, 0);
+  const result = sim["crimeArson"]();
+  const focus = seq.indexOf("focus10,11");
+  check("event 19 (arson): bombed cell (10,11) is the focus, message $119 returned, bookmark moved",
+    result === 0x119 && focus >= 0 && seq.slice(focus + 1).every((s) => !s.startsWith("focus")) && state.word(0x144e8) === 6 && state.word(0x144ea) === 7, seq.join(" "));
 }
 
 // ---- alien appearance (event 1) -----------------------------------------------------------------------------
@@ -197,7 +255,38 @@ function addRecord(world, tile, x, y, byte3 = 0xff) {
   const firstMarker = [...world.cells].findIndex((c) => (c & 0x3ff) === 0x7f);
   check("marker cells registered in row-major order", state.word(0x144a6) >= 2 && state.byte(0x14524) === firstMarker % W && state.byte(0x14525) === Math.floor(firstMarker / W));
   sim.aliens.eventAlienAppears(40);
-  check("alien appears at a marker cell", sim.aliens.alien !== null && log.some((l) => l[0] === "alienAppear"));
+  check("alien appears at a marker cell", sim.aliens.alien !== null && state.byte(0x144a8) === 0x13 && state.byte(0x144ad) === 0);
+  check("event 1 is silent: no effect of any kind ($1146A has no $5A8C / $11B4 / $11432 call)", log.length === 0, JSON.stringify(log));
+}
+
+// ---- daily dispatch gate ($10E1E, Disk.1 `move.b (a0)+,d3; beq $10E50`) ---------------------------------------
+{
+  // Zero chance skips the handler for every slot, the attack wave (slot 9) included; the index still advances.
+  // The wave's own state is the observable: a run decays the strength at $13456+$18 and sets the pending bit $156AA.1.
+  const run = (chance) => {
+    const { state, sim } = fresh({}, { fixed: 0 });
+    state.setByte(0x13118 + 9, chance);
+    state.setByte(0x144bf, 9);
+    state.setByte(0x141b2, 0); // no countdown: the wave logic is reached
+    state.setByte(0x144ca, 0); // no intelligence: no warning roll
+    state.setByte(0x13456 + 0x18, 50);
+    state.setByte(0x13456 + 0x1d, 5);
+    state.setByte(0x13456 + 0x10, 0);
+    sim["eventScheduler"]();
+    return { state, sim };
+  };
+  const skipped = run(0);
+  check("slot 9 with chance 0 is not run: strength unchanged, no pending attack", skipped.state.byte(0x13456 + 0x18) === 50 && (skipped.sim.sysFlags & SYS.attackPending) === 0);
+  check("skipped slot still advances the event index", skipped.state.byte(0x144bf) === 10);
+  const ran = run(100);
+  check("slot 9 with chance 100 runs: strength decays and the attack is pending", ran.state.byte(0x13456 + 0x18) !== 50 && (ran.sim.sysFlags & SYS.attackPending) !== 0);
+  check("running slot advances the event index", ran.state.byte(0x144bf) === 10);
+  // Event 1 through the dispatcher: chance 40 with a roll of 0 appears and emits nothing.
+  const log = [];
+  const alienDay = fresh({ effect: (k, x, y) => log.push([k, x, y]) }, { fixed: 0, mutate: (w, st) => ((w.cells[10 * W + 11] = 0x7f), st.setWord(0x144a6, 0)) });
+  alienDay.state.setByte(0x144bf, 1);
+  alienDay.sim["eventScheduler"]();
+  check("slot 1 through the dispatcher places the alien silently", alienDay.state.byte(0x144a8) === 0x13 && log.length === 0, JSON.stringify(log));
 }
 
 // ---- saved alien animation state ($35C8-$35F8) ---------------------------------------------------------------

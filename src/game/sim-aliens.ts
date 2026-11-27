@@ -123,6 +123,12 @@ export class Aliens {
 
   // ---- event 1: an alien object shows up at a marker cell ($1146A) ----------------------------
 
+  /**
+   * $1146A (dispatch-table entry $10E60, the only reference to it in the image): roll(100) against the slot's chance
+   * byte, clear the record, then one roll(n) over the marker count picks the cell. Static trace: the routine makes no
+   * message call ($5A8C), no sound call ($11B4), no focus call ($11432) and no other effect, so the appearance is silent
+   * and only the sprite (read by the alien-sprite adapter) shows it.
+   */
   eventAlienAppears(chance: number): void {
     const s = this.s;
     if (this.sim.roll(100) >= chance) return;
@@ -133,12 +139,14 @@ export class Aliens {
     const alien = { x: s.byte(0x14524 + 2 * i), y: s.byte(0x14525 + 2 * i) };
     this.alien = alien;
     s.setByte(0x144ad, 0);
-    this.sim.effect("alienAppear", alien.x, alien.y);
   }
 
   /**
-   * `$157B8 -> $11476`: the first boot-menu exit clears the apparition, then chooses one of the
-   * scenario's marker coordinates with one range-`$144A6` draw. This startup path has no sound/effect.
+   * `$157B8 -> $11476`: a disk-menu tail exit (the first boot-menu exit, or a game-over restart) clears the apparition, then chooses
+   * one of the scenario's marker coordinates with one range-`$144A6` draw. This path has no sound/effect.
+   * APPROXIMATION: the draw is `Sim.roll` (the remake generator). The original's draw is `$2DCC` over its seed and CIA TOD byte
+   * (original-rng-callers.md, row 1), so the marker chosen here is not the original's for the same game; only the event and its
+   * range are traced.
    */
   initializeScenarioAppearance(): void {
     this.alien = null;
@@ -230,7 +238,7 @@ export class Aliens {
     if (!unit) return;
     s.setWord(0x142a2, s.word(0x142a2) + 1);
     s.setWord(0x1429c, s.word(0x1429c) - 1);
-    if (unit.x >= 0) sim.effect("focus", unit.x, unit.y);
+    sim.effect("focus", unit.x, unit.y); // $115E6 -> $11432: the tank's own cell (the converted record keeps it)
     sim.msg(0x181);
   }
 

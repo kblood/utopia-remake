@@ -94,10 +94,12 @@ for (const kind of ["f1", "f2", "f3", "f4", "f5", "f6", "trade", "market", "staf
   check(`${kind}: exit button closes`, clickButton(scene, 9) === "close");
 }
 {
+  // The F1-F6 reports end in `$B99C` -> `$58F8`, which reads the mouse only (window-input.mjs, section 2f): Escape does nothing.
   const { ctx } = fresh();
   const scene = createScreen("f1", ctx);
+  scene.update(input);
   input.keys.push("Escape");
-  check("f1: Escape closes", scene.update(input) === "close");
+  check("f1: Escape does not close (no key leaves a report)", scene.update(input) === "running");
 }
 
 // --- report screens: derived strings and sums ---------------------------------------------------
@@ -329,14 +331,14 @@ check("intel level thresholds", intelLevel(0) === 0 && intelLevel(1) === 1 && in
   esc.update(input);
   input.keys.push("Escape");
   const escapeResult = esc.update(input);
-  check("button sound: right click and Escape stay silent and close", played.length === 0 && rightResult === "close" && escapeResult === "close");
+  check("button sound: a right click and Escape stay silent and do not close a report", played.length === 0 && rightResult === "running" && escapeResult === "running");
 
   const council = createScreen("f1", ctx);
   council.setCouncilMode();
   council.update(input);
-  const councilResult = press(council, x + 4, y + 4); // same coordinate, but council has no button column
-  release(council);
-  check("button sound: council mode (no button column) is silent and closes", played.length === 0 && councilResult === "close");
+  const councilPress = press(council, x + 4, y + 4); // same coordinate, but council has no button column
+  const councilResult = release(council); // the council report leaves on the click's release ($2E48), not on the press
+  check("button sound: council mode (no button column) is silent and closes on the release", played.length === 0 && councilPress === "running" && councilResult === "close");
 
   const quiet = fresh().ctx; // no sound hook: unchanged behaviour
   const silent = createScreen("f1", quiet);
@@ -444,6 +446,98 @@ check("intel level thresholds", intelLevel(0) === 0 && intelLevel(1) === 1 && in
   check("pressed flip: nothing outside the button changes", outside);
   flipButtonPixels(screen, x, y);
   check("pressed flip: running it again ($57FA) restores the button", screen.pixels.every((p, i) => p === before[i]));
+}
+
+// ---- 2g. F1-F6 without an online command centre ($15B4A tests word $133F8 before each report; zero branches to `$15B3E`,
+// which posts message $B2 and opens nothing). Static trace of Disk.1 (screens.md section 7). The Game-level part drives the key
+// path: with no power supply the monthly pass reaches shortage level 21 ($A0D4 -> $A1C2), which clears $133F8 (the command centre
+// goes offline), so F1 is refused; with the gate restored F1 opens its report.
+{
+  const { reportRefusal } = await import("../dist/game/screens/index.js");
+  const { REPORT_REFUSAL } = await import("../dist/game/screens/reports.js");
+  const { PERIOD } = await import("../dist/game/state.js");
+  const { T } = await import("../dist/game/world.js");
+  const { state } = fresh();
+  state.setWord(0x133f8, 0);
+  check("report gate: zero $133F8 refuses with message $B2", reportRefusal(state) === REPORT_REFUSAL && REPORT_REFUSAL === 0xb2);
+  state.setWord(0x133f8, 1);
+  check("report gate: an online command centre lets the reports open", reportRefusal(state) === -1);
+
+  // Game-level: the real key path. localStorage is a plain shim here (the game module reads it only when used).
+  const store = new Map();
+  globalThis.localStorage ??= { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => void store.set(k, String(v)), removeItem: (k) => void store.delete(k) };
+  const { Game } = await import("../dist/game/game.js");
+  const idle = { leftButton: false, rightButton: false, pointerX: 0, pointerY: 0, keys: [] };
+  const newGame = () => {
+    const game = new Game(disk1, disk2, null, null);
+    game.strings = strings;
+    game.bootMenuOpen = false;
+    game.startScenario(0);
+    game.update(idle); // consumes the opening-click guard of the scene (as game-over.mjs does)
+    return game;
+  };
+  // A window key is folded into the map's key cell on arrival and dispatched by the first completed pass's poll ($15B4A after the
+  // press, MapScene.poll), so it is taken at most one pass (4 updates) after arrival. `arrival` says what the arrival update did:
+  // "pass" (the arrival update was the pass), "taken" (the update reacted: a window opened or a line was posted), or "queued".
+  const pressKey = (g, key) => {
+    const keys = [key];
+    const passes = g.map.loop.passes;
+    let arrival = null;
+    for (let n = 0; n < 8 && g.map.loop.passes === passes; n++) {
+      const stage = g.stage;
+      const line = g.map.messages.inspect().lineFramesLeft;
+      g.update({ ...idle, keys });
+      if (arrival === null) {
+        const reacted = g.stage !== stage || g.map.messages.inspect().lineFramesLeft !== line;
+        arrival = g.map.loop.passes !== passes ? "pass" : reacted ? "taken" : "queued";
+      }
+    }
+    return { taken: g.map.loop.passes !== passes, arrival };
+  };
+
+  const control = newGame();
+  check("F1 with an online command centre opens the report (control)", control.map.world.state.word(0x133f8) === 1 && (pressKey(control, "F1"), control.stage === "screen"));
+
+  const game = newGame();
+  const map = game.map;
+  const said = [];
+  const say = map.say.bind(map);
+  map.say = (n) => {
+    said.push(n);
+    say(n);
+  };
+  const state2 = map.world.state;
+  for (const ty of [0, 11, 12, 31]) {
+    const a = map.world.typeAddress(ty); // no supply: power store, solar A and B, power station
+    state2.setWord(a + T.total, 0);
+    state2.setLong(a + T.stored, 0);
+  }
+  state2.setByte(A.pending, PERIOD.monthly);
+  map.sim.run();
+  check("monthly shortage with no supply reaches level 21 and clears $133F8", state2.byte(0x144c8) >= 0xe && state2.word(0x133f8) === 0, `level ${state2.byte(0x144c8)} gate ${state2.word(0x133f8)}`);
+  const refused = pressKey(game, "F1");
+  check("F1 without an online command centre: message $B2, no report, stage stays on the map", game.stage === "map" && game.window === null && said.includes(0xb2), `stage ${game.stage} said ${said.map((n) => n.toString(16))}`);
+  check("F1 is taken by the completed pass's poll, not on arrival (queued while the update is not a pass)", refused.taken && refused.arrival !== "taken", `arrival ${refused.arrival}`);
+  check("F1 refusal: the line timer reads 200 in the pass update that took the key (drawn there, first tick on the next update)", map.messages.inspect().lineFramesLeft === 200, `timer ${map.messages.inspect().lineFramesLeft}`);
+  game.update(idle);
+  check("the refused key is used up: the next idle update does not reopen the report", game.stage === "map" && game.window === null);
+  check("F1 refusal: the next update ticks the line to 199", map.messages.inspect().lineFramesLeft === 199, `timer ${map.messages.inspect().lineFramesLeft}`);
+  state2.setWord(0x133f8, 1); // the command centre is back online ($9B90)
+  pressKey(game, "F1");
+  check("F1 with the gate restored opens the report", game.stage === "screen");
+}
+
+// ---- 2h. Number entry and keypad digits (intro.ts keypadToken / typedDigit). The count entry's key table $650A (Disk.1) maps raw
+// $0F, $1D-$1F, $2D-$2F, $3D-$3F to the digits 0-9 besides the top row $0A-$01, so a keypad digit is typed like a top-row digit.
+// Releases type nothing (the original's release bytes have bit 7 set and are not in the table).
+{
+  const { NumberEntry } = await import("../dist/game/screens/ui.js");
+  const { keypadToken, keyUpToken, typedDigit, isKeypadToken } = await import("../dist/game/intro.js");
+  check("typedDigit: top-row and keypad digits give the digit; names, Enter and releases give none", typedDigit("7") === "7" && typedDigit(keypadToken("7")) === "7" && typedDigit("Enter") === undefined && typedDigit(keyUpToken("7")) === undefined && typedDigit(keypadToken("Enter")) === undefined);
+  check("keypadToken is recognised only by its prefix", isKeypadToken(keypadToken("1")) && !isKeypadToken("1") && !isKeypadToken(keyUpToken("1")));
+  const entry = new NumberEntry(0, 0, 4, 4);
+  entry.feed([keypadToken("4"), "2", keyUpToken("2"), keypadToken("9"), "Enter"]);
+  check("number entry: keypad and top-row digits are kept in order; a release adds no digit; Enter confirms 429", entry.done === 429 && entry.digits === "429", `digits=${entry.digits} done=${entry.done}`);
 }
 
 console.log(failed === 0 ? "all screen checks passed" : `${failed} screen check(s) FAILED`);

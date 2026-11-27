@@ -85,7 +85,8 @@ const s = world.state;
 
 // Static UI mapping: page 2 list slot 5 is tank yard tile $45 and its `$E9E2` hitbox is x=16..47/y=100..130.
 {
-  const controls = new Controls(disk1, world, builder, new GameStrings(disk1, 0), () => {}, () => ({ x: 47, y: 33 }));
+  const said = [];
+  const controls = new Controls(disk1, world, builder, new GameStrings(disk1, 0), (n) => said.push(n), () => ({ x: 47, y: 33 }));
   const clickSounds = [];
   controls.onClick = () => clickSounds.push(4);
   const update = (leftButton, x, y) => controls.update({ leftButton, rightButton: false, pointerX: x, pointerY: y, keys: [] });
@@ -121,6 +122,10 @@ const s = world.state;
   release(272, 139);
   check("exit button release commits the pending tile $45 into build mode without another click", !controls.menuVisible && controls.mode === "build" && controls.selection?.tile === 0x45 && clickSounds.join() === "4,4,4,4");
   check("page 2 tank-yard selection resolves to type-table entry T[22]", controls.selection?.type === 22 && world.typeAddress(controls.selection.type) === 0x1336e);
+  // Static `$6BA2` (Disk.1 $6BA2-$6BD6): after `$6B10`, `moveq #0,d0; bsr $551a` posts string 0 on the message line. The
+  // remake used to post the building name (string $1B) here. Item clicks and the commit post exactly one message: string 0.
+  check("build-mode commit posts exactly string 0 (the site prompt), not the building name", JSON.stringify(said) === "[0]", JSON.stringify(said));
+  check("string 0 reads 'Click on map to choose a site.'", String.fromCharCode(...new GameStrings(disk1, 0).get(0)) === "Click on map to choose a site.");
 }
 
 // The pointer position observed in the original run ($161A6/$161A8 = x 25, y 115) is inside the same hitbox {16,47,100,130}.
@@ -199,6 +204,66 @@ check("count back", s.word(t + 0x0c) === total0);
 
 for (let i = 0; i < 3 * 28 * 90; i++) sim.tick();
 check("simulation still runs", Number.isFinite(s.long(A.money)));
+
+// --- 2 x 2 demolition and site cancellation write one cleared id into every footprint cell ($74D6 / $752C -> $6FC4).
+// Completion ($703A -> $6A8C) and the Command Centre redraw ($7342 -> $6A8C) still write tile+0..+3 (static, Disk.1).
+{
+  const w2 = new World(new GameState(disk2, rec.block), loadMap(disk2, rec));
+  const b2 = new Builder(w2, readFlagTable(disk1), readWeights(disk1), () => {});
+  const st = w2.state;
+  // First type with a 2 x 2 footprint (byte +1 = 4) in scenario 0, read from the table rather than hard-coded.
+  let big = -1;
+  for (let i = 0; i < 34 && big < 0; i++) if (st.byte(w2.typeAddress(i) + 1) === 4) big = i;
+  const row = w2.typeAddress(big);
+  const tile = st.word(row + 8);
+  const cells = (x, y) => [[x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]].map(([cx, cy]) => w2.cell(cx, cy) & 0x3ff);
+  const freeSlot = () => { for (let i = 0; i < w2.objects.length; i += 8) if (w2.objects[i] === 0 && w2.objects[i + 1] === 0) return i; return -1; };
+  const sx = 20, sy = 20;
+  // Hand-built completed record of the 2 x 2 type at (sx, sy): the same bytes $703A leaves (tile, footprint, +3 = online flag 0).
+  {
+    const slot = freeSlot();
+    w2.objects[slot] = tile >> 8;
+    w2.objects[slot + 1] = tile & 0xff;
+    w2.objects[slot + 3] = 0;
+    w2.objects[slot + 4] = sx;
+    w2.objects[slot + 5] = sy;
+    st.setWord(row + 0x0a, 1);
+    st.setWord(row + 0x0c, 1);
+    st.setWord(0x142c2, st.word(0x142c2) + 1);
+    b2.construction.writeTiles(tile, sx, sy, 4);
+    check("2x2 setup: completed building writes tile..tile+3 (the $6A8C pattern)", cells(sx, sy).join() === [tile, tile + 1, tile + 2, tile + 3].map((v) => v & 0x3ff).join(), `${cells(sx, sy)}`);
+    check("2x2 demolition: the building is found and removed", b2.demolish(sx, sy) === true);
+    check("2x2 demolition: every footprint cell becomes the cleared tile $38 (not $38..$3B)", cells(sx, sy).every((c) => c === 0x38), `${cells(sx, sy)}`);
+  }
+  {
+    // A construction site of the same type: $6FC4 wrote tile $32 into all four cells; cancelling writes $38 the same way.
+    const slot = freeSlot();
+    const cx = 30, cy = 30;
+    w2.objects[slot] = 0x00;
+    w2.objects[slot + 1] = 0x32;
+    w2.objects[slot + 2] = tile >> 8;
+    w2.objects[slot + 3] = tile & 0xff;
+    w2.objects[slot + 4] = cx;
+    w2.objects[slot + 5] = cy;
+    st.setWord(0x142c2, st.word(0x142c2) + 1);
+    st.setWord(0x142c4, st.word(0x142c4) + 1);
+    b2.construction.markSite(0x32, cx, cy, 4);
+    check("2x2 site: all four cells carry the site tile $32", cells(cx, cy).every((c) => c === 0x32), `${cells(cx, cy)}`);
+    check("2x2 site cancel: demolishing the site clears it", b2.demolish(cx, cy) === true && st.word(0x142c4) === 0);
+    check("2x2 site cancel: every footprint cell becomes $38 (not $38..$3B)", cells(cx, cy).every((c) => c === 0x38), `${cells(cx, cy)}`);
+  }
+  {
+    // Command Centre redraw ($7342): online tiles $4C..$4F through $6A8C, four distinct ids (unchanged by this slice).
+    const slot = freeSlot();
+    w2.objects[slot] = 0x00;
+    w2.objects[slot + 1] = 0x4c;
+    w2.objects[slot + 3] = 0xff;
+    w2.objects[slot + 4] = 40;
+    w2.objects[slot + 5] = 40;
+    b2.construction.redrawCentre(slot);
+    check("Command Centre redraw still writes $4C..$4F through the +n pattern", cells(40, 40).join() === [0x4c, 0x4d, 0x4e, 0x4f].join(), `${cells(40, 40)}`);
+  }
+}
 
 // --- tank yard (tile $45 / T[22]): staged checks of the observed trace, notes/formats/building.md (2026-11-06) ----------
 // One observed scenario of unidentified index, so the preconditions below are set by hand (money 506030, no builders,

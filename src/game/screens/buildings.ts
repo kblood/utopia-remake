@@ -19,6 +19,7 @@ import type { Unit, UnitSystem } from "../units.js";
 import { cellFlagIndex, mapIndex } from "../cell-flags.js";
 import { OBJECT_SIZE, OBJECT_SLOTS, T, type World } from "../world.js";
 import { BUTTON_TABLE, PanelScene } from "./panel.js";
+import { readOrderByte, writeOrderByte } from "./order-byte.js";
 import type { ScreenContext, ScreenScene } from "./types.js";
 import { Ui, type Label } from "./ui.js";
 
@@ -263,8 +264,23 @@ export function blitIcon(screen: Screen, sprites: SpriteSet, type: number, x: nu
   }
 }
 
-// A window that only shows numbers and leaves on any button ($B99C).
-abstract class ReadOut extends PanelScene {
+// Base of every building window: each runs one of the traced loops of Disk.1 (`$B99C`, `$C0C6`, `$C280`, `$C3DE`, `$E122`,
+// `$CBB4`, `$D886`), which poll the mouse through `$50B2` (directly or via `$58F8`) and read no key. The static walk over the
+// callees (screens.md, "Key reads") finds no key read, so Escape and a right click alone never leave these windows; the
+// source's own exit does (button 9, or any button for the read-outs).
+abstract class TracedPanel extends PanelScene {
+  protected override get leavesOnEscapeOrRight(): boolean {
+    return false;
+  }
+
+  protected override get pollsLikeOriginal(): boolean {
+    return true;
+  }
+}
+
+// A window that only shows numbers and leaves on any button ($B99C). The loop is `$B99C` -> `$58F8` (static trace of
+// Disk.1): the exit button, or any other button, leaves on its release.
+abstract class ReadOut extends TracedPanel {
   constructor(ctx: ScreenContext, windowAddress: number, buttons: number = BUTTON_TABLE.default, ui?: Ui) {
     const u = ui ?? new Ui(ctx.disk, ctx.strings);
     super(ctx, u.readWindow(windowAddress), buttons, u);
@@ -314,7 +330,9 @@ class FuelScreen extends ReadOut {
 
 // ---- command centre $BFEC ---------------------------------------------------------------------
 
-class CommandCentreScreen extends PanelScene {
+// The loop `$C0C6` (static trace, building-screens.md 3.3): `$58F8` on the buttons `$E95C`. Button 8 switches the centre,
+// button 9 leaves, the other buttons loop without effect.
+class CommandCentreScreen extends TracedPanel {
   private readonly a: Access;
   private readonly labelList: Label[];
   private readonly status: Label;
@@ -400,7 +418,8 @@ export function nextBirthRate(rate: number): number {
   return i < 0 ? 0 : BIRTH_RATES[(i + 1) % BIRTH_RATES.length];
 }
 
-class HospitalScreen extends PanelScene {
+// The loop `$C280` (static trace, building-screens.md 3.4): button 8 steps the birth rate, 9 leaves, the others loop.
+class HospitalScreen extends TracedPanel {
   private readonly a: Access;
   private readonly labelList: Label[];
 
@@ -428,7 +447,9 @@ class HospitalScreen extends PanelScene {
 
 export const EVENT_WEEKS = 12;
 
-class SportsScreen extends PanelScene {
+// The loop `$C3DE` (static trace, building-screens.md 3.5): button 8 calls an event only while the countdown is 0 (`$C41C`),
+// otherwise the loop goes on; 9 leaves.
+class SportsScreen extends TracedPanel {
   private readonly a: Access;
   private readonly labelList: Label[];
   private announced = false;
@@ -493,7 +514,9 @@ export function removeBuilding(ctx: ScreenContext, at: number): void {
   writeTiles(ctx, TILE.rubble, x, y, 1);
 }
 
-class MissileScreen extends PanelScene {
+// The loop `$E122` (static trace, building-screens.md 3.6): button 8 fires only with a target (`$E158`), otherwise the loop goes
+// on; a fire, or a failed one, closes the window (`$E14A`); 9 leaves.
+class MissileScreen extends TracedPanel {
   private readonly a: Access;
   private readonly labelList: Label[];
   private readonly target: MissileTarget | null;
@@ -571,7 +594,10 @@ export function teleportUnit(ctx: ScreenContext, units: UnitSystem, unit: Unit, 
   return MSG.teleported;
 }
 
-class TeleportScreen extends PanelScene {
+// The loop `$CBB4` (static trace, building-screens.md 3.8) polls `$50B2` itself. A press on a command button is a latch
+// (`$5756`); a press on a placed pin selects it (`$CC46`, a press elsewhere does nothing); a release runs the latch: 8 returns
+// the selected pin (`$CC22`, then `$722A`), 9 leaves, the other buttons loop. A latched release first sets the order byte to $FF (`$CC0E`).
+class TeleportScreen extends TracedPanel {
   private readonly labelList: Label[];
   private readonly sprites: SpriteSet;
   private readonly rects: { x0: number; x1: number; y0: number; y1: number }[];
@@ -620,8 +646,11 @@ class TeleportScreen extends PanelScene {
   }
 
   protected override onButton(index: number): "running" | "close" {
+    // `$CC0E`: every button event first sets $F173 to $FF; button 8 then copies the selected pin ($F172) into it.
+    writeOrderByte(this.ctx.world, NO_PIN);
     if (index === ICON_EXIT) return "close";
     if (index !== ICON_LAUNCH) return "running";
+    writeOrderByte(this.ctx.world, this.selected);
     if (this.selected !== NO_PIN) {
       const to = this.pins[this.selected];
       if (to) this.ctx.say?.(teleportUnit(this.ctx, this.units, this.unit, to));
@@ -645,14 +674,19 @@ export function shipMonths(work: number, staff: number, yards: number): number {
   return Math.floor(work / d1) + 1;
 }
 
-class ShipOrderScreen extends PanelScene {
+// The yard loop `$D886` (static trace, building-screens.md 3.7): mouse only, through `$50B2`. Button 8 orders, 9 leaves.
+class ShipOrderScreen extends TracedPanel {
   private readonly a: Access;
   private readonly labelList: Label[];
   private readonly sprites: SpriteSet;
   private readonly rects: { x0: number; x1: number; y0: number; y1: number }[];
   private readonly workTable: number[];
-  private selected = -1; // $F174 (-1 = none yet)
-  private work = 0; // $F173
+  /** $F174: the icon of the last press, locked or not (-1 = none since the window opened; reset at `$D7EA`). */
+  private index = -1;
+  /** The selection that is drawn (name and estimate): only an unlocked icon is ever drawn (`$D936`). */
+  private shown = -1;
+  /** The table work value of the drawn selection (`$D98E`); null = nothing drawn. The order itself reads $F173 (see `onButton`). */
+  private work: number | null = null;
 
   constructor(
     ctx: ScreenContext,
@@ -676,8 +710,8 @@ class ShipOrderScreen extends PanelScene {
     for (let k = 0; k < SHIP_TYPES; k++) {
       if (this.unlocked(k)) blitIcon(screen, this.sprites, SHIP_SPRITE_FIRST + k, this.rects[k].x0 - 8, this.rects[k].y1);
     }
-    if (this.selected >= 0) {
-      this.ui.str(screen, 0xbe + this.selected, 57, 103, COLOR.highlight);
+    if (this.shown >= 0 && this.work !== null) {
+      this.ui.str(screen, 0xbe + this.shown, 57, 103, COLOR.highlight);
       const months = shipMonths(this.work, this.a.state.long(V.shipStaff), this.a.t(TYPE.shipYard, T.total));
       this.ui.numbers(screen, [months], 136, 121, 3, COLOR.highlight);
     }
@@ -686,21 +720,27 @@ class ShipOrderScreen extends PanelScene {
   protected override onClick(): void {
     const { x, y } = this.pointer;
     const k = this.rects.findIndex((r) => x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1);
-    // Deviation: the original selects a locked icon without showing it and would then store a stale work value;
-    // here a locked icon is simply not selectable.
-    if (k >= 0 && this.unlocked(k)) {
-      this.selected = k;
-      this.work = this.workTable[k];
-    }
+    if (k < 0) return;
+    // `$D91C`: the index is stored BEFORE the lock test, so a locked icon becomes the order without being drawn
+    // (`$D922`-`$D932` return to the loop: no name, no estimate, no work change).
+    this.index = k;
+    if (!this.unlocked(k)) return;
+    this.shown = k;
+    this.work = this.workTable[k];
+    // `$D99C`: the work value of an unlocked choice is stored in $F173 and stays there after the window closes.
+    writeOrderByte(this.ctx.world, this.work);
   }
 
   protected override onButton(index: number): "running" | "close" {
     if (index === ICON_EXIT) return "close";
     if (index !== ICON_LAUNCH) return "running";
-    if (this.selected >= 0) {
+    // `$D8DE`-`$D8EC`: an index is ordered as type index + 1 with the current byte of $F173, which may come from an
+    // earlier window (order-byte.ts). Only an unknown byte (no window of this session wrote it) orders nothing here.
+    const work = readOrderByte(this.ctx.world);
+    if (this.index >= 0 && work !== null) {
       const o = this.ctx.world.objects;
-      o[this.at + 6] = this.selected + 1;
-      o[this.at + 7] = this.work;
+      o[this.at + 6] = this.index + 1;
+      o[this.at + 7] = work;
     }
     return "close";
   }

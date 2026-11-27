@@ -213,9 +213,11 @@ export interface SfxOptions {
 export interface Sfx {
   readonly count: number;
   /**
-   * Play effect `id` (0..5, see `SFX`). `volume` 0..64 overrides the descriptor's default: the original passes 64
-   * (full) to the explosions when the blast is inside the visible map window and 32 when it is outside.
-   * Call from a user-gesture handler the first time so the browser lets audio start.
+   * Play effect `id` (0..5, see `SFX`). `volume` 0..64 is written to the effect's shared descriptor, as `$1237C` does: the
+   * original passes 64 (full) to the explosions when the blast is inside the visible map window and 32 when it is outside.
+   * A queued entry sounds at the descriptor's volume when it starts, so a later write (even a dropped request's) changes an
+   * entry that has not started yet (notes/formats/sfx.md, consequence 8). Call from a user-gesture handler the first time
+   * so the browser lets audio start.
    */
   play(id: number, volume?: number): void;
   /**
@@ -395,11 +397,12 @@ export function createSfx(disk1: Uint8Array, _disk2?: Uint8Array, options: SfxOp
       return engine.enabled;
     },
     play(id, vol) {
-      if (disposed || !engine.enabled) return;
+      if (disposed) return;
       const ctx = sharedAudioContext();
       if (!ctx || !bank.effects[id]) return;
       const frame = frameOf(ctx);
       observeMusic(frame);
+      // the engine refuses the request while the effects are off, but the volume is still written to the shared descriptor
       engine.request(id, frame, effectChannelsFor(link), vol);
       flush(ctx);
     },

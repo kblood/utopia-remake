@@ -4,6 +4,7 @@
 // No graphics: the interface gets `effect(kind, x, y)` and `Sim.events` entries. Notes: notes/formats/sim-port.md.
 
 import { MAP_WIDTH, MAP_HEIGHT, TILE_ID_MASK } from "../data/scenario.js";
+import { cellFlagIndex } from "./cell-flags.js";
 import { divuQ, mulu, s16, s8 } from "./sim-math.js";
 import { SHIP_FUEL_CAP, SHIP_UNIT_TYPE, UNIT_INIT, YARD_FRAME_COST, YARD_GOODS3 } from "./sim-tables.js";
 import type { RestoredMissile } from "./ship-roster.js";
@@ -13,9 +14,8 @@ import { OBJECT_SLOTS } from "./world.js";
 // Graphics hook kinds (SimOptions.effect). Coordinates are map cells.
 export type EffectKind =
   | "explosion" // $1237C: explosion at a cell
-  | "focus" // $11432: the original recentres the view on the cell (scroll target)
+  | "focus" // $11432: stores the bookmark (x-4, y-4, clamped) and lights its light; the view does not move
   | "launch" // $4128 loop: yard flash while a ship takes off
-  | "alienAppear" // $144A8 sprite (type 19) shown at a marker cell
   | "meteorFall" // $1449C meteor (type 21) starts falling
   | "meteorImpact"; // $11676 meteor lands at the cell
 
@@ -67,6 +67,9 @@ export const SHIP_YARD_TILE = 0x36;
 const TILE_LAUNCHPAD = 0x48;
 const CELL_UNIT = 0x4000; // map flag bit 14: a ground-layer unit stands here
 const CELL_AIR = 0x2000; // bit 13
+// Per-cell flag byte bit 2 ($3D3A6 array): own ground (a tank, or a ship standing on the ground). `$387E` sets it on the
+// launch cell with `bset.b #2,(a4)`, where a4 comes from `$497E`; the ship's `+$14` names that same cell.
+const CELL_FLAG_OWN = 4;
 
 const V = { ships: 0x1429e, tanksStored: 0x13310, tanksStoredB: 0x13322, fuelStored: 0x14342, tankCountA: 0x13302, tankCountB: 0x13314 };
 
@@ -77,12 +80,15 @@ export class Fleet {
   // Daily step ($ACE2) of every missile, launched or restored: it needs the enemy slots, so the EnemySystem installs it.
   private missileDaily: ((missile: MissileRecord) => void) | null = null;
   // $4732 releases the layer mark at the cell addressed by +$14. EnemySystem owns the live reservation state.
-  private releaseReservation: ((ship: FleetRecord) => void) | null = null;
+  private releaseReservation: ((ship: FleetRecord, blasted: boolean) => void) | null = null;
 
   constructor(private readonly sim: Sim) {}
 
-  /** Installed by EnemySystem so every destruction path (daily fuel/event as well as combat) frees +$14's cell. */
-  setReservationRelease(release: (ship: FleetRecord) => void): void {
+  /**
+   * Installed by EnemySystem so every destruction path (daily fuel/event as well as combat) frees +$14's cell. `blasted`
+   * is true when the destruction's blast clobbered A6, in which case the map-bit release is skipped (flag bit still freed).
+   */
+  setReservationRelease(release: (ship: FleetRecord, blasted: boolean) => void): void {
     this.releaseReservation = release;
   }
 
@@ -128,6 +134,7 @@ export class Fleet {
     if (slot < 0) return null;
     s.setWord(V.ships, s.word(V.ships) + 1);
     this.sim.world.cells[this.cellIndex(x, y)] |= CELL_UNIT;
+    this.sim.world.cellFlags[cellFlagIndex(x, y)] |= CELL_FLAG_OWN; // $387E: bset.b #2 on the launch cell's flag byte
     const init = UNIT_INIT[type - 9];
     const cls = type - 11;
     const ship: Ship = {
@@ -156,6 +163,8 @@ export class Fleet {
   // no map or flag write (the EnemySystem sets the air mark and the reservation) and no message: a full list ($1429E == 40 or no
   // free slot) is refused by returning null and the caller says $12B. Mode 4, lift 0, no target yet (+B/+C = $FF); the target
   // pointer is the EnemySystem's (ShipExtra.targetSlot). hp from table $4B76 row 17, tech byte $14592.
+  // Direction 8 is the caller's `moveq #8,d4` at $4A36 (Disk.1 $49E8), stored at +5 by $381E (`move.b d4,$5(a6)` at $382A);
+  // the same value ordinary ship creation uses. The climb to mode 1 (`$44DE`) overwrites it, so it only shows in saved state.
   createMissile(x: number, y: number): MissileRecord | null {
     const s = this.s;
     if (s.word(V.ships) >= MAX_SHIPS) return null;
@@ -169,7 +178,7 @@ export class Fleet {
       y,
       dx: 0,
       dy: 0,
-      dir: 0,
+      dir: 8,
       hp: UNIT_INIT[17 - 9].hp,
       mode: 4,
       tech: s.byte(0x14592),
@@ -181,7 +190,9 @@ export class Fleet {
     return missile;
   }
 
-  // $46CC: remove a ship. `message` 0 = none. Counts as a lost unit (-100 morale) except for projectiles.
+  // $46CC: remove a ship. `message` 0 = none. Counts as a lost unit (-100 morale) except for projectiles. `explode` = the
+  // destroyer set bit 5 of $156A9 just before the call; `$4732` also blasts when a stale mark is left (`Sim.takeBlastMark`),
+  // at the ship (lift as height, high volume) before the marks are released.
   destroyShip(ship: FleetRecord, message = 0, explode = true): void {
     const s = this.s;
     const sim = this.sim;
@@ -195,14 +206,16 @@ export class Fleet {
     }
     s.setWord(V.ships, s.word(V.ships) - 1);
     this.slots[slot] = null;
-    if (this.releaseReservation) this.releaseReservation(ship);
-    else {
+    // $4732 clears the record, then blasts (`$1237C`, $12D68 = lift, high volume); the blast's A6 clobber decides whether
+    // $46CC's map-bit release still runs (ship-control.md 5e).
+    const blasted = sim.takeBlastMark(explode) ? sim.blast(ship.x, ship.y, ship.lift, true) : false;
+    if (this.releaseReservation) this.releaseReservation(ship, blasted);
+    else if (!blasted) {
       // Standalone Fleet fallback, used only when no EnemySystem owns ship movement/reservations.
       const i = this.cellIndex(ship.x, ship.y);
       if (ship.lift !== 0) sim.world.cells[i] &= ~CELL_AIR;
       else sim.world.cells[i] &= ~CELL_UNIT;
     }
-    if (explode) sim.effect("explosion", ship.x, ship.y);
     sim.events.push({ kind: "ship", what: "destroyed", type: ship.type, x: ship.x, y: ship.y });
     if (message !== 0) sim.msg(message);
   }

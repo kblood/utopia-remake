@@ -13,8 +13,11 @@ import type { Input } from "../intro.js";
 import { GameImage } from "./image.js";
 import { placeNextMarker } from "./markers.js";
 import { fillRect, restoreMainBackground } from "./planar.js";
+import { MousePoll } from "./mouse-poll.js";
 import type { Cell, OverviewUnits, ScreenContext, ScreenScene } from "./types.js";
-import { Pointer } from "./ui.js";
+
+// Events one frame can carry: a left press, then a right re-press (and a release before them). Same bound as the windows.
+const MAX_POLL_EVENTS = 4;
 
 const PICTURE: SectorRange = { first: 0x2e8, last: 0x2f6 }; // picture 0 of the table at $8C8C
 
@@ -54,7 +57,23 @@ const PIN_STRIP_Y = 151;
 export const VIEW_CELLS = 8;
 const MAX_SCROLL_X = 0x5c;
 const MAX_SCROLL_Y = 0x43;
-const BLINK_FRAMES = 8; // HYPOTHESIS: the original counts 6000 mouse polls ($10A84) between toggles
+// Blink cadence (static trace of Disk.1, screens.md section 8 "Blink cadence"). Copperline measured 10 VBLs per blink on a
+// 68020 reference machine and 14 on a 68000 A600 config (2026-11-10); this model, with its constants, still gives 10 and is
+// not recalibrated here. The loop counts
+// idle passes in `$10A84`: `move.w #$1770` at `$F214` (6000) on every restart of the loop at `$F208`, one decrement per pass
+// at `$F21C`. At zero the loop waits for a VBL (`$F22C`), the pin routine `$FD80` waits for a second (`$FDA6`), then it
+// toggles the pin phase `$10A86` (`$FEC8`) and restarts. The model counts passes, not frames: a frame has room for a fixed
+// number of idle passes, so the blink lands on a frame boundary, `IDLE_POLLS_PER_FRAME` passes after the last restart.
+export const BLINK_POLLS = 0x1770; // $F214: passes until the blink
+// One idle pass: `$F21C`-`$F268` plus the `$50B2` idle path (`$50B4`-`$50FE`), summed from the 68000 table as recalled (no
+// table in the repo, unverified); the bus floor (executed words and bus accesses at 4 clocks each) is 188. DMA only adds.
+// Measured (screens.md, section 8): 196 clocks at 7.09 MHz matches the A1200 68020 run (96 CCK, about 27 us per pass); the
+// 68000 A600 run took about 305 clocks per pass, so this constant is not a 68000 figure. Not recalibrated here.
+export const IDLE_POLL_CLOCKS = 196;
+// One PAL video frame: 312.5 lines of 454 clocks at 7,093,790 Hz. The frames themselves are 141,648 or 142,102 clocks.
+export const PAL_FRAME_CLOCKS = 141875;
+/** Idle passes per video frame in the model (723 with the figures above). */
+export const IDLE_POLLS_PER_FRAME = Math.floor(PAL_FRAME_CLOCKS / IDLE_POLL_CLOCKS);
 
 // Colours of the classes the layers use.
 const GROUND = 5;
@@ -278,13 +297,15 @@ interface Pin {
 export class OverviewScreen implements ScreenScene {
   private readonly image: GameImage;
   private readonly assets: OverviewAssets;
-  private readonly pointer = new Pointer();
+  private readonly mouse = new MousePoll(); // the `$50B2` state of the loop (mouse-poll.ts)
+  private mouseStarted = false;
   private readonly rects: { x0: number; x1: number; y0: number; y1: number }[] = [];
   private readonly circles: Uint8Array[];
   private colours: Uint8Array = new Uint8Array(0);
   private pins: Pin[] = [];
   private pressed = -1;
-  private blink = 0;
+  private idlePolls = 0; // $10A84 counted up: idle passes since the last restart of the loop (BLINK_POLLS expires it)
+  private blinkWait = false; // the first VBL wait of the blink ($F22C) ended this frame; the second ($FDA6) ends the next
   private pinsShown = false; // $10A86: markers are drawn on the map and preview only every other period
   private target: Screen | null = null;
   private done = false;
@@ -346,8 +367,21 @@ export class OverviewScreen implements ScreenScene {
       units,
     });
     this.pins = (this.ctx.objects?.markers ?? []).filter((m) => m.y !== 0xff).map((m) => ({ number: m.type, x: m.x, y: m.y }));
-    this.pinsShown = false;
-    this.blink = 0;
+    this.pinsShown = false; // $FC7A: `clr.b $10A86` on every rebuild, so the next blink draws the pins
+  }
+
+  // Test and diagnostic reads of the blink state (no caller changes it).
+  get idlePassCount(): number {
+    return this.idlePolls;
+  }
+  get blinkPending(): boolean {
+    return this.blinkWait;
+  }
+  get pinsDrawn(): boolean {
+    return this.pinsShown;
+  }
+  get latchedButton(): number {
+    return this.pressed;
   }
 
   // ---- input --------------------------------------------------------------------------------
@@ -356,46 +390,79 @@ export class OverviewScreen implements ScreenScene {
     return this.rects.findIndex((r) => px >= r.x0 && px <= r.x1 && py >= r.y0 && py <= r.y1);
   }
 
+  // The loop of $F208-$F2F6 (static trace of Disk.1): every event of the mouse poll `$50B2` runs its branch at once. A left
+  // press hit-tests the pointer: a layer button is latched and clicked, the preview or the map scrolls or places a pin, and
+  // anything else does nothing. A release runs the latched button ($57FA) wherever the pointer is; only the exit button (7)
+  // leaves. The loop reads no key and no right button: Escape and a right click do nothing here (screens.md section 8).
+  // One video frame (one update). The loop of $F208-$F2F6 is what runs between the VBL waits: idle passes count `$10A84`
+  // down from 6000, every event that reaches `$F208` restarts the count (see press() and the release below), and the
+  // blink waits for the VBLs of section "Blink cadence" in screens.md. The frame's events come first, then its idle passes.
+  // The event's place within the frame is not resolved, so a frame with a restart keeps half a frame of idle passes (the
+  // expected passes after a uniformly placed event). Tests: test/overview.mjs, "blink cadence".
   update(input: Input): "running" | "close" {
     if (this.done) return "close";
-    const keys = input.keys ? input.keys.slice() : [];
     if (input.keys) input.keys.length = 0;
-    this.pointer.update(input);
-    const p = this.pointer;
-    // Escape and the right button leave (the original needs the exit button).
-    if (keys.includes("Escape") || p.rightPressed) return this.leave();
+    if (!this.mouseStarted) {
+      this.mouse.start(input.leftButton, input.rightButton);
+      this.mouseStarted = true;
+    }
 
-    if (++this.blink >= BLINK_FRAMES) {
-      this.blink = 0;
+    // $FDA6 after the first VBL ($F22C) of the blink: the loop polls nothing while it waits. This frame's end is the second
+    // VBL; the pin phase toggles ($FEC8) and the count restarts from zero at $F214 (no idle pass of this frame is counted).
+    if (this.blinkWait) {
+      this.blinkWait = false;
       this.pinsShown = !this.pinsShown;
+      this.idlePolls = 0;
+      return "running";
     }
 
-    if (p.pressedEdge) {
-      const b = this.buttonAt(p.x, p.y);
-      if (b >= 0) {
-        this.ctx.sound?.(SFX.CLICK); // $F29C -> $5756 requests id 4 on the press edge.
-        this.pressed = b; // $5756: shown flipped until released
-      } else if (p.x >= PREVIEW_HIT.x0 && p.x < PREVIEW_HIT.x1 && p.y >= PREVIEW_HIT.y0 && p.y < PREVIEW_HIT.y1) {
-        // $F3B2: the clicked preview cell gets (or loses) a marker pin through $311E, no message shown.
-        const cx = this.scrollX + ((p.x - PREVIEW_HIT.x0) >> 3);
-        const cy = this.scrollY + ((p.y - PREVIEW_HIT.y0) >> 3);
-        if (this.ctx.objects) placeNextMarker(this.ctx.objects, cx, cy);
+    let restarted = false;
+    for (let n = 0; n < MAX_POLL_EVENTS && this.mouse.poll(input.leftButton, input.rightButton); n++) {
+      if (this.mouse.isLeftHeld) {
+        restarted = this.press(input.pointerX, input.pointerY) || restarted;
+      } else if (this.pressed >= 0) {
+        const b = this.pressed;
+        this.pressed = -1;
+        if (b === EXIT_BUTTON_INDEX) return this.leave();
+        this.mode = b; // $144B6 = the button; the map is redrawn with the new layer
+        this.ctx.world.state.setByte(OVERVIEW.mode, b);
         this.rebuild();
-      } else if (p.x < MAP_LIMIT_X && p.y < MAP_LIMIT_Y) {
-        const c = scrollForClick(p.x, p.y);
-        this.setScroll(c.x, c.y);
-        this.rebuild();
+        restarted = true; // $F2F6 -> $F208
       }
+      // A release with nothing latched and a right press alone leave through $F21C: no restart.
     }
-    if (p.releasedEdge && this.pressed >= 0) {
-      const b = this.pressed;
-      this.pressed = -1;
-      if (b === EXIT_BUTTON_INDEX) return this.leave();
-      this.mode = b; // $144B6 = the button; the map is redrawn with the new layer
-      this.ctx.world.state.setByte(OVERVIEW.mode, b);
-      this.rebuild();
-    }
+
+    if (restarted) this.idlePolls = IDLE_POLLS_PER_FRAME >> 1;
+    else this.idlePolls += IDLE_POLLS_PER_FRAME;
+    if (this.idlePolls >= BLINK_POLLS) this.blinkWait = true; // the first VBL ($F22C) ends this frame
     return "running";
+  }
+
+  // A left press at the pointer ($F284). Returns true when the original restarts the loop through $F208: the preview ($F3B2,
+  // then $F2F6), the map ($F2D4, then $F2F6) and the pointer off the map ($F2C4 branches to $F208 without changing anything).
+  // A layer button press only latches the button and returns to $F21C ($5756, `bra $F21C`), so it does not restart the count.
+  private press(px: number, py: number): boolean {
+    const b = this.buttonAt(px, py);
+    if (b >= 0) {
+      this.ctx.sound?.(SFX.CLICK); // $F29C -> $5756 requests id 4 on the press
+      this.pressed = b; // $5756: shown flipped until released ($5DD4 holds the index)
+      return false;
+    }
+    if (px >= PREVIEW_HIT.x0 && px < PREVIEW_HIT.x1 && py >= PREVIEW_HIT.y0 && py < PREVIEW_HIT.y1) {
+      // $F3B2: the clicked preview cell gets (or loses) a marker pin through $311E, no message shown.
+      const cx = this.scrollX + ((px - PREVIEW_HIT.x0) >> 3);
+      const cy = this.scrollY + ((py - PREVIEW_HIT.y0) >> 3);
+      if (this.ctx.objects) placeNextMarker(this.ctx.objects, cx, cy);
+      this.rebuild();
+      return true;
+    }
+    if (px < MAP_LIMIT_X && py < MAP_LIMIT_Y) {
+      const c = scrollForClick(px, py);
+      this.setScroll(c.x, c.y);
+      this.rebuild();
+      return true;
+    }
+    return true; // $F2C4: off the map (x >= $D1 or y >= $A0) the loop restarts at once and nothing else changes
   }
 
   private leave(): "close" {

@@ -268,6 +268,32 @@ if (!fs.existsSync(d1) || !fs.existsSync(d2)) {
     return same(after.d1, before.d1) && same(after.d2, before.d2) && same(after.state, before.state) && same(after.cells, before.cells) && same(after.objects, before.objects) && same(after.flags, before.flags) && after.tiles.every((t, i) => same(t, before.tiles[i]));
   })());
 
+  // Mode icon (`$6B10` at (272, bottom row 52)): a fresh Controls is in select mode and draws tile $39 (`$15EF0`, the
+  // select entry the map runs before its first pass); demolish mode draws $3A (`$15ECA`). The box is x 272..303, rows 30..52,
+  // the rows of the tile itself; expected pixels are the tile composed by blitTile over a blank screen (the same helper as the
+  // side preview), so nothing else in the box may change. Static trace, map-rendering.md section 9; the $39 pixels also match
+  // the Copperline capture (section 11).
+  {
+    const controls = new Controls(disk1, world, builder, strings, () => {}, () => ({ x: 47, y: 33 }), () => {}, tileSet.tiles);
+    const boxMatches = (tile) => {
+      const got = new Screen();
+      controls.draw(got);
+      const want = new Screen();
+      bm.blitTile(want, tileSet.tiles[tile - 1], 272, 52);
+      let opaque = 0;
+      for (let y = 30; y <= 52; y++) for (let x = 272; x <= 303; x++) {
+        if (want.pixels[y * 320 + x] !== 0) opaque++;
+        if (got.pixels[y * 320 + x] !== want.pixels[y * 320 + x]) return { ok: false, opaque };
+      }
+      return { ok: opaque > 0, opaque };
+    };
+    const select = boxMatches(0x39);
+    check("select mode draws tile $39 in the mode icon box (x 272..303, rows 30..52)", controls.mode === "select" && select.ok, `opaque ${select.opaque}`);
+    controls.mode = "demolish";
+    const demolish = boxMatches(0x3a);
+    check("demolish mode draws tile $3A in the mode icon box", demolish.ok, `opaque ${demolish.opaque}`);
+  }
+
   // Controls wiring: the same page mapping selects what is drawn; T[22] shows 6000.
   {
     const controls = new Controls(disk1, world, builder, strings, () => {}, () => ({ x: 47, y: 33 }), () => {}, tileSet.tiles);

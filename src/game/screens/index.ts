@@ -14,6 +14,7 @@ import type { ScreenContext, ScreenKind, ScreenScene } from "./types.js";
 
 export type { OverviewUnits, ScreenContext, ScreenKind, ScreenScene } from "./types.js";
 export { marketRefusal } from "./trade.js";
+export { reportRefusal } from "./reports.js";
 export { councilRefusal } from "./council.js";
 export { MarkerMode, markerMessageText, placeNextMarker } from "./markers.js";
 export type { MarkerResult } from "./markers.js";

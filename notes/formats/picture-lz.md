@@ -17,7 +17,7 @@ Observed sector ranges on `Disk.1` (inclusive):
 | Sectors | Unpacked size | Notes |
 |---|---|---|
 | `$70A`-`$728` | 40,064 | Title picture. Verified against emulator RAM. |
-| `$729`-`$733` | 40,064 | Full-screen picture shown before the title (publisher logo with a short caption). |
+| `$729`-`$733` | 40,064 | Full-screen picture shown before the title: the publisher logo with a "PRESENTS..." caption. Decoded by the existing decoder (`PICTURES.presents`) and used by the pre-roll (`src/game/intro.ts`); the packed data unpacks to exactly 40,064 bytes and its palette tail is the logo's 32 colours. Checked against the packed data and a scratch render only, not against RAM. |
 | `$05A`-`$05F` | 40,064 | Language selection picture with four flags. |
 | `$060`-`$0DC` | 89,600 | Loaded and unpacked after the language choice, drawn with the blit routine at `$790BE`. Not identified. |
 | `$0DD`-`$14B` | 95,590 | Unpacked to the same buffer later. Not identified. |

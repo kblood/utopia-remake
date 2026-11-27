@@ -228,6 +228,13 @@ check("sound ids used by the orders exist", typeof SFX.CLICK === "number" && typ
   const p4 = pickObject(layer, ships, 0, 0, 110, 90, null);
   check("pick: without a cell the sprite box of the tank is hit (20 x 20)", p4 && p4.kind === "tank" && p4.unit === unit);
   check("pick: just outside the box misses", pickObject(layer, ships, 0, 0, 121, 90, null) === null && pickObject(layer, ships, 0, 0, 110, 101, null) === null);
+  // $3EDC after a cell hit scans once with the cell's corner ($5D28), never with the pointer. Cell (0,0) has corner (112,24),
+  // outside the tank's box (100..120, 80..100) although the pointer (110,90) is inside it: nothing is picked.
+  check("pick: a cell hit whose corner misses every sprite picks nothing, even with the pointer in a box", pickObject(layer, ships, 0, 0, 110, 90, { x: 0, y: 0 }) === null);
+  // Cell (4,4) has corner (112,88), inside the same box: the sprite is picked through its corner.
+  const cornerHit = pickObject(layer, ships, 0, 0, 110, 90, { x: 4, y: 4 });
+  const freeCell = !(unit.x === 4 && unit.y === 4) && !(ship.x === 4 && ship.y === 4);
+  check("pick: a cell hit whose corner lies in a sprite box picks that sprite", freeCell && cornerHit && cornerHit.kind === "tank" && cornerHit.unit === unit);
 }
 
 // ---- tank window orders -----------------------------------------------------------------------------------------
@@ -240,6 +247,21 @@ check("sound ids used by the orders exist", typeof SFX.CLICK === "number" && typ
   const d = env.units.spawn(10, x + 2, y + 6);
   const sorted = sortByDistance([c, a, d, b], x + 1, y + 1);
   check("sort: nearest first by Chebyshev distance", sorted[0] === a && sorted[1] === b && sorted[3] === c, sorted.map((u) => `${u.x - x},${u.y - y}`).join(" "));
+  {
+    // Own tanks at equal Chebyshev distance. $3FEE scans the records in address (slot) order, and its bubble sort swaps
+    // equal neighbours (`cmp` then `bmi`), so each pass reverses the ties: slot order p, q, r gives r, p, q.
+    const tie = fresh();
+    const area = freeArea(tie.world);
+    const p = tie.units.spawn(9, area.x + 3, area.y + 1);
+    const q = tie.units.spawn(9, area.x + 1, area.y + 3);
+    const r = tie.units.spawn(9, area.x + 3, area.y + 3);
+    if (p && q && r) {
+      const ordered = sortByDistance([p, q, r], area.x + 1, area.y + 1).map((u) => (u === p ? "p" : u === q ? "q" : "r")).join("");
+      check("sort: equal distances reverse on every bubble pass (slot order p,q,r gives r,p,q)", ordered === "rpq", ordered);
+    } else {
+      check("sort: the tie scene fits the free area", false);
+    }
+  }
   const target = { x: x + 10, y: y + 10 };
   check("group: a count of 0 orders nothing", orderGroup(env.units, a, "nearTank", 0, target).length === 0 && a.targetX === NO_TARGET);
   const two = orderGroup(env.units, a, "nearTank", 2, target);

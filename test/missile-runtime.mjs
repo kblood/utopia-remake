@@ -34,7 +34,7 @@ const sameBytes = (x, y) => x.length === y.length && x.every((v, i) => v === y[i
 
 const SECTORS = 1920, SLOT = 2, A_FIRST = 100, B_FIRST = 174;
 const SHIP_STRIDE = 0x18, ENEMY_STRIDE = 0x1a;
-const AIR_LAYER = 0x2000, FLAG_SHIP = 8;
+const AIR_LAYER = 0x2000, OCCUPIED = 0x4000, FLAG_SHIP = 8;
 const COUNT_SHIPS = 0x1429e, LOST = 0x14294, KILLS = 0x14298, FRONT3 = 0x1427c + 12, COUNT17 = 0x14254 + 4 * (17 - 9), MORALE = 0x144ec;
 const recOffset = (i) => DISK4_HEADER_OFFSET + DISK4_RECORDS_OFFSET + i * DISK4_RECORD_SIZE;
 
@@ -121,7 +121,7 @@ const spawnGround = (e, x, y) => {
   const m = e.fleet.slots[0];
   check("launched missile is the shared MissileRecord: kind missile, type 17, no class, no fuel, no fabricated provenance", isMissile(m) && !isRestoredMissile(m) && m.kind === "missile" && m.type === 17 &&
     !("cls" in m) && !("fuel" in m) && !("shipClass" in m) && !("target" in m) && !("sourceRaw" in m));
-  check("$49E8/$381E initial state: mode 4, lift 0, dir 0, +B/+C = the enemy's cell, hp from the type 17 row", m.mode === 4 && m.lift === 0 && m.dir === 0 && m.x === 24 && m.y === 30 && m.targetX === 30 && m.targetY === 30 && m.hp === 40);
+  check("$49E8/$381E initial state: mode 4, lift 0, dir 8 (moveq #8,d4 at $4A36), +B/+C = the enemy's cell, hp from the type 17 row", m.mode === 4 && m.lift === 0 && m.dir === 8 && m.x === 24 && m.y === 30 && m.targetX === 30 && m.targetY === 30 && m.hp === 40);
   const i = e.sys.inspectShip(m);
   check("its enemy pointer is the fixed ground slot 0 (address $3A146), not an object or a coordinate", i.targetSlot.air === false && i.targetSlot.index === 0 && i.targetOccupied === true && enemySlotAddress(i.targetSlot) === gndAddr(0));
   check("count word +1, no type 17 count, no lost/morale change, no message (no $C8)", e.state.word(COUNT_SHIPS) === ships0 + 1 && e.state.long(COUNT17) === 0 && e.state.long(LOST) === 0 && e.sim.messages.length === e.msg0);
@@ -158,7 +158,7 @@ function pair({ air = false, type = 22, index = 0, from, at, extraA = () => {}, 
   const tech = f.state.byte(0x14592);
   const r = boot((a) => {
     fillEnemy(a);
-    putMissile(a, 0, { x: from[0], y: from[1], dir: 0, mode: 4, lift: 0, tx: at[0], ty: at[1], tech, target: air ? airAddr(index) : gndAddr(index) });
+    putMissile(a, 0, { x: from[0], y: from[1], dir: 8, mode: 4, lift: 0, tx: at[0], ty: at[1], tech, target: air ? airAddr(index) : gndAddr(index) });
     setWordCell(a, from[0], from[1], AIR_LAYER); setFlagCell(a, from[0], from[1], FLAG_SHIP);
   }, (b) => { put16(b, offB(COUNT_SHIPS), 1); put16(b, offB(countAddr), 1); tailB(b); });
   return { f, r };
@@ -315,7 +315,10 @@ function lockstep(name, { f, r }, passes, before = () => {}) {
   check("daily with a free slot: missile destroyed (one explosion at its cell with lift 0, no message), ship burned again (98)", e.fleet.slots[0] === null && ship.fuel === 98 && e.calls.explode.length === 1 &&
     e.calls.explode[0].join() === "28,30,0,true" && e.state.word(COUNT_SHIPS) === 1 && e.sim.messages.length === e.msg0);
   check("no lost-unit, type 17 count or morale change from the daily destruction", e.state.long(LOST) === lost0 && e.state.long(COUNT17) === 0 && e.state.long(MORALE) === morale0);
-  check("its reservation was released with it", airMarks(e) === 0);
+  // the missile is still at lift 0 (no climb step ran), so $46CC's `tst.b` takes the lift-0 branch: it frees the ground mark
+  // and the own flag at +$14, and leaves the air mark and ship flag that $49E8 set at the launch cell (trace, enemies.md 6)
+  check("lift-0 missile destroyed by the daily: the air mark and ship flag it set at launch stay; the ground mark and own flag are freed",
+    (cell(e, 28, 30) & AIR_LAYER) !== 0 && (flag(e, 28, 30) & FLAG_SHIP) !== 0 && (cell(e, 28, 30) & OCCUPIED) === 0 && airMarks(e) === 2);
   e.fleet.dailyFuel();
   check("the next day only the ship burns (97)", ship.fuel === 97 && e.calls.explode.length === 1);
 }

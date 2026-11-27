@@ -32,7 +32,12 @@ function describe(err: unknown): string {
 
 async function readNamed(file: InputFile): Promise<{ named: NamedBytes } | { error: string }> {
   try {
-    return { named: { name: file.name, bytes: await file.read() } };
+    const bytes: unknown = await file.read();
+    if (!(bytes instanceof Uint8Array)) {
+      const got = bytes === null ? "null" : typeof bytes === "object" ? "a non-byte value" : typeof bytes;
+      return { error: `the read returned ${got} instead of file bytes` };
+    }
+    return { named: { name: file.name, bytes } };
   } catch (err) {
     return { error: describe(err) };
   }

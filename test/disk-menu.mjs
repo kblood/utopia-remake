@@ -238,7 +238,18 @@ for (let i = 0; i < 9; i++) {
   check("openMusicList(true): the list opens, the prompt $190 is the first prompt line, no result line", scene.openMusicList(true) === true && scene.listOpen && scene.shownPrompt.join() === "400,0" && scene.shownInfo.join() === "0,0");
   check("the prompt is drawn at y $A3 and nothing else of the message areas changes", !lineEquals(scene, "prompt", 0, picture) && lineEquals(scene, "prompt", 1, picture) && lineEquals(scene, "info", 0, picture) && lineEquals(scene, "info", 1, picture));
   const rowsDrawn = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((row) => !areaEquals(scene.screen, picture, ms.MUSIC_LIST.labelX, 0x20 + 9 * row, 56, 6));
-  check("the labels of rows 0-3 are drawn on the panel; the blank rows 4-9 draw nothing visible", rowsDrawn.slice(0, 4).every(Boolean) && rowsDrawn.slice(4).every((d) => !d));
+  check("the labels of rows 0-3 are drawn on the panel", rowsDrawn.slice(0, 4).every(Boolean));
+  // `$1006` calls `$539E` for all ten rows (the erase `$51E6` runs before the text, blank or not): rows 4-9 hold the erase model's pixels, no text.
+  const erasedRow = (row) => {
+    const model = new Screen();
+    model.pixels.set(picture.pixels);
+    dm.eraseBandPattern(model, picture.pixels, ms.MUSIC_LIST.labelX, 0x20 + 9 * row, dm.DISK_LIST_GEOMETRY.eraseBytes, dm.DISK_LIST_GEOMETRY.eraseRows);
+    return model;
+  };
+  check("the blank rows 4-9 carry only the traced erase (the same pixels as the erase model, no text)", [4, 5, 6, 7, 8, 9].every((row) => {
+    const model = erasedRow(row);
+    return areaEquals(scene.screen, model, 56, 0x20 + 9 * row, 88, 6);
+  }));
   check("an icon is untouched by the list", areaEquals(scene.screen, picture, 208, 24, 32, 32) && areaEquals(scene.screen, picture, 160, 116, 32, 32));
   const plain = scene.screen.pixels.slice();
   frame(scene, false, LIST_X, rowY(2));
@@ -294,7 +305,7 @@ for (let i = 0; i < 9; i++) {
   const prompted = scene.screen.pixels.slice();
   scene.printInfo(0, ms.MUSIC_TOGGLE_STRING.off);
   check("a result string goes to the SECOND result line (y $BE); the prompt line $A3 is untouched and still shown", scene.shownInfo.join() === "0,403" && scene.shownPrompt.join() === "400,0" && !lineEquals(scene, "info", 1, prompted) && lineEquals(scene, "info", 0, prompted) && lineEquals(scene, "prompt", 0, prompted));
-  check("the countdown starts at INFO_LIFETIME_FRAMES (HYPOTHESIS: 50 frames for the traced 20000 loop iterations)", scene.infoFramesLeft === dm.INFO_LIFETIME_FRAMES && dm.INFO_LIFETIME_FRAMES === 50);
+  check("the countdown starts at INFO_LIFETIME_FRAMES (reference profile: 53 VBLs measured on Copperline A1200/68020 for the traced 20000 loop passes)", scene.infoFramesLeft === dm.INFO_LIFETIME_FRAMES && dm.INFO_LIFETIME_FRAMES === 53);
   scene.printInfo(0x18a, 0);
   check("$83A2 with d1 = 0 prints only the first line and leaves the second as it was", scene.shownInfo.join() === "394,403" && scene.infoFramesLeft === dm.INFO_LIFETIME_FRAMES);
   rest(scene, 10);

@@ -8,7 +8,7 @@ import { COLOR, drawGameText } from "../../data/gamefont.js";
 import type { GameStrings } from "../../data/gamestrings.js";
 import { decodePicture, PICTURES } from "../../data/picture.js";
 import { Screen, SCREEN_WIDTH } from "../../gfx/screen.js";
-import type { Input } from "../intro.js";
+import { type Input, isEnterKey, typedDigit } from "../intro.js";
 import { GameImage } from "./image.js";
 
 export interface WindowRect {
@@ -242,13 +242,14 @@ export class Pointer {
   }
 }
 
-// $5110 text entry: digits are echoed followed by a '-' cursor; Return confirms (not when
-// empty), Backspace deletes. Escape cancels (not in the original). `$5110` reads only the key code `$161A0`; it never calls
-// `$50B2`, `$5730` or `$5756`, so the mouse does nothing while an entry is open (PanelScene enforces that via `modal`).
+// $5110 text entry (static trace of Disk.1 `$5110`-`$51DA`, key table `$650A`): digits are echoed followed by a '-'
+// cursor. The routine accepts the digits of the table (main keys and keypad), Backspace (raw key `$41`), and Return or
+// keypad Enter (`$44` / `$43`, only with at least one digit). Every other key is dropped: Escape and Delete have no
+// branch, so the entry cannot be cancelled. `$5110` reads only the key code `$161A0`; it never calls `$50B2`, `$5730` or
+// `$5756`, so the mouse does nothing while an entry is open (PanelScene enforces that via `modal`).
 export class NumberEntry {
   digits = "";
   done: number | null = null;
-  cancelled = false;
 
   constructor(
     readonly x: number,
@@ -259,15 +260,14 @@ export class NumberEntry {
 
   feed(keys: string[]): void {
     for (const key of keys.splice(0)) {
-      if (this.done !== null || this.cancelled) break;
-      if (key.length === 1 && key >= "0" && key <= "9") {
-        if (this.digits.length < this.maxDigits) this.digits += key;
-      } else if (key === "Backspace" || key === "Delete") {
+      if (this.done !== null) break;
+      const digit = typedDigit(key);
+      if (digit !== undefined) {
+        if (this.digits.length < this.maxDigits) this.digits += digit;
+      } else if (key === "Backspace") {
         this.digits = this.digits.slice(0, -1);
-      } else if (key === "Enter") {
+      } else if (isEnterKey(key)) {
         if (this.digits.length > 0) this.done = parseInt(this.digits, 10);
-      } else if (key === "Escape") {
-        this.cancelled = true;
       }
     }
   }

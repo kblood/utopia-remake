@@ -144,7 +144,7 @@ const COUNTER = 0x1346a;
   const view = (scene, x, y) => { scene.scrollX = x; scene.scrollY = y; };
   const fillPool = (scene, n = 30) => { while (scene.objects.pool.count < n) scene.objects.spawnEffect(0x12, 1, 1); };
   const effectCells = (scene) => scene.objects.effectSlots.filter((e) => e !== null && !(e.x === 1 && e.y === 1)).map((e) => `${e.x},${e.y}`);
-  const cleared = (scene, [x, y]) => { const id = scene.cells[y * 100 + x] & 0x3ff; return (id >= 0x38 && id <= 0x3b) || id >= 0x94; }; // cleared tile $38 (+n over a 2x2)
+  const cleared = (scene, [x, y]) => { const id = scene.cells[y * 100 + x] & 0x3ff; return id === 0x38 || id >= 0x94; }; // cleared tile $38 in every footprint cell ($6FC4, build.mjs)
   const LOW = SFX.EXPLOSION_LOW;
 
   {

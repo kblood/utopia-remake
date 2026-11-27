@@ -259,6 +259,7 @@ check("sizes agree", STATE_BYTES === DISK4_AREA_B_BYTES && OBJECT_SLOTS * OBJECT
     graph.sim.sysFlags = 0xff;
     graph.sim.paused = true;
     graph.sim.dayQueued = false;
+    graph.sim.blastMark = true;
     graph.sim.alerts.flags.fill(0xff);
     const stateBeforeReset = graph.state.snapshot();
     const mapBeforeReset = graph.world.cells.slice();
@@ -267,6 +268,7 @@ check("sizes agree", STATE_BYTES === DISK4_AREA_B_BYTES && OBJECT_SLOTS * OBJECT
     const reset = applyDisk4LoadReset(graph);
     check("traced Disk.4 reset applies its runtime flags to a detached snapshot graph", reset.ok && graph.sim.sysFlags === 0 &&
       !graph.sim.paused && graph.sim.dayQueued && graph.sim.alerts.flags.every((v) => v === 0));
+    check("traced Disk.4 reset clears the blast mark (`$87C2` writes $02 to $156A9, bit 5 included)", reset.ok && graph.sim.blastMark === false);
     check("load reset leaves saved state, map, cell flags and object records byte-for-byte unchanged",
       sameBytes(graph.state.snapshot(), stateBeforeReset) && graph.world.cells.every((v, i) => v === mapBeforeReset[i]) &&
       sameBytes(graph.world.cellFlags, flagsBeforeReset) && sameBytes(graph.world.objects, objectsBeforeReset));

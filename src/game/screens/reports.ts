@@ -1,16 +1,29 @@
 // The six report windows opened with F1-F6 ($B81C, $BA1E, $BD9E, $C516, $D6BA, $E1AA). Each
 // draws labels from the string table and numbers straight from the state fields the original
 // reads; nothing is written except the two sums F3 stores back. Layout: notes/formats/screens.md.
+// Input (static trace of Disk.1): every report ends with `$B99C`, whose wait is `$58F8` (the `$50B2` poll): the release of
+// any command button leaves, and a council-room report leaves on a left click (`$2E48`). Escape and the right button are
+// not read, so `PanelScene` leaves them alone for these windows.
 
 import { COLOR } from "../../data/gamefont.js";
 import type { Screen } from "../../gfx/screen.js";
-import { A } from "../state.js";
+import { A, type GameState } from "../state.js";
 import { T, TYPE_SIZE, TYPE_TABLE } from "../world.js";
 import { PanelScene } from "./panel.js";
 import type { ScreenContext } from "./types.js";
 import { Ui } from "./ui.js";
 
 const CROWDING_TYPE_HOUSING = 0x1326c; // T[7].C: housing buildings, 50 colonists each
+const ONLINE_COMMAND_CENTRES = 0x133f8; // word: T[29].C, online command centres
+
+// $15B4A: each F1-F6 key tests word $133F8 before it calls its report (`$B81C` ... `$E1AA`). Zero branches to `$15B3E`, which
+// posts message $B2 (`$551A`) and returns: no report opens and the key is used up. Static trace of Disk.1 (screens.md section 7).
+export const REPORT_REFUSAL = 0xb2;
+
+/** The message string index that refuses an F1-F6 report, or -1 when the report opens. */
+export function reportRefusal(state: GameState): number {
+  return state.word(ONLINE_COMMAND_CENTRES) === 0 ? REPORT_REFUSAL : -1;
+}
 
 function s8(v: number): number {
   return ((v & 0xff) << 24) >> 24;

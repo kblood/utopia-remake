@@ -28,6 +28,7 @@ const BLANK_ROW = 6; // row 6 of the list is a spacer
 const POOLS = 9;
 const ENTRY_X = 115;
 const ENTRY_DIGITS = 4;
+const STAFF_EXIT_BUTTON = 9; // the only button that leaves the window ($BC26-$BC30)
 
 // Row on screen -> job pool ($BC8C-$BC9E: rows above the spacer shift down by one).
 export function poolOfRow(row: number): number {
@@ -65,6 +66,12 @@ export class StaffingScreen extends PanelScene {
     return this.entry !== null;
   }
 
+  // The staffing loop ($BAAE, static trace of Disk.1): the release of button 9 leaves (`cmpi.b #9,d2` before `$BC5A`), and
+  // a release of any other command button does nothing (`bra $BC0C`). Escape and the right button are not read.
+  protected override onButton(index: number): "running" | "close" {
+    return index === STAFF_EXIT_BUTTON ? "close" : "running";
+  }
+
   // A click on a row (anywhere in the window) asks for the new level of that pool.
   protected override onClick(): void {
     if (this.entry) return;
@@ -83,8 +90,6 @@ export class StaffingScreen extends PanelScene {
     if (entry.done !== null) {
       this.ctx.sim.setJobCap(this.pool, entry.done);
       setStaffLevel(this.state, this.pool, entry.done);
-      this.entry = null;
-    } else if (entry.cancelled) {
       this.entry = null;
     }
     return true;

@@ -28,14 +28,25 @@
 //     reserve -1/-1 reconstructs its off-map next-cell pointer from x/y/direction; other unresolvable tails use 0), and
 //     assumes every free slot is 0. This is reported as `enemyPointersAssumed` because stale freed-slot values are lost;
 //   - versions 2..8 derive the old regular loop phase from `vbls` and have no pending modal-return pass; version 9 stores both.
-//   - a version other than 2..9 is rejected as "unsupported-version".
+//   - versions 2..9 have no blast mark (`$156A9` bit 5, ship-control.md 5e); they migrate with it CLEAR. That is exact only
+//     when no free-slot missile hit was pending at the save, which those versions could not record (a lossy assumption);
+//   - versions 2..10 store no descriptor exchange parity (`$11024`, sim.ts `tileExchange`, version 11). Every save is taken inside
+//     the disk menu (`save` is reached only from the disk-menu loop), and the menu entry `$7ECA` already runs `$11024` while bit 6
+//     is set, so the traced calls leave parity 0 there (the table is exchanged on the map exactly while bit 6 is set). They migrate
+//     with parity 0 and `tileExchangeAssumed` set (the slot label names TBL with any other assumption, see slotWarning). That is a static, unverified inference. The bit-derived
+//     value (1 during an eclipse) would be wrong: the exit `$802C` would flip it back to 0 on the map;
+//   - versions 2..11 store no save name (version 12 adds `name`, save-name.ts); they migrate with `name` null, so their slot label
+//     stays the date as before;
+//   - a version other than 2..12 is rejected as "unsupported-version".
 
 import { MAP_HEIGHT, MAP_WIDTH } from "../data/scenario.js";
 import { CELL_FLAG_BYTES, cellFlagPointer } from "./cell-flags.js";
 import { DEFAULT_VBL_PER_PASS } from "./main-loop.js";
 import { DIR_STEP } from "./units.js";
 import { MAX_EFFECTS } from "./effect-pool.js";
+import { SAVED_NAME_LENGTH } from "./save-name.js";
 import { SESSION_VERSION, validateEffectRecord, validateSession, type SessionSave } from "./save-session.js";
+
 import { START_YEAR, STATE_BASE, STATE_BYTES } from "./state.js";
 import { OBJECT_COUNT_ADDRESS, OBJECT_SIZE, OBJECT_SLOTS } from "./world.js";
 
@@ -89,6 +100,8 @@ export type ReadResult =
        * of freed slots are unknown). Continuation is not exact. Always false for version 7 and for saves without enemies.
        */
       readonly enemyPointersAssumed: boolean;
+      /** True when the descriptor exchange parity was assumed at a migration (versions 2..10, version-less: the disk-menu value 0). */
+      readonly tableAssumed: boolean;
     }
   | { readonly ok: false; readonly error: SlotError };
 export type WriteResult = { readonly ok: true } | { readonly ok: false; readonly error: SlotError };
@@ -187,6 +200,7 @@ function migrateLegacy(j: Record<string, unknown>): ReadResult {
   const count = (state[OBJECT_COUNT_ADDRESS - STATE_BASE] << 8) | state[OBJECT_COUNT_ADDRESS - STATE_BASE + 1];
   const save: SessionSave = {
     scenario: j.scenario as number,
+    name: null,
     scroll: { x: j.scrollX as number, y: j.scrollY as number },
     state,
     cells,
@@ -197,6 +211,9 @@ function migrateLegacy(j: Record<string, unknown>): ReadResult {
       sysFlags: j.sysFlags as number,
       paused: false,
       dayQueued: false,
+      blastMark: false,
+      tileExchange: false, // no parity stored: the disk-menu value (every save is taken inside the menu), flagged below
+      tileExchangeAssumed: true,
       rng: null,
       hardware: null,
       fuelWarned: false,
@@ -214,7 +231,7 @@ function migrateLegacy(j: Record<string, unknown>): ReadResult {
   };
   const bad = validateSession(save);
   if (bad) return err("invalid", `Old save: ${bad.message}`);
-  return { ok: true, save, legacy: true, effectsAssumedEmpty: false, effectSlotsAssumed: false, enemyPointersAssumed: false };
+  return { ok: true, save, legacy: true, effectsAssumedEmpty: false, effectSlotsAssumed: false, enemyPointersAssumed: false, tableAssumed: true };
 }
 
 /**
@@ -298,9 +315,9 @@ export function decodeSave(text: string | null): ReadResult {
   if (!isObject(j)) return err("corrupt", "The slot does not hold a save object");
   if (!("version" in j)) {
     if (typeof j.scenario === "number" && typeof j.state === "string" && typeof j.cells === "string" && typeof j.objects === "string" && typeof j.sysFlags === "number") return migrateLegacy(j);
-    return err("corrupt", `The slot holds neither a version-${SESSION_VERSION}, version-8, version-7, version-6, version-5, version-4, version-3, version-2 nor an old save`);
+    return err("corrupt", `The slot holds neither a version-2 to version-${SESSION_VERSION} save nor an old save`);
   }
-  if (![2, 3, 4, 5, 6, 7, 8, SESSION_VERSION].includes(j.version as number)) return err("unsupported-version", `Save version ${String(j.version)} is not supported (this build reads versions 2 through ${SESSION_VERSION})`);
+  if (![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, SESSION_VERSION].includes(j.version as number)) return err("unsupported-version", `Save version ${String(j.version)} is not supported (this build reads versions 2 through ${SESSION_VERSION})`);
   const version = j.version as number;
   if (j.format !== FORMAT) return err("corrupt", `Unknown save format ${String(j.format)}`);
   const state = fromBase64(j.state);
@@ -318,7 +335,17 @@ export function decodeSave(text: string | null): ReadResult {
   void _format;
   void _version;
   const world = isObject(rest.world) ? { ...rest.world, solarPhaseRng: version >= 4 ? rest.world.solarPhaseRng : null } : rest.world;
-  const sim = isObject(rest.sim) ? { ...rest.sim, hardware: version >= 5 && "hardware" in rest.sim ? rest.sim.hardware : null } : rest.sim;
+  // Version 10 stores the blast mark (`$156A9` bit 5); older saves carry none and start with it clear (see the header).
+  // Version 11 stores the descriptor exchange parity; older saves take the disk-menu value 0 and are marked assumed (see the header).
+  const sim = isObject(rest.sim)
+    ? {
+        ...rest.sim,
+        hardware: version >= 5 && "hardware" in rest.sim ? rest.sim.hardware : null,
+        blastMark: version >= 10 ? rest.sim.blastMark : false,
+        tileExchange: version >= 11 ? rest.sim.tileExchange : false,
+        tileExchangeAssumed: version >= 11 ? rest.sim.tileExchangeAssumed : true,
+      }
+    : rest.sim;
   // Version 9 records scheduler state explicitly because a build-menu return can queue a pass before the normal phase.
   // Earlier saves used the regular modulo cadence; derive that phase and clear the new one-shot flag.
   const loop = isObject(rest.loop) && version < 9 && Number.isSafeInteger(rest.loop.vblPerPass) && Number.isSafeInteger(rest.loop.vbls)
@@ -349,13 +376,16 @@ export function decodeSave(text: string | null): ReadResult {
     if ("code" in migrated) return { ok: false, error: migrated };
     enemies = migrated.enemies;
   }
-  const save = { ...rest, world, sim, loop, state, cells, cellFlags, objects, effectSlots, effectSlotsAssumed, enemies };
+  // Version 12 stores the save name (save-name.ts); versions 2..11 have none and migrate with `name` null (validateSession checks it).
+  const name = version >= 12 ? rest.name : null;
+  const save = { ...rest, name, world, sim, loop, state, cells, cellFlags, objects, effectSlots, effectSlotsAssumed, enemies };
   const bad = validateSession(save);
   if (bad) return err("invalid", bad.message);
   return {
     ok: true, save: save as unknown as SessionSave, legacy: false, effectsAssumedEmpty: version < 6 && effectSlots !== null,
     effectSlotsAssumed: (save as unknown as SessionSave).effectSlotsAssumed,
     enemyPointersAssumed: version < 7 && (save as unknown as SessionSave).enemies !== null,
+    tableAssumed: (save as unknown as SessionSave).sim.tileExchangeAssumed,
   };
 }
 
@@ -399,7 +429,7 @@ export function readSlot(slot: number): ReadResult {
 }
 
 export type SlotSummary =
-  | { readonly slot: number; readonly status: "ok"; readonly scenario: number; readonly date: string; readonly legacy: boolean; readonly effectsAssumedEmpty: boolean; readonly effectSlotsAssumed: boolean; readonly enemyPointersAssumed: boolean }
+  | { readonly slot: number; readonly status: "ok"; readonly scenario: number; readonly date: string; readonly name: string | null; readonly legacy: boolean; readonly effectsAssumedEmpty: boolean; readonly effectSlotsAssumed: boolean; readonly enemyPointersAssumed: boolean; readonly tableAssumed: boolean }
   | { readonly slot: number; readonly status: "unusable"; readonly error: SlotError }
   /** localStorage is missing or cannot be read: the slot's content is unknown, which is not the same as empty. */
   | { readonly slot: number; readonly status: "unavailable"; readonly error: SlotError };
@@ -415,20 +445,65 @@ export function slotSummaries(): (SlotSummary | null)[] {
     const month = state[0x145a0 - STATE_BASE] + 1;
     const year = START_YEAR + view.getUint32(0x142a6 - STATE_BASE);
     return {
-      slot, status: "ok", scenario: read.save.scenario, date: `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`,
+      slot, status: "ok", scenario: read.save.scenario, date: `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`, name: read.save.name,
       legacy: read.legacy, effectsAssumedEmpty: read.effectsAssumedEmpty, effectSlotsAssumed: read.effectSlotsAssumed, enemyPointersAssumed: read.enemyPointersAssumed,
+      tableAssumed: read.tableAssumed,
     };
   });
 }
 
 /**
- * The short warning a slot label appends (including its leading space; "" for none), kept short because the whole label
- * "SLOT n  dd/mm/yyyy" + warning must fit the menu's 31 columns (at most 12 characters here). An assumed (empty) effect pool,
- * assumed effect SLOT numbers and/or assumed enemy-slot pointers mean the continuation is not exact; a version-less save is just "V1".
+ * Columns left for the slot-label suffix: "SLOT n  dd/mm/yyyy" is 18 characters. This is a CHARACTER budget that keeps the label
+ * short; the real limit is the pixel width of the list panel (`MENU_PANEL` in menu.ts, 240 px from x 40). The font advances are 5 px
+ * per glyph (4 for space and "/"), so the longest label is about 143 px of ink; `test/slot-label-width.mjs` pins the measured widths.
  */
-export function slotWarning(summary: { readonly legacy: boolean; readonly effectsAssumedEmpty: boolean; readonly effectSlotsAssumed?: boolean; readonly enemyPointersAssumed: boolean }): string {
-  if (summary.effectsAssumedEmpty) return summary.enemyPointersAssumed ? " FX/PTR UNK" : " FX UNKNOWN";
-  if (summary.effectSlotsAssumed) return summary.enemyPointersAssumed ? " FX/PTR UNK" : " FX SLOT UNK";
-  if (summary.enemyPointersAssumed) return " PTR UNKNOWN";
-  return summary.legacy ? " V1" : "";
+export const SLOT_SUFFIX_COLUMNS = 13;
+
+/**
+ * The warning a slot label appends (including its leading space; "" for none). The label "SLOT n  dd/mm/yyyy" + suffix must fit
+ * the menu's 31 columns, so the suffix has at most `SLOT_SUFFIX_COLUMNS` (13) characters. Every applicable assumption is named:
+ *   - FX: an assumed effect pool (`effectsAssumedEmpty`, versions 2..5) or assumed effect slot numbers (`effectSlotsAssumed`);
+ *   - PTR: assumed enemy-slot pointers (`enemyPointersAssumed`, versions 2..6);
+ *   - V1: a version-less save (`legacy`, which never carries FX or PTR: migrateLegacy);
+ *   - TBL: the descriptor exchange parity was assumed at a migration (`tableAssumed`, versions 2..10).
+ * A single assumption keeps its established wording (" FX UNKNOWN", " FX SLOT UNK", " PTR UNKNOWN", " V1", " TBL UNK"). Two or more
+ * are joined with "/" (FX before PTR before V1 before TBL), and " UNK" is appended when it fits (" FX/PTR UNK", " PTR/TBL UNK",
+ * " V1/TBL UNK"); otherwise it is dropped (" FX/PTR/TBL", 11 columns). Every reachable combination fits; the four-way combination
+ * would not (14 columns) and is unreachable because a version-less save has neither FX nor PTR.
+ */
+export function slotWarning(summary: { readonly legacy: boolean; readonly effectsAssumedEmpty: boolean; readonly effectSlotsAssumed?: boolean; readonly enemyPointersAssumed: boolean; readonly tableAssumed?: boolean }): string {
+  const fx = summary.effectsAssumedEmpty || summary.effectSlotsAssumed === true;
+  const ptr = summary.enemyPointersAssumed;
+  const v1 = summary.legacy;
+  const tbl = summary.tableAssumed === true;
+  const parts = [fx ? "FX" : "", ptr ? "PTR" : "", v1 ? "V1" : "", tbl ? "TBL" : ""].filter((p) => p !== "");
+  if (parts.length === 0) return "";
+  if (parts.length === 1) {
+    if (fx) return summary.effectsAssumedEmpty ? " FX UNKNOWN" : " FX SLOT UNK";
+    if (ptr) return " PTR UNKNOWN";
+    if (v1) return " V1";
+    return " TBL UNK";
+  }
+  const body = parts.join("/");
+  const withUnknown = ` ${body} UNK`;
+  return withUnknown.length <= SLOT_SUFFIX_COLUMNS ? withUnknown : ` ${body}`;
+}
+
+/** Columns of one slot-list label (the menu's width in characters, see SLOT_SUFFIX_COLUMNS). */
+export const SLOT_LABEL_COLUMNS = 31;
+
+/**
+ * The text of one line of the save/load slot list: `SLOT n  dd/mm/yyyy` plus the warning, or EMPTY, STORAGE OFF, UNUSABLE. A save
+ * with a name (version 12, save-name.ts) shows the name in place of the date, as the original's slot row shows its name; the name is
+ * cut (never the warning) so that the label stays within `SLOT_LABEL_COLUMNS`.
+ */
+export function slotListLabel(slot: number, summary: SlotSummary | null): string {
+  if (summary === null) return `SLOT ${slot + 1}  EMPTY`;
+  if (summary.status === "ok") {
+    const warning = slotWarning(summary);
+    if (summary.name === null) return `SLOT ${slot + 1}  ${summary.date}${warning}`;
+    const room = SLOT_LABEL_COLUMNS - `SLOT ${slot + 1}  `.length - warning.length;
+    return `SLOT ${slot + 1}  ${summary.name.slice(0, Math.min(SAVED_NAME_LENGTH, room))}${warning}`;
+  }
+  return `SLOT ${slot + 1}  ${summary.status === "unavailable" ? "STORAGE OFF" : "UNUSABLE"}`;
 }

@@ -318,8 +318,10 @@ export interface EnemyHooks {
   // bit is cleared. Anything else (no return value, no hook) counts as "pointer survived".
   explode?: (x: number, y: number, lift: number, high: boolean) => boolean | void;
   sound?: (id: number) => void;
-  // Height in pixels of the building on a cell: a kamikaze dives down to height - 10 (table $1612E +3).
-  buildingHeight?: (x: number, y: number) => number;
+  // Stored height of a building tile: the descriptor's `rows - 1` (table $1612E, long at +0; its low byte is +3).
+  // Called with the tile word of the building's object record (+0), not the map cell. A kamikaze dives to
+  // (stored - 10) as a byte (enemies.md section 3c).
+  buildingHeight?: (tile: number) => number;
   // $771E: a hovering ship starts a launchpad on the 2x2 cells at (x, y); false = refused (the builder says why).
   buildPad?: (x: number, y: number) => boolean;
 }
@@ -493,7 +495,7 @@ export class EnemySystem {
       gunA: () => this.fireGuns(GUN_A, this.s.long(0x1310e)),
       gunB: () => this.fireGuns(GUN_B, this.s.long(0x13112)),
     });
-    this.sim.fleet.setReservationRelease((ship) => this.releaseShip(ship, this.extra(ship)));
+    this.sim.fleet.setReservationRelease((ship, blasted) => this.releaseShip(ship, this.extra(ship), blasted));
     this.sim.fleet.setMissileDaily((m) => this.dailyMissile(m)); // $ACE2 for every missile, launched or restored
     const leave = (u: Walker): void => this.destroyGround(u as Enemy, false);
     this.walkEnv = {
@@ -780,15 +782,27 @@ export class EnemySystem {
     if (!u) return null;
     const slot = firstFree(this.groundSlots);
     if (slot < 0) return null;
-    this.units.remove(u);
-    // Static Disk.1 trace (no emulator comparison): $115C6 writes 10 to the converted slot's +$E (bomb chance %) and
-    // $115CC copies $145A3 to +$F (damage). $1196E -> $11952 -> $1266A send a defected tank through the shared attack
-    // routine, where $12772-$12798 rolls 0..99 against +$E before $12332 bombs an active building (after the 0..24 TOD gate).
+    // Static Disk.1 trace of $11566 (enemies.md 7 and 3e; no emulator comparison). $115BA-$115BE copy the tank's 16 bytes
+    // +0..+F into the free slot; $115C2 then clears +6/+7 (velocity), $115C6 writes +$E = 10 and $115CC copies $145A3 to
+    // +$F (damage). So the converted record keeps the tank's type (+0), cell (+1/+2), pixel offset (+3/+4), facing (+5),
+    // hit points (+8), control byte (+9: bit 7 = waiting, low bits = mode), tech (+A) and target (+B/+C), with velocity zero.
+    // +D is 0 for a tank (units.md 3; the Unit record does not hold it). +$10..+$15 are NOT copied: they keep the slot's
+    // previous bytes, which no reader of a defected (type 9/10) unit uses, so the fresh record defaults stand in for them.
     const g = new Enemy(u.type, u.x, u.y, u.dir, u.hp, this.s.byte(0x145a3), 10, false);
-    g.mode = 5;
-    this.cells[mapIndex(u.x, u.y)] |= OCCUPIED;
-    this.flags[cellFlagIndex(u.x, u.y)] |= FLAG_GROUND;
-    // Static trace: the event path writes the slot's +$16 with the pointer of the tank's CURRENT cell (x, y).
+    g.dx = u.dx;
+    g.dy = u.dy;
+    g.tech = u.tech;
+    g.targetX = u.targetX;
+    g.targetY = u.targetY;
+    g.waiting = u.waiting;
+    g.mode = u.control & 0x7f;
+    // $115D4 clears only the tank's type byte: `vacate` frees the slot without releasing the tank's reservation. The
+    // reserved cell keeps its bit 14 and own-unit flag, which matters while the tank is between cells (units.md 5: the
+    // reservation is the NEXT cell, the departure cell was already released). No map word is written here.
+    this.units.vacate(u);
+    // $115F6-$115FE: bclr #2 and bset #0 on the flag byte of the tank's (x, y), then +$16 = that cell's flag pointer.
+    const at = cellFlagIndex(u.x, u.y);
+    this.flags[at] = (this.flags[at] & ~FLAG_OWN) | FLAG_GROUND;
     this.groundFlagPointers[slot] = cellFlagPointer(u.x, u.y);
     g.reserveX = u.x;
     g.reserveY = u.y;
@@ -828,7 +842,7 @@ export class EnemySystem {
     if (reserved) this.flags[cellFlagIndex(target.x, target.y)] &= ~FLAG_GROUND;
     this.s.setWord(0x142a2, Math.max(0, this.s.word(0x142a2) - 1));
     this.s.setLong(KILLS, this.s.long(KILLS) + 1);
-    const clobbered = explosion && this.explode(e.x, e.y, 0, true);
+    const clobbered = this.sim.takeBlastMark(explosion) && this.explode(e.x, e.y, 0, true);
     if (reserved && !clobbered) this.cells[mapIndex(target.x, target.y)] &= ~OCCUPIED;
     this.dirty = true;
   }
@@ -845,7 +859,7 @@ export class EnemySystem {
     this.s.setWord(0x142a4, Math.max(0, this.s.word(0x142a4) - 1));
     this.s.setLong(KILLS, this.s.long(KILLS) + 1);
     this.sim.applyMorale(50);
-    const clobbered = explosion && this.explode(e.x, e.y, e.lift, true);
+    const clobbered = this.sim.takeBlastMark(explosion) && this.explode(e.x, e.y, e.lift, true);
     if (reserved && !clobbered) this.cells[mapIndex(target.x, target.y)] &= ~AIR_LAYER;
     this.dirty = true;
   }
@@ -865,37 +879,45 @@ export class EnemySystem {
     s.setLong(addr, Math.max(0, s.long(addr) - 1));
     s.setLong(LOST, s.long(LOST) + 1);
     this.sim.applyMorale(-50);
-    if (explosion) this.explode(u.x, u.y, 0, true);
+    if (this.sim.takeBlastMark(explosion)) this.explode(u.x, u.y, 0, true);
     this.dirty = true;
   }
 
-  // $3C40: an own tank walked off the map: it joins the front fleet ($14274), -50 morale.
+  // $3C40: an own tank walked off the map: it joins the front fleet ($14274), -50 morale. The original's `$4692` for this
+  // walk-off ends in `$4732` without a `bset`, so a stale mark (ship-control.md 5e) blasts at the tank's last cell here.
   tankLeft(u: Unit): void {
     this.sim.aliens.sendToFront(u.type);
+    if (this.sim.takeBlastMark(false)) this.explode(u.x, u.y, 0, true);
     this.dirty = true;
   }
 
-  // $46CC for the ships: counts, -100 morale (not for missiles), the map marks of the ship are released.
+  // $46CC for the ships: counts, -100 morale (not for missiles), the reservation of the ship is released. `explosion` =
+  // the destroyer set bit 5 of $156A9: $4732 blasts at the ship first (lift as height), and an A6-clobbering blast keeps
+  // the map bit (enemies.md 6, ship-control.md 5e). A stale mark blasts here too (`Sim.takeBlastMark`). The Fleet call
+  // releases nothing more: rx/ry are cleared here.
   destroyShip(ship: FleetRecord, explosion = true): void {
     const ex = this.extra(ship);
-    this.releaseShip(ship, ex);
     const lift = ship.lift;
     const x = ship.x;
     const y = ship.y;
+    const blasted = this.sim.takeBlastMark(explosion) && this.explode(x, y, lift, true);
+    this.releaseShip(ship, ex, blasted);
     this.sim.fleet.destroyShip(ship, 0, false);
-    if (explosion) this.explode(x, y, lift, true);
     this.dirty = true;
   }
 
-  private releaseShip(ship: FleetRecord, ex: ShipExtra): void {
+  // $4732 + $46CC: releases the reservation cell named by +$14 (ex.rx/ry, never x/y). The branch is `tst.b` of the record's
+  // lift for every record, missiles included: lift != 0 frees the air mark and the ship flag, lift 0 the ground mark and the
+  // own flag (a launched missile climbs from lift 0, so the two marks it set at launch are not the ones it frees then; the
+  // trace is followed, not tidied). The map bit goes only when the destruction's blast did not clobber A6 (`blasted`).
+  private releaseShip(ship: FleetRecord, ex: ShipExtra, blasted = false): void {
     if (inMap(ex.rx, ex.ry)) {
       const i = mapIndex(ex.rx, ex.ry);
-      // Missiles reserve the air layer from launch ($49E8/$497E), even while their saved lift is still 0.
-      if (isMissile(ship) || ship.lift !== 0) {
-        this.cells[i] &= ~AIR_LAYER;
+      if (ship.lift !== 0) {
+        if (!blasted) this.cells[i] &= ~AIR_LAYER;
         this.flags[cellFlagIndex(ex.rx, ex.ry)] &= ~FLAG_SHIP;
       } else {
-        this.cells[i] &= ~OCCUPIED;
+        if (!blasted) this.cells[i] &= ~OCCUPIED;
         this.flags[cellFlagIndex(ex.rx, ex.ry)] &= ~FLAG_OWN;
       }
     }
@@ -1000,11 +1022,13 @@ export class EnemySystem {
 
   // ---- enemy ground units ($1193E) ----------------------------------------------------------------------------
 
-  private pickTarget(e: Enemy): void {
+  // $119AC / $11A5C: a random building becomes the target (mode 1). Returns the picked record's tile word, or null.
+  private pickTarget(e: Enemy): number | null {
     const t = this.sim.randomBuilding();
     e.targetX = t ? t[0] : NO_TARGET;
     e.targetY = t ? t[1] : NO_TARGET;
     e.mode = 1;
+    return t ? t[2] : null;
   }
 
   private groundStep(g: Enemy): void {
@@ -1060,11 +1084,19 @@ export class EnemySystem {
   private airStep(a: Enemy): void {
     if (a.type === ENEMY_KAMIKAZE || a.type === ENEMY_KAMIKAZE_FAST) {
       this.kamikaze(a);
-      if (a.type === ENEMY_KAMIKAZE && this.isAir(a)) this.attack(a);
+      if (a.type === ENEMY_KAMIKAZE && this.isAir(a)) this.attackFromAir(a);
     } else {
       this.bomber(a);
-      if (this.isAir(a)) this.attack(a);
+      if (this.isAir(a)) this.attackFromAir(a);
     }
+  }
+
+  // $11AC2 / $11ADE: after `$1266A` the aircraft step runs `bclr.b #7,$9(a6)` whether or not the attack fired. `attack()`
+  // sets bit 7 on the attacker (the ground wait gate), so an aircraft must not keep that mirror. Aircraft have no wait gate
+  // (enemies.md section 2 and 3d); the bit is state only.
+  private attackFromAir(a: Enemy): void {
+    this.attack(a);
+    a.waiting = false;
   }
 
   // $11AE6: the aircraft step: -1 between two cells (or gone), 0 on the target cell, 1 a new step was started.
@@ -1117,10 +1149,11 @@ export class EnemySystem {
   // $119C0: kamikaze: pick a building, fly there, dive onto it and blow up.
   private kamikaze(a: Enemy): void {
     if (a.mode === 6) {
-      this.pickTarget(a);
-      if (a.targetX !== NO_TARGET) {
-        const height = this.hooks.buildingHeight?.(a.targetX, a.targetY) ?? 20;
-        a.aux = s8(height - 10); // +$13: the altitude at which it hits
+      const tile = this.pickTarget(a);
+      if (tile !== null) {
+        // $119C6..$119DC: byte +3 of the descriptor (rows - 1), then minus 8 and minus 2 as bytes: +$13 = stored - 10.
+        const stored = this.hooks.buildingHeight?.(tile) ?? 20;
+        a.aux = s8((stored & 0xff) - 10); // +$13: the altitude at which it hits
       }
     } else if (a.mode === 1) {
       if (this.airMove(a) !== 0) return;
@@ -1335,7 +1368,7 @@ export class EnemySystem {
       this.s.setLong(front, this.s.long(front) + 1);
       ship.x = Math.max(0, Math.min(MAP_WIDTH - 1, ship.x));
       ship.y = Math.max(0, Math.min(MAP_HEIGHT - 1, ship.y));
-      this.releaseShip(ship, ex);
+      // the reservation is released by the Fleet removal, after its blast (a stale mark, `Sim.takeBlastMark`), as `$46CC` does
       this.sim.fleet.destroyShip(ship, 0, false);
       this.s.setLong(LOST, this.s.long(LOST) - 1);
       this.dirty = true;
@@ -1501,9 +1534,22 @@ export class EnemySystem {
     return ex.targetSlot;
   }
 
+  // The hit ($4408 at 44A8-44B2, air target from mode 1 and ground target from mode 2 with lift <= 0): `$46CC` removes the
+  // missile BEFORE `bset.b #5,$156A9`, so the missile's own removal is silent and releases its map marks (no A6 clobber),
+  // unless a mark left by an earlier free-slot hit is still set (then that blast is at the missile). Only the occupant's
+  // `$11C30` / `$11C5C` (a `$4732` with bit 5 set) explodes. Static trace, ship-control.md 5e.
   private missileHit(ship: FleetRecord, target: Enemy): void {
-    this.destroyShip(ship, true);
+    this.destroyShip(ship, false);
     this.destroyEnemy(target, true);
+  }
+
+  // $4408 at 44A8 with a FREE slot (the occupant was killed while the missile waited, so `tst.b (a6)` is zero): `$46CC`
+  // removes the missile (its own `$4732` consumes any earlier mark), then `bset.b #5,$156A9` runs and the routine returns
+  // without a kill. Bit 5 therefore STAYS SET and the next `$4732` anywhere (a `$46CC`, `$4692`, `$11C30`, `$11C5C`) blasts
+  // once at that victim. Static trace, Disk.1 `$4408` 44A8-44DC (ship-control.md 5e).
+  private missileFreeHit(ship: FleetRecord): void {
+    this.destroyShip(ship, false);
+    this.sim.blastMark = true;
   }
 
   // $4408 for every missile, launched and restored alike, with the pointer semantics of the original: +$C..+$F names a
@@ -1514,9 +1560,11 @@ export class EnemySystem {
   //    the missile switches to mode 2 (dir 3, no velocity), an air target is hit at once. The main pass has NO "target is
   //    gone" check: a free slot is only noticed by $ACE2.
   //  - mode 2 (the else branch): lift -4; when it is <= 0 the missile and the occupant (if any) are destroyed.
-  // Limit: with a FREE slot the original still compares against the stale x and the zeroed y bytes of the freed record
-  // and, near them, writes into it; those stale bytes are not modelled, so a missile whose slot is free just flies on
-  // (mode 1) until the next daily pass destroys it, and in mode 2 it simply ends.
+  // A FREE slot is compared with cell (0,0): `$4732` zeroes the freed record's x and y (enemies.md 3d), so the arrival test
+  // on cells (0,0)..(1,1) freezes the missile (mode 2, dir 3, no velocity) like a ground hit, and then `missileFreeHit`
+  // removes it with bit 5 left set. Elsewhere a free-slot missile flies on (mode 1) until the next daily pass destroys it.
+  // The original's stray writes into the freed record (+$B = $FF, +$9 = 5) and its other stale bytes are not kept: no routine
+  // reads them before the next spawn rewrites +$9/+$B/+$C (enemies.md 3e, test/freed-records.mjs section 4).
   private missileStep(m: MissileRecord, ex: ShipExtra): void {
     const slot = this.missileSlot(ex);
     if (m.mode === 4) {
@@ -1529,15 +1577,21 @@ export class EnemySystem {
       }
     } else if (m.mode === 1) {
       if (this.shipMove(m, ex) < 0) return;
+      // $4408 44xx compares the POINTED record even when its slot is free. `$4732` clears a freed record's +0 (type) and
+      // +1/+2 (x, y), so a free slot is compared with cell (0,0); its type 0 takes the ground branch. Its own +B/+9 writes
+      // land in a record that the next spawn re-initialises, so they are not kept (enemies.md 3e, ship-control.md 5e).
       const target = this.occupant(slot);
-      if (!target) return;
-      if (Math.abs(m.x - target.x) > 1 || Math.abs(m.y - target.y) > 1) return;
-      if (!target.air) {
+      const tx = target ? target.x : 0;
+      const ty = target ? target.y : 0;
+      if (Math.abs(m.x - tx) > 1 || Math.abs(m.y - ty) > 1) return;
+      if (!target || !target.air) {
         m.mode = 2;
         m.dir = 3;
         ex.vx = ex.vy = 0;
-        target.targetX = NO_TARGET;
-        target.mode = 5;
+        if (target) {
+          target.targetX = NO_TARGET;
+          target.mode = 5;
+        }
       } else {
         this.missileHit(m, target);
       }
@@ -1546,7 +1600,7 @@ export class EnemySystem {
       if (m.lift > 0) return;
       const target = this.occupant(slot);
       if (target) this.missileHit(m, target);
-      else this.destroyShip(m, false);
+      else this.missileFreeHit(m);
     }
   }
 

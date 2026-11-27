@@ -110,6 +110,13 @@ export interface Offer {
 /** The cells `$75A8` lists at `$7C28` for a demolished building (1 or 4 cells, origin first). */
 export type DemolishFootprint = ReadonlyArray<readonly [number, number]>;
 
+/** A unit removed by `$4692` for the Earth requisition: its type and the cell it stood on (-1, -1 without a unit layer). */
+export interface DestroyedUnit {
+  readonly type: number;
+  readonly x: number;
+  readonly y: number;
+}
+
 export interface SimOptions {
   rng?: Rng;
   /**
@@ -127,12 +134,16 @@ export interface SimOptions {
   centreChanged?: (slot: number) => void;
   // $9A36 point of the daily step: the message log protect counters count down (Messages.dayPassed).
   onDay?: () => void;
-  // $37CA at the end of the tank yard step: put a finished unit next to the yard at (x, y).
-  // Returns false when no neighbouring cell is free. Without a unit layer the unit is only counted.
+  // $A6D2-$A756 of the tank yard step: the first free cell around the yard at (x, y), in the original's order.
+  // Null when all eight neighbours are blocked (message $95; the yard keeps its counter). Without a unit layer the
+  // yard's own cell is used.
+  yardExit?: (x: number, y: number) => { x: number; y: number } | null;
+  // $37CA: put a finished unit on the exit cell. Returns false only when the unit list is full. Without a unit layer
+  // the unit is only counted.
   spawnUnit?: (x: number, y: number, advanced: boolean) => boolean;
-  // $4692: remove the first unit from the map; returns its type (9 or 10), or null when none exists.
-  // Without a unit layer a unit of the type with a non-zero count is chosen.
-  destroyUnit?: () => number | null;
+  // $4692: remove the first unit from the map; returns its type (9 or 10) and cell, or null when none exists.
+  // Without a unit layer a unit of the type with a non-zero count is chosen (x = y = -1: no cell is known).
+  destroyUnit?: () => DestroyedUnit | null;
   // $7372: knock down the building at a cell. A demolition is NOT a blast by itself: the mine collapse event calls `$7372`
   // alone (no counter, no `$1237C`), while `Sim.bomb` (`$12332`) demolishes and then blasts. A hook that can report the
   // footprint returns the cells `$75A8` listed (`[]` when nothing was a building: ground, construction site, refusal) and
@@ -152,6 +163,11 @@ export interface SimOptions {
   defectUnit?: () => { x: number; y: number } | null;
   // $12510: heal every own ground unit by `amount` hit points (type maximum from UNIT_INIT).
   repairUnits?: (amount: number) => void;
+  // `$1237C` for a ship destroyed with its explosion (`$4732` with bit 5 of `$156A9` set): `lift` is the ship's +$10
+  // (`$12D68`, the sprite height) and `high` selects the high volume (`$1581` bit 3). Returns whether the blast clobbered
+  // A6, the map-word pointer; `$46CC` then skips its map-bit release (enemies.md section 6, ship-control.md 5e). Absent = no
+  // blast and no clobber.
+  blast?: (x: number, y: number, lift: number, high: boolean) => boolean;
   /** `$11D34` gun A, consumed from pending-period bit 4 at the start of `$99C4`. */
   gunA?: () => void;
   /** `$11D34` gun B, consumed in the daily branch before `$ACE2`. */
@@ -168,6 +184,22 @@ export class Sim {
   // Model the runtime value; snapshot restoration replaces it with the saved session value.
   sysFlags = 0;
   paused = false; // $156A9 bit 2
+  // `$156A9` bit 5, the "destroyed by an attack" mark. Every `$4732` tests and clears it (`takeBlastMark`); between two
+  // `$4732` calls it stays set only after a missile hit on a FREE slot (ship-control.md 5e), so it persists across passes.
+  blastMark = false;
+  /**
+   * The descriptor exchange of `$11024` (eclipse-tiles.ts): true while entries 4/51 and 50/54 of the table `$1612E` are exchanged.
+   * The table is built once at boot and only `$11024` writes those address longs (static trace, notes/formats/game-state.md 5.1),
+   * so this is the parity of the traced calls: weekly eclipse start and end, event 14, a disk-menu entry while bit 6 is set, and
+   * the disk-menu exit while `$144BB` is nonzero. Nothing clears it on a new game (`$866E`/`$875C` do not touch the table), so a
+   * session hands it to the next one (`carryTableState`) and a save stores it (save-session.ts version 11).
+   */
+  tileExchange = false;
+  /**
+   * True when `tileExchange` came from a save that stored no parity (versions 2..10, migrated with the disk-menu value 0). The traced calls
+   * keep the flag, so the value stays marked as assumed in later saves (save.ts, slot label).
+   */
+  tileExchangeAssumed = false;
 
   private readonly rng: Rng;
   private readonly hardware: HardwareSource;
@@ -177,13 +209,15 @@ export class Sim {
   private centreHook: ((slot: number) => void) | undefined;
   private dayHook: (() => void) | undefined;
   private spawnUnit: (x: number, y: number, advanced: boolean) => boolean;
+  private yardExit: (x: number, y: number) => { x: number; y: number } | null;
   private interactive: boolean;
   private demolishAt: (x: number, y: number, bombing?: boolean) => DemolishFootprint | void;
-  private destroyUnit: () => number | null;
+  private destroyUnit: () => DestroyedUnit | null;
   private effectHook: ((kind: EffectKind, x: number, y: number) => void) | undefined;
   private spawnEnemyHook: (spawn: EnemySpawn) => boolean;
   private defectHook: () => { x: number; y: number } | null;
   private repairHook: ((amount: number) => void) | undefined;
+  private blastHook: ((x: number, y: number, lift: number, high: boolean) => boolean) | undefined;
   private gunAHook: (() => void) | undefined;
   private gunBHook: (() => void) | undefined;
   // Own spaceships and the ship yard ($AC04, $4060, $ACE2, ...), alien/meteor/intelligence code.
@@ -207,14 +241,20 @@ export class Sim {
     this.centreHook = options.centreChanged;
     this.dayHook = options.onDay;
     this.spawnUnit = options.spawnUnit ?? (() => true);
+    this.yardExit = options.yardExit ?? ((x, y) => ({ x, y }));
     this.interactive = options.interactive ?? false;
     this.demolishAt = options.demolishAt ?? (() => []);
-    this.destroyUnit = options.destroyUnit ?? (() => (this.s.long(0x14254) > 0 ? 9 : this.s.long(0x14258) > 0 ? 10 : null));
+    this.destroyUnit = options.destroyUnit ?? (() => {
+      const type = this.s.long(0x14254) > 0 ? 9 : this.s.long(0x14258) > 0 ? 10 : null;
+      return type === null ? null : { type, x: -1, y: -1 };
+    });
     this.effectHook = options.effect;
     // Without a unit layer only the count-word compare of $48EC / $48B6 can be answered (60 ground, 30 air).
     this.spawnEnemyHook = options.spawnEnemy ?? ((spawn) => this.state.word(spawn.air ? 0x142a4 : 0x142a2) < (spawn.air ? 30 : 60));
-    this.defectHook = options.defectUnit ?? (() => ({ x: -1, y: -1 }));
+    // Without a defection hook there is no tank to convert: null, so $1429C / $142A2 and the message stay as they are.
+    this.defectHook = options.defectUnit ?? (() => null);
     this.repairHook = options.repairUnits;
+    this.blastHook = options.blast;
     this.gunAHook = options.gunA;
     this.gunBHook = options.gunB;
     // New games need a capacity fallback. A saved snapshot must stay byte-for-byte intact while
@@ -273,15 +313,25 @@ export class Sim {
   }
 
   /**
-   * Models the ordinary fresh-scenario exit into the game proper. `$866E` leaves one day queued
-   * (`$156A8` bit 7), consumed by the first `$4D1C`; only the first boot-menu exit calls `$11476`
-   * to create the marker apparition. Detached snapshots never run this initialization.
+   * New-scenario state initialization `$866E`: it leaves one day queued (`$156A8` bit 7), consumed by the first `$4D1C`.
+   * The marker apparition is NOT part of it: the original calls `$11476` once at the boot-menu exit (`$157B8`), which
+   * is `leaveBootMenu()`. Detached snapshots never run this initialization.
    */
-  initializeScenarioStart(initialAlien: boolean): void {
+  initializeScenarioStart(): void {
     if (this.initialization !== "new-game" || this.scenarioStartInitialized) return;
     this.scenarioStartInitialized = true;
     this.dayQueued = true;
-    if (initialAlien) this.aliens.initializeScenarioAppearance();
+  }
+
+  /**
+   * `$157B8 -> $11476`, the one-shot call after the first return from the boot disk menu: it clears the apparition
+   * record and, when the current scenario has markers ($144A6), draws one marker with one range draw. It reads the state
+   * as it is at the call, so it also applies to a restored graph. The caller (`Game`, `runDiskMenuExit`) makes the call once per
+   * tail exit: the first entry of the launch, and again after each game-over restart (`$157B4` return, static trace). The restart
+   * draw uses the remake's RNG (`initializeScenarioAppearance`), so its marker is an approximation, not the original's value.
+   */
+  leaveBootMenu(): void {
+    this.aliens.initializeScenarioAppearance();
   }
 
   /**
@@ -297,6 +347,7 @@ export class Sim {
     if (hooks.centreChanged !== undefined) this.centreHook = hooks.centreChanged;
     if (hooks.onDay !== undefined) this.dayHook = hooks.onDay;
     if (hooks.spawnUnit !== undefined) this.spawnUnit = hooks.spawnUnit;
+    if (hooks.yardExit !== undefined) this.yardExit = hooks.yardExit;
     if (hooks.interactive !== undefined) this.interactive = hooks.interactive;
     if (hooks.demolishAt !== undefined) this.demolishAt = hooks.demolishAt;
     if (hooks.destroyUnit !== undefined) this.destroyUnit = hooks.destroyUnit;
@@ -304,6 +355,7 @@ export class Sim {
     if (hooks.spawnEnemy !== undefined) this.spawnEnemyHook = hooks.spawnEnemy;
     if (hooks.defectUnit !== undefined) this.defectHook = hooks.defectUnit;
     if (hooks.repairUnits !== undefined) this.repairHook = hooks.repairUnits;
+    if (hooks.blast !== undefined) this.blastHook = hooks.blast;
     if (hooks.gunA !== undefined) this.gunAHook = hooks.gunA;
     if (hooks.gunB !== undefined) this.gunBHook = hooks.gunB;
   }
@@ -387,6 +439,19 @@ export class Sim {
   repairUnits(amount: number): void {
     this.repairHook?.(amount);
   }
+  // `$1237C` for a ship's own destruction blast ($4732 path, see `SimOptions.blast`). Returns the clobber flag.
+  blast(x: number, y: number, lift: number, high: boolean): boolean {
+    return this.blastHook?.(x, y, lift, high) === true;
+  }
+  // `$4732` (`bclr.b #5,$156A9`, then `$1237C` when the bit was set): consumes the mark and reports whether the blast is due.
+  // `explosion` is the caller's own `bset.b #5` just before its `$46CC` / `$11C5C` / `$11C30` / `$4692` call (the attack, gun,
+  // daily and kamikaze paths). A destroy path without one (a missile's own removal, a walk-off, a requisition) still blasts when
+  // a missile hit left the mark set, and then the mark is gone. Every destruction calls this exactly once.
+  takeBlastMark(explosion: boolean): boolean {
+    const due = explosion || this.blastMark;
+    this.blastMark = false;
+    return due;
+  }
   // $12332: bomb a building cell: demolish ($7372, which lists the footprint cells at $7C28), damage counter $1346A++
   // (always, even when nothing was demolished), then one `$1237C` blast per listed cell in list order. The blast is the
   // `explosion` effect: the host applies the visible-window, volume and 30-slot pool rules of `$1237C` once per cell.
@@ -400,6 +465,40 @@ export class Sim {
 
   get gameOver(): boolean {
     return (this.sysFlags & SYS.gameOver) !== 0;
+  }
+
+  /**
+   * The disk menu's entry `$7E52` (`$7ECA`-`$7ED4`): while bit 6 is set it runs `$11024` once more. Called by the remake only where
+   * the original enters the menu (map icon `$15AE6`, game-over tail `$157AE`), never when the open menu re-shows a page.
+   */
+  enterDiskMenu(): void {
+    if (this.sysFlags & SYS.eclipse) this.exchangeTiles();
+  }
+
+  /**
+   * The disk menu's exit `$802C` (`$8040`, the boot exit): refused while bit 3 (game over) is set. Otherwise, with `$144BB` nonzero, it
+   * runs `$11024` and sets bit 6. A scenario, tutorial or Disk.4 exit reaches it with `$144BB` zeroed by the reset, so it changes nothing.
+   */
+  leaveDiskMenu(): void {
+    if (this.gameOver) return;
+    if (this.s.byte(V.eclipse) === 0) return;
+    this.exchangeTiles();
+    this.sysFlags |= SYS.eclipse;
+  }
+
+  /**
+   * Hands the descriptor-exchange state of the session being replaced to this one. A new game, scenario, tutorial, load or Disk.4
+   * activation does not rebuild the table, so the state carries over. `null` (no session yet, the boot session) keeps the boot state.
+   */
+  carryTableState(from: Sim | null): void {
+    if (from === null) return;
+    this.tileExchange = from.tileExchange;
+    this.tileExchangeAssumed = from.tileExchangeAssumed;
+  }
+
+  // `$11024`: exchanges the data-address longs of descriptor entries 4/51 and 50/54. Applying it twice is the identity.
+  private exchangeTiles(): void {
+    this.tileExchange = !this.tileExchange;
   }
 
   // Combined one-call form kept for headless callers: one VBL followed by one main-loop pass in the traced order
@@ -511,10 +610,12 @@ export class Sim {
     this.gunBHook?.();
     this.fleet.dailyFuel(); // $ACE2
     this.checkGameOver();
+    // $B0B6 `jmp $157AE`: a game over leaves the daily pass here, so the countdown, the message timers and the event scheduler do not run.
+    if (this.gameOver) return;
     this.alerts.daily(); // $144BD countdown
     this.dayHook?.(); // $15698 message timers
+    this.eventScheduler(); // $10E1E: the unrest colony fall (`$10E0A`) jumps out of the same way
     if (this.gameOver) return;
-    this.eventScheduler();
     this.aliens.dailyIntel(); // $AF12
   }
 
@@ -596,12 +697,14 @@ export class Sim {
       if (s.byte(V.eclipse) !== 0) return;
       this.sysFlags &= ~SYS.eclipse;
       this.msg(0xde);
+      this.exchangeTiles(); // `$1100A` on the end path (`bra $11004`)
       return;
     }
     if (s.byte(A.month) === 11 && s.byte(A.day) === 0x15) {
       s.setByte(V.eclipse, 3);
       this.sysFlags |= SYS.eclipse;
       this.msg(0xdd);
+      this.exchangeTiles(); // `$1100A` on the start path
     }
   }
 
@@ -613,9 +716,13 @@ export class Sim {
     if (this.sysFlags & SYS.tutorialMode) return;
     const k = s.byte(V.eventIndex);
     const chance = s.byte(0x13118 + k);
-    // Event 9 (attack wave, day-event slot 9 in the monthly index cycle) ignores the chance table (static trace): it reads its own tables
-    // ($13456 record, intelligence countdown). Every other event is skipped when its chance byte is 0.
-    if (chance !== 0 || k === 9) this.runEvent(k, chance);
+    // Static trace ($10E3A-$10E4C, Disk.1): `move.b (a0)+,d3; beq $10E50` skips the handler for EVERY slot whose chance byte is
+    // zero, the index still advances. The attack wave (slot 9) is no exception: its own chance byte is 100 in all ten scenario
+    // blocks, so it runs every day slot 9 comes round, but a zero byte would skip it like any other event.
+    if (chance !== 0) this.runEvent(k, chance);
+    // The unrest colony fall (`$10E0A`, reached from the crime handler's riot routine) jumps out of `$10E1E` before the index advance at
+    // `$10E50`, so a game over raised by the handler leaves the index on the slot that fell (Disk.1 trace, notes/formats/game-proper.md).
+    if (this.gameOver) return;
     s.setByte(V.eventIndex, k + 1);
   }
 
@@ -735,12 +842,15 @@ export class Sim {
         return;
       }
       for (let i = 0; i < count; i++) {
-        const type = this.destroyUnit();
-        if (type === null) break;
+        const destroyed = this.destroyUnit();
+        if (destroyed === null) break;
         s.setWord(V.tanks, s.word(V.tanks) - 1);
-        this.add32(type === 9 ? 0x14254 : 0x14258, -1);
+        this.add32(destroyed.type === 9 ? 0x14254 : 0x14258, -1);
         this.add32(0x14294, 1);
         this.applyMorale(-50);
+        // $4692 -> $4732: a mark left by a missile hit blasts at the removed tank (no attacker mark: silent)
+        const due = this.takeBlastMark(false);
+        if (due && destroyed.x >= 0) this.blast(destroyed.x, destroyed.y, 0, true);
       }
     });
   }
@@ -757,7 +867,9 @@ export class Sim {
       const at = slot * 8;
       if (((o[at] << 8) | o[at + 1]) !== TILE_MINE) continue;
       if (skip-- > 0) continue;
-      this.demolishAt(o[at + 4], o[at + 5]);
+      const x = o[at + 4], y = o[at + 5];
+      this.demolishAt(x, y);
+      this.effect("focus", x, y); // $110E6 -> $11432: the bookmark goes to the mine's cell, before the message
       this.msg(0xdf);
       this.applyMorale(-300);
       return;
@@ -810,12 +922,13 @@ export class Sim {
     });
   }
 
-  // $11058: eclipse (solar output 0 for 1..10 weeks).
+  // $11058: eclipse (solar output 0 for 1..10 weeks). The original runs `$11024` (`$1107A`) before the message.
   private eventEclipse(chance: number): void {
     const s = this.s;
     if (s.byte(V.eclipse) !== 0) return;
     if (((this.roll(100) - chance) & 0x80) !== 0) {
       s.setByte(V.eclipse, this.roll(10) + 1);
+      this.exchangeTiles();
       this.msg(0xdd);
       this.sysFlags |= SYS.eclipse;
     }
@@ -867,8 +980,8 @@ export class Sim {
     this.s.setByte(V.virusDeaths, 0);
   }
 
-  // $10C72: crime consequences. The riot branches of $10D00/$10D9E (crime above 50) are not
-  // ported.
+  // $10C72: crime consequences. Arson ($10D00, crimeArson) and riot ($10D9E, crimeRiot, crime above 50)
+  // are dispatched below with the thresholds $32 and $3C.
   eventCrime(): void {
     const s = this.s;
     const crime = s.signedLong(V.crime);
@@ -892,14 +1005,17 @@ export class Sim {
     if (index !== 0) this.msg(index);
   }
 
-  // $11A5C: the n-th used object record, n random below min(record count, 254).
-  randomBuilding(): [number, number] | null {
+  // $11A5C: the n-th used object record, n random below min($142C2, $FE). The one draw of the `$11A74` site (`$2DCC` with D2 =
+  // that range) is made here. Returns the record's cell (+4/+5) and its tile word (+0): the original's kamikaze reads its dive
+  // height from that word, not from the map cell, which can show another tile while a gun flashes (enemies.md section 3c).
+  // Null when the scan runs out (the original then leaves D2 = $FF).
+  randomBuilding(): [x: number, y: number, tile: number] | null {
     const o = this.world.objects;
     let skip = this.roll(Math.min(this.s.word(0x142c2), 0xfe));
     for (let slot = 0; slot < OBJECT_SLOTS; slot++) {
       const at = slot * 8;
       if (o[at] === 0 && o[at + 1] === 0) continue;
-      if (skip-- === 0) return [o[at + 4], o[at + 5]];
+      if (skip-- === 0) return [o[at + 4], o[at + 5], (o[at] << 8) | o[at + 1]];
     }
     return null;
   }
@@ -922,6 +1038,7 @@ export class Sim {
     const spot = this.randomBuilding();
     if (!spot) return 0;
     this.bomb(spot[0], spot[1]); // $10D60: `$12332` (demolish, counter, blast per footprint cell)
+    this.effect("focus", spot[0], spot[1]); // $10D6C -> $11432: the bookmark goes to the bombed cell, before the message
     this.applyMorale(-500);
     return 0x119;
   }
@@ -1417,17 +1534,22 @@ export class Sim {
         objects[at + 6] = 0xff;
       }
       const advanced = (s.long(V.invention) & 4) !== 0;
-      if (s.word(V.tanks) >= 99) {
-        objects[at + 6] = 0;
-        this.msg(0x8f); // $37CA: the unit list is full
-      } else if (this.spawnUnit(objects[at + 4], objects[at + 5], advanced)) {
-        objects[at + 6] = 0;
-        this.add32(0x143b6, 1);
-        s.setWord(V.tanks, s.word(V.tanks) + 1);
-        this.add32(advanced ? 0x14258 : 0x14254, 1);
-      } else {
+      // $A6D2-$A756 runs first: with no free neighbour the message is $95 and the counter keeps its value (retry).
+      const exit = this.yardExit(objects[at + 4], objects[at + 5]);
+      if (exit === null) {
         this.msg(0x95);
+        continue;
       }
+      // $A756: the counter is cleared and the made-units counter $143B6 counted BEFORE the call to $37CA, so both
+      // happen even when the unit list is full (the unit is then not placed and message $8F is shown).
+      objects[at + 6] = 0;
+      this.add32(0x143b6, 1);
+      if (s.word(V.tanks) >= 99 || !this.spawnUnit(exit.x, exit.y, advanced)) {
+        this.msg(0x8f); // $37CA: the unit list is full
+        continue;
+      }
+      s.setWord(V.tanks, s.word(V.tanks) + 1);
+      this.add32(advanced ? 0x14258 : 0x14254, 1);
     }
   }
 

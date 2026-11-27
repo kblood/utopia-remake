@@ -1,9 +1,11 @@
-// The council room (icon column button 5, $15CFE): a full-screen picture of the six advisers. Pressing
-// one of them shows his portrait and caption and opens the matching F-key report (F1-F6, same order as
-// the picture's rectangle table $1614E); pressing anywhere else leaves. Refused with message $B2 while
-// no game is active ($133F8 = 0). Picture 2 of the table at $8C8C (sectors $2F8-$327, palette from its
-// tail at $3998A), portraits in sectors $328-$34B (six 88 x 79 pixel images). Notes:
-// notes/formats/screens.md section 9.
+// The council room (icon column button 5, $15CFE): a full-screen picture of the six advisers. The room
+// waits for a left press and then its release (`$2E48`); the release chooses the adviser under the pointer
+// at that moment (`$5730`), shows his portrait and caption and opens the matching F-key report (F1-F6, same
+// order as the picture's rectangle table $1614E). A release outside every adviser leaves. Escape and the
+// right button are not read, and a press alone does nothing. Refused with message $B2 while no game is
+// active ($133F8 = 0). Picture 2 of the table at $8C8C (sectors $2F8-$327, palette from its tail at
+// $3998A), portraits in sectors $328-$34B (six 88 x 79 pixel images). Notes: notes/formats/screens.md
+// section 9.
 
 import { COLOR } from "../../data/gamefont.js";
 import { decodePicture, SECTOR_SIZE, type SectorRange } from "../../data/picture.js";
@@ -14,7 +16,7 @@ import { GameImage } from "./image.js";
 import { drawPlanar, restoreMainBackground } from "./planar.js";
 import { BuildingScreen, ColonyScreen, DefenceScreen, FinanceScreen, ResearchScreen, ResourceScreen } from "./reports.js";
 import type { ScreenContext, ScreenScene } from "./types.js";
-import { Pointer, Ui } from "./ui.js";
+import { Ui } from "./ui.js";
 
 const PICTURE: SectorRange = { first: 0x2f8, last: 0x327 };
 const PORTRAIT_SHEET: SectorRange = { first: 0x328, last: 0x34b };
@@ -69,10 +71,11 @@ export class CouncilScreen implements ScreenScene {
   private readonly ui: Ui;
   private readonly image: GameImage;
   private readonly assets: CouncilAssets;
-  private readonly pointer = new Pointer();
   private readonly rects: { x0: number; x1: number; y0: number; y1: number }[] = [];
   private child: ScreenScene | null = null;
   private target: Screen | null = null;
+  // `$2E48` of the room ($15D90): wait for a left press, then for its release, which chooses the adviser.
+  private step: "press" | "release" = "press";
   adviser = -1; // 0-5 while its report is open
   private done = false;
 
@@ -105,32 +108,33 @@ export class CouncilScreen implements ScreenScene {
               : i === 4
                 ? new ResearchScreen(ctx, ui)
                 : new DefenceScreen(ctx, ui);
-    report.setCouncilMode(); // no button column; a left press leaves
+    report.setCouncilMode(); // no button column; its own $2E48 wait: a left press, then its release, leaves
     return report;
   }
 
   update(input: Input): "running" | "close" {
     if (this.done) return "close";
     if (this.child) {
-      // The report waits for a button and leaves; the council picture is shown again afterwards.
+      // The report waits for a left click and leaves on its release; the council picture is shown again afterwards,
+      // and the room waits for the next press ($15DE2 -> $2E52 -> $15D90).
       if (this.child.update(input) === "close") {
         this.child = null;
         this.adviser = -1;
-        this.pointer.update(input);
       }
       return "running";
     }
-    const keys = input.keys ? input.keys.slice() : [];
-    if (input.keys) input.keys.length = 0;
-    this.pointer.update(input);
-    const p = this.pointer;
-    if (keys.includes("Escape") || p.rightPressed) return this.leave();
-    if (p.pressedEdge) {
-      const i = this.adviserAt(p.x, p.y);
-      if (i < 0) return this.leave(); // a press elsewhere ends the visit ($15DBC)
-      this.adviser = i;
-      this.child = this.openReport(i);
+    if (input.keys) input.keys.length = 0; // the room reads no key (screens.md section 9)
+    if (this.step === "press") {
+      if (input.leftButton) this.step = "release";
+      return "running";
     }
+    if (input.leftButton) return "running";
+    // The release ($2E48 returns) chooses the adviser by the pointer now ($15DAC-$15DBA); outside every rectangle the room leaves.
+    this.step = "press";
+    const i = this.adviserAt(input.pointerX, input.pointerY);
+    if (i < 0) return this.leave();
+    this.adviser = i;
+    this.child = this.openReport(i);
     return "running";
   }
 

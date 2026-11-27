@@ -218,6 +218,8 @@ export interface RuntimeCheckpoint {
     readonly dayQueued: boolean;
     /** `$156A9` bit 2. */
     readonly paused: boolean;
+    /** `$156A9` bit 5, the blast mark: set only between a free-slot missile hit and the next `$4732` (ship-control.md 5e). */
+    readonly blastMark: boolean;
     /** `$156AA`. */
     readonly sysFlags: number;
     readonly gameOver: boolean;
@@ -499,6 +501,7 @@ export function captureCheckpoint(
       },
       dayQueued: sim.dayQueued,
       paused: sim.paused,
+      blastMark: sim.blastMark,
       sysFlags: sim.sysFlags,
       gameOver: sim.gameOver,
       offer: sim.pending ? { what: sim.pending.offer.what, count: sim.pending.offer.count, price: sim.pending.offer.price } : null,

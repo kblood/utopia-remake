@@ -14,6 +14,7 @@ import type { Ship } from "../sim-ships.js";
 import type { Unit, UnitSystem } from "../units.js";
 import type { World } from "../world.js";
 import { blitIcon } from "./buildings.js";
+import { writeOrderByte } from "./order-byte.js";
 import { PanelScene } from "./panel.js";
 import type { ScreenContext, ScreenScene } from "./types.js";
 import { NumberEntry, Ui, type Label } from "./ui.js";
@@ -100,6 +101,17 @@ abstract class OrderScreen extends PanelScene {
     return this.pins.some((p) => p !== null);
   }
 
+  // Strict (static trace of Disk.1: the ship loop `$DCDC` and the tank loop `$C6EC` read the mouse only through `$50B2`,
+  // and no key). Escape and a right click do nothing; only the exit button (9) closes the window and applies the order.
+  protected override get leavesOnEscapeOrRight(): boolean {
+    return false;
+  }
+
+  // The loops `$DCDC` and `$C6EC` poll the mouse through `$50B2` (mouse-poll.ts), see notes/formats/ship-control.md 6.
+  protected override get pollsLikeOriginal(): boolean {
+    return true;
+  }
+
   protected drawPins(screen: Screen): void {
     this.pins.forEach((p, n) => {
       if (p) blitIcon(screen, this.sprites, n + 1, this.rects[n].x0 - 8, this.rects[n].y1);
@@ -114,11 +126,12 @@ abstract class OrderScreen extends PanelScene {
     return text;
   }
 
-  // The icon of button 5 is the "front" image when it is available and a blank one otherwise ($DC28 / $C6B6).
+  // The icon of button 5 is the "front" image when it is available and a blank one otherwise ($DC28 / $C6B6). The press
+  // flips the rectangle whichever image it shows ($5756 flips the position), so the flip is drawn over the blank one too.
   override draw(screen: Screen): void {
     super.draw(screen);
     this.ui.drawButton(screen, ICON_FRONT, this.frontKnown ? FRONT_ICON : 0);
-    if (this.pressedButton === ICON_FRONT && this.frontKnown) this.ui.invertButton(screen, ICON_FRONT);
+    if (this.pressedButton === ICON_FRONT) this.ui.invertButton(screen, ICON_FRONT);
   }
 
   // A press that is not on a button: a pin icon.
@@ -132,8 +145,19 @@ abstract class OrderScreen extends PanelScene {
 // ---- ship window $DA94 ---------------------------------------------------------------------------------------------
 
 class ShipScreen extends OrderScreen {
-  private cmd: number; // $F173: starts as the ship's mode, so leaving at once repeats what the ship is doing
+  private order = 0;
   private note: { index: number; pin?: number } | null = null;
+
+  // $F173, starts as the ship's mode, so leaving at once repeats what the ship is doing. Every change is also written
+  // to the shared order byte (order-byte.ts), which the ship yard reads after this window closes.
+  private get cmd(): number {
+    return this.order;
+  }
+
+  private set cmd(value: number) {
+    this.order = value;
+    writeOrderByte(this.ctx.world, value);
+  }
 
   constructor(
     ctx: ScreenContext,
@@ -222,11 +246,21 @@ class ShipScreen extends OrderScreen {
 const TANK = { none: 0, front: 5, nearTank: 6, nearPin: 7, single: 9 } as const;
 
 class TankScreen extends OrderScreen {
-  private mode: number = TANK.none;
+  private current: number = TANK.none;
   private lines: [number[], number[]] | null = null; // the two message lines at x 56 ($CA3E)
   private asking = false; // the "how many" prompt is shown
   private entry: NumberEntry | null = null;
   private count: number;
+
+  // $F173 of the tank window: every change is also written to the shared order byte (order-byte.ts).
+  private get mode(): number {
+    return this.current;
+  }
+
+  private set mode(value: number) {
+    this.current = value;
+    writeOrderByte(this.ctx.world, value);
+  }
 
   constructor(
     ctx: ScreenContext,
@@ -236,6 +270,7 @@ class TankScreen extends OrderScreen {
   ) {
     super(ctx, ui, IMG.tankWindow, IMG.tankLabels, IMG.tankPins, IMG.tankButtons);
     this.count = lastCounts.get(ctx.world) ?? 0;
+    this.mode = TANK.none; // $C5E6: the window clears the order byte when it opens
   }
 
   protected override get modal(): boolean {
@@ -275,6 +310,7 @@ class TankScreen extends OrderScreen {
     this.entry = new NumberEntry(176, 125, 2, 4);
   }
 
+  // `$5110` (count entry `$C862`): only Return with a digit ends it; Escape is not a key of the entry (see NumberEntry).
   protected override onKeys(keys: string[]): boolean {
     const entry = this.entry;
     if (!entry) return false;
@@ -282,8 +318,6 @@ class TankScreen extends OrderScreen {
     if (entry.done !== null) {
       this.count = entry.done & 0xff;
       lastCounts.set(this.ctx.world, this.count);
-      this.entry = null;
-    } else if (entry.cancelled) {
       this.entry = null;
     }
     return true;
@@ -351,6 +385,8 @@ export function createOrderScreen(ctx: ScreenContext, pick: Pick): ScreenScene |
   if (!layer) return null;
   const ui = new Ui(ctx.disk, ctx.strings);
   if (pick.kind === "tank") return new TankScreen(ctx, pick.unit, layer.units, ui);
+  // $DA98: the ship's mode is written to the order byte before the refusal test below, so a refused window writes it too.
+  writeOrderByte(ctx.world, pick.ship.mode);
   const enemies = layer.enemies;
   if (!enemies) return null;
   if (enemies.padPending(pick.ship)) {

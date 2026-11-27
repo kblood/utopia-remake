@@ -38,8 +38,10 @@ function scan(list: { x: number; y: number; ref: object }[], px: number, py: num
 // Right click in select mode ($3EDC). `cell` is the map cell under the pointer ($5CDA, null when none).
 //  1. With a cell: the first ship (list order), then the first own tank, standing exactly on that cell.
 //  2. Otherwise the first drawn object whose box contains the point: the point is the pointer, but after a cell hit the
-//     original uses that cell's top-left corner instead.
-// Deviation: when both fail the pointer itself is tried too, so a flying ship can be picked by its sprite.
+//     original uses that cell's top-left corner instead. One scan only: a cell hit that finds no sprite at its corner
+//     picks nothing, even when the pointer lies inside a sprite's box.
+// Static trace (2026-11-10, ship-control.md 1): `$5CDA` leaves the rectangle corner in d0/d1 with Z set on a cell hit and
+// the pointer with Z clear on a miss; `$3EDC` runs the cell scan, then a single `$3F1E` pass over the drawn objects.
 export function pickObject(
   layer: ObjectLayer,
   ships: FleetRecord[],
@@ -57,7 +59,7 @@ export function pickObject(
   }
   const list = layer.pickables(scrollX, scrollY);
   const corner = cell ? cellCorner(cell.x - scrollX, cell.y - scrollY) : { x: px, y: py };
-  const hit = scan(list, corner.x, corner.y) ?? (cell ? scan(list, px, py) : null);
+  const hit = scan(list, corner.x, corner.y);
   return hit ? classify(hit.ref, layer.units, ships) : null;
 }
 

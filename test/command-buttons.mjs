@@ -111,9 +111,21 @@ const CELL = [128, 30]; // inside the first map diamond (112..143, 24..38)
   check("demolish: still select mode while held", controls.mode === "select");
   at(false, ...C[2]);
   check("demolish: mode changes on the release", controls.mode === "demolish");
+  // `$15AF8` calls `$15ECA` with no test of `$14591`: a second press sets demolish mode again, it does not leave it (static, Disk.1).
   at(true, ...C[2]);
   at(false, ...C[2]);
-  check("demolish: a second click leaves the mode", controls.mode === "select");
+  check("demolish: a second click keeps demolish mode ($15AF8 -> $15ECA, no mode test)", controls.mode === "demolish");
+  at(false, 20, 20, true); // a right click outside the arrows leaves build / demolish mode ($15F64 -> $15EF0)
+  at(false, 20, 20, false);
+  check("demolish: a right click leaves the mode", controls.mode === "select");
+  // `$15B0A` -> `$30FE`: the marker button outside select mode runs `$15EF0` first, then arms the marker (message `$6F`).
+  at(true, ...C[2]);
+  at(false, ...C[2]);
+  check("setup: demolish mode on again", controls.mode === "demolish");
+  const markerBefore = log.marker;
+  at(true, ...C[3]);
+  at(false, ...C[3]);
+  check("marker button in demolish mode: the mode goes back to select before the marker is armed ($30FE)", controls.mode === "select" && log.marker === markerBefore + 1, `mode=${controls.mode} marker=${log.marker - markerBefore}`);
 
   // A press on a map cell is still a press action ($158CA); a later release over a button has nothing recorded in $5DD4.
   const clicks = log.clicks;
@@ -245,6 +257,34 @@ const CELL = [128, 30]; // inside the first map diamond (112..143, 24..38)
   at(true, ...C[1]);
   at(false, ...C[1]);
   check("P key resume: the next button works normally", log.screens.join() === "overview" && !isPaused());
+}
+
+// Mode marker (controls.ts draw). Build mode draws no frame around the build button (272, 63): the original's closed-menu
+// build-mode captures show the plain button (building.md, "Construction-site frame comparison"). Demolish mode keeps its
+// 60-pixel frame around button 2 (272, 82), which has no original capture yet.
+{
+  const drawMode = (mode) => {
+    const r = rig();
+    r.controls.mode = mode;
+    const screen = new Screen();
+    screen.pixels.fill(7);
+    r.controls.draw(screen);
+    return screen;
+  };
+  const inBox = (i, x0, y0) => {
+    const x = i % 320;
+    const y = (i / 320) | 0;
+    return x >= x0 && x < x0 + 16 && y >= y0 && y < y0 + 16;
+  };
+  const select = drawMode("select");
+  const build = drawMode("build");
+  const demolish = drawMode("demolish");
+  let buildBox = 0;
+  for (let i = 0; i < select.pixels.length; i++) if (inBox(i, 272, 63) && build.pixels[i] !== select.pixels[i]) buildBox++;
+  check("build mode: the build button (272, 63) is drawn with no marker frame", buildBox === 0, `${buildBox} pixels differ`);
+  let demolishBox = 0;
+  for (let i = 0; i < select.pixels.length; i++) if (inBox(i, 272, 82) && demolish.pixels[i] !== select.pixels[i]) demolishBox++;
+  check("demolish mode: the demolish button (272, 82) keeps its 60-pixel frame", demolishBox === 60, `${demolishBox} pixels differ`);
 }
 
 console.log(failed === 0 ? "all command button checks passed" : `${failed} command button check(s) FAILED`);

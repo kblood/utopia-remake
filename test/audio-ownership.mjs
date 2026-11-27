@@ -214,6 +214,76 @@ const fresh = (frame = 100) => {
   check("model: the clock never runs backwards", s.frame === 2_000_000_000);
 }
 
+{
+  // `$1237C` writes the blast volume into the shared descriptor before each `$11B4` request, and the starter reads it when the entry starts
+  // (`$12C0`). Requests in one frame all pick channel 0 (a pending entry does not make a channel busy), so each replaces the one before:
+  // a footprint leaves ONE audible entry, sounding at the value written last.
+  const s = fresh();
+  const cells = [s.request(0, 100, null, 64), s.request(0, 100, null, 64), s.request(0, 100, null, 64), s.request(0, 100, null, 32)];
+  check("footprint: four requests in one frame all take channel 0 and replace one another; only the last stays pending", cells.every((v) => v.channel === 0) && cells.slice(0, 3).every((v) => v.status === "dropped") && s.channelState(0).pending === cells[3]);
+  check("footprint: the descriptor holds the last write (32) and the surviving entry carries it", s.volumeOf(0) === 32 && cells[3].volume === 32);
+  s.take();
+  s.advanceTo(101);
+  const starts = s.take().filter((e) => e.type === "start").map((e) => `${e.voice.channel}@${e.frame}:${e.voice.volume}`).join();
+  check("footprint: exactly one start, at 32", starts === "0@101:32", starts);
+}
+
+{
+  // music changes between two requests of one frame (on -> off): channel 0 is free again, so two entries of one descriptor are pending
+  // at once; the write reaches both, and the first to start reads the value written last
+  const s = fresh();
+  const a = s.request(0, 100, [1, 3], 64); // channel 1, start 101
+  const b = s.request(0, 100, null, 32); // music off: channel 0 is first free, start 101; the write of 32 reaches a
+  check("pending pair: channel 0 and channel 1 both pending, both carry the descriptor's 32", b.channel === 0 && a.channel === 1 && a.volume === 32 && b.volume === 32 && s.volumeOf(0) === 32);
+  s.take();
+  s.advanceTo(102);
+  const starts = s.take().filter((e) => e.type === "start").map((e) => `${e.voice.channel}@${e.frame}:${e.voice.volume}`).join();
+  check("pending pair: channel 0 starts in 101, channel 1 in 102, both at 32", starts === "0@101:32,1@102:32", starts);
+}
+
+{
+  // a write never changes an entry that has started: the DMA's VOL was written at the start
+  const s = fresh();
+  const a = s.request(0, 100, null, 64); // channel 0, start 101
+  s.take();
+  s.advanceTo(101);
+  check("started entry: starts at 64", types(s.take()) === "start" && a.status === "playing" && a.volume === 64);
+  const b = s.request(0, 101, null, 32); // channel 0 is busy: channel 1, start 102
+  const ev = s.take();
+  check("started entry: a later write (32) leaves the playing entry at 64 and sounds the new one at 32", a.volume === 64 && b.channel === 1 && b.volume === 32 && !ev.some((e) => e.voice === a), types(ev));
+  s.advanceTo(102);
+  check("started entry: the new entry starts at 32", s.take().some((e) => e.type === "start" && e.voice === b && b.volume === 32));
+}
+
+{
+  // music active on channels 1 and 2, both busy: a request with no free channel is dropped, but its descriptor write persists
+  const s = fresh();
+  const a = s.request(0, 100, [1, 2], 64); // channel 1, start 101, busy to 110
+  s.advanceTo(101);
+  const b = s.request(0, 101, [1, 2], 64); // channel 2, start 102
+  s.advanceTo(102);
+  const c = s.request(0, 102, [1, 2], 32); // both busy: dropped, writes 32
+  check("dropped write: no free channel, no voice, and the descriptor takes 32", c === null && s.volumeOf(0) === 32 && a.channel === 1 && b.channel === 2);
+  s.take();
+  s.advanceTo(110); // a's timer ends in frame 110: channel 1 is free again
+  const d = s.request(0, 110, [1, 2]); // no write: the next entry sounds at the persisted 32
+  check("dropped write: the next entry on the freed channel sounds at the persisted 32", d !== null && d.channel === 1 && d.volume === 32, d && `${d.channel}/${d.volume}`);
+}
+
+{
+  // effects off ($10BC): a refused request still writes the descriptor; the held entry takes that volume when the effects come back
+  const s = fresh();
+  const a = s.request(0, 100, null, 64); // channel 0, pending for 101
+  s.setEnabled(100, false);
+  const refused = s.request(0, 100, null, 32);
+  check("held write: the refused request makes no voice, the held entry keeps status held and takes the new volume", refused === null && a.status === "held" && a.volume === 32 && s.volumeOf(0) === 32);
+  s.take();
+  s.setEnabled(103, true);
+  s.advanceTo(104);
+  const starts = s.take().filter((e) => e.type === "start").map((e) => `${e.voice.channel}@${e.frame}:${e.voice.volume}`).join();
+  check("held write: after the effects come back the entry starts at 32 in frame 104", starts === "0@104:32" && a.startFrame === 104, starts);
+}
+
 // =================================================================================================================================
 // B. WebAudio projection of the model (synthetic Disk.1, fake context)
 // =================================================================================================================================
@@ -396,6 +466,24 @@ const mutes = (l) => JSON.stringify(l.mutes);
   now = 10.1;
   sfx.play(SFX.HIT);
   check("sfx/hookless link: the next play notices the switch-off and cuts the running effect", playing.stopCalls === 1 && live(sources[sources.length - 1]) && sources.length === before + 3);
+  sfx.dispose();
+}
+
+{
+  // WebAudio projection: a music change and a later write of the same descriptor re-schedule a pending node (the old one never sounds)
+  now = 2.0; // frame 100; the first entries start in frame 101 (2.02 s) and 102 (2.04 s)
+  const link = fakeLink({ current: 0, active: true }); // track 0: channels 1 and 3
+  const sfx = createSfx(disk1, undefined, { music: link });
+  const before = sources.length;
+  sfx.play(SFX.EXPLOSION_LOW, 64); // channel 1 (the pair), start 101
+  const pending = sources[before];
+  check("descriptor projection: a lone request schedules one node at its start frame", sources.length === before + 1 && Math.abs(pending.started - 2.02) < 1e-9 && live(pending));
+  link.change({ current: 0, active: false, dmaOff: true }); // `$1062` off: nothing is playing yet, so the pending entry is not cut
+  check("descriptor projection: switching the music off does not touch a pending entry", live(pending));
+  sfx.play(SFX.EXPLOSION_LOW, 32); // music off: channel 0 is first free, start 101; its write of 32 reaches the pending channel-1 entry
+  const live2 = sources.slice(before).filter(live);
+  check("descriptor projection: the pending node is stopped and re-scheduled (stopped once, the new node replaces it)", pending.stopCalls === 1 && live2.length === 2);
+  check("descriptor projection: the two live nodes start at 2.02 s (channel 0) and 2.04 s (channel 1, re-scheduled)", live2.map((n) => Math.round(n.started * 100) / 100).sort().join() === "2.02,2.04", live2.map((n) => n.started).join());
   sfx.dispose();
 }
 

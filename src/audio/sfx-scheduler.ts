@@ -13,9 +13,15 @@
 //              clears it at the REQUEST, command 8 sets it again at the expiry, and only if the music is active then)
 //   pair       music-active bit + the track's two usable channels (null = bit 1 clear, all four channels usable)
 //   on         bit 2 of `$1581`: effects enabled
+//   dvol[id]   descriptor +8 of effect `id`: the volume the starter reads WHEN IT STARTS an entry (`$12C0`). The blast routine
+//              `$1237C` writes it before every `$11B4` request, and that write stays even if the request is dropped or refused
+//              (static, VERIFIED 2026-11-10: `move.w #imm,8(a6)` only at `$123E6`/`$1242E`, the starter reads `$8(a6)` at `$12C0`).
+//              So entries of one descriptor that have not started yet all sound at the value written last.
 
 /** Number of Paula channels. */
 export const SFX_CHANNELS = 4;
+
+const clampVolume = (v: number): number => Math.max(0, Math.min(64, v));
 
 /** What the model needs of an effect: duration in frames (descriptor +10) and default volume (+8). */
 export interface SfxTimingBank {
@@ -38,6 +44,7 @@ export interface SfxVoice {
   startFrame: number;
   /** Frame in which the timer reaches 0 (`startFrame + frames - 1`). */
   endFrame: number;
+  /** Volume 0..64 the DMA starts with: the shared descriptor's value at the start frame (kept current while pending). */
   volume: number;
   status: VoiceStatus;
 }
@@ -69,7 +76,17 @@ export class SfxScheduler {
   private disposed = false;
   private events: SfxEvent[] = [];
 
-  constructor(private readonly bank: SfxTimingBank) {}
+  /** Descriptor +8 per effect id (see the header, `dvol`). */
+  private readonly descriptorVolume: number[];
+
+  constructor(private readonly bank: SfxTimingBank) {
+    this.descriptorVolume = bank.effects.map((e) => clampVolume(e.volume));
+  }
+
+  /** The shared descriptor volume of effect `id` (descriptor +8): what an entry started now would sound at. */
+  volumeOf(id: number): number {
+    return this.descriptorVolume[id] ?? 0;
+  }
 
   /** The newest frame the model has been advanced to (0 before the first call). */
   get frame(): number {
@@ -106,14 +123,17 @@ export class SfxScheduler {
 
   /**
    * Request effect `id` in frame `frame` (after that frame's vertical blank). `musicChannels` is the observation of bit 1 of
-   * `$1581`: the channel pair of the playing track, or null when the music is not active. Returns the queued voice, or null
-   * when the request is dropped (effects off, unknown id, no free candidate channel). `replaced` receives the unstarted voice
-   * this request overwrote.
+   * `$1581`: the channel pair of the playing track, or null when the music is not active. `volume` is the value the caller
+   * writes into the shared descriptor before the request (the blast routine `$1237C`, 64 in view or 32 out of view); omitted
+   * = no write. Returns the queued voice, or null when the request is dropped (effects off, unknown id, no free candidate
+   * channel). The descriptor write happens in every case, the drop included. `replaced` receives the unstarted voice this
+   * request overwrote.
    */
   request(id: number, frame: number, musicChannels: MusicPair, volume?: number, replaced?: (v: SfxVoice) => void): SfxVoice | null {
     const effect = this.bank.effects[id];
     if (!effect || this.disposed) return null;
     this.advanceTo(frame);
+    if (volume !== undefined) this.writeDescriptorVolume(id, volume);
     if (!this.on) return null; // `$11B4` returns at once while bit 2 is clear
     this.pair = musicChannels;
     const candidates: readonly number[] = musicChannels ?? ALL_CHANNELS;
@@ -132,12 +152,29 @@ export class SfxScheduler {
       channel,
       startFrame: -1,
       endFrame: -1,
-      volume: Math.max(0, Math.min(64, volume ?? effect.volume)),
+      volume: this.descriptorVolume[id],
       status: "pending",
     };
     this.queue[channel] = voice;
     this.plan();
     return voice;
+  }
+
+  /**
+   * `$1237C` stores the blast volume in descriptor +8. Entries of that descriptor that are still queued read the new value when
+   * they start, so a pending one is re-scheduled with it (a `queued` event replaces its node); a held one only takes the value.
+   * A voice that has started keeps the volume it started with (the DMA's VOL register is written only at the start).
+   */
+  private writeDescriptorVolume(id: number, volume: number): void {
+    const v = clampVolume(volume);
+    if (this.descriptorVolume[id] === v) return;
+    this.descriptorVolume[id] = v;
+    for (let c = 0; c < SFX_CHANNELS; c++) {
+      const q = this.queue[c];
+      if (!q || q.effectId !== id) continue;
+      q.volume = v;
+      if (q.status === "pending") this.events.push({ type: "queued", voice: q });
+    }
   }
 
   /** Whether `channel` is busy (timer non-zero) once the vertical blank of `frame` has run. */
@@ -249,6 +286,7 @@ export class SfxScheduler {
       if (!q) continue;
       this.queue[c] = null;
       const frames = Math.max(1, this.bank.effects[q.effectId].frames);
+      q.volume = this.descriptorVolume[q.effectId]; // `$12C0`: the volume is read here, at the start
       q.status = "playing";
       q.startFrame = frame;
       q.endFrame = frame + frames - 1;

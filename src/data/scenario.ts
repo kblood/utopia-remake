@@ -22,13 +22,18 @@ const TILE_SHEET = { first: 0x222, last: 0x25b } satisfies SectorRange; // Disk.
 const DISK1_TILES = 95;
 const SCENARIO_TILES = 66;
 const TILE_TABLE_BYTES = 0x508; // descriptors in front of the Disk.1 image data
-const TILE_BYTES_PER_ROW = 4;
+export const TILE_BYTES_PER_ROW = 4;
 export const TILE_WIDTH = 32;
 export const TILE_PLANES = 6;
 
 export interface ScenarioRecord {
   index: number;
   name: string;
+  /**
+   * The 16-byte name field up to its first NUL, as byte codes (the `$539E` text of the original's scenario rows: `$85DA` passes the
+   * record start, and `$539E` stops at byte 0). Trailing spaces are kept, as in the original. Traced: notes/formats/game-proper.md.
+   */
+  labelCodes: number[];
   sprites: SectorRange; // raw sprite sheet for the scenario's object types 22-27
   tiles: SectorRange; // raw tile images
   descriptors: SectorRange; // 8-byte {rows-1, offset} entries for the tile images
@@ -41,6 +46,14 @@ export interface ScenarioRecord {
 export interface Tile {
   rows: number;
   planes: Uint8Array; // 6 planes one after the other, each rows * 4 bytes
+  // The image buffer and absolute data address this descriptor reads from (`planes` is the copy at that address). Kept so
+  // a view can give an entry another entry's address (eclipse.ts) without copying the whole sheet. Shared, never written.
+  source?: TileSource;
+}
+
+export interface TileSource {
+  image: Uint8Array;
+  offset: number;
 }
 
 export interface TileSet {
@@ -70,9 +83,12 @@ export function readScenarioRecords(disk2: Uint8Array): ScenarioRecord[] {
   for (let index = 0; index < RECORD_COUNT; index++) {
     const at = RECORD_START + index * RECORD_SIZE;
     const pair = (n: number): SectorRange => ({ first: word(header, at + 0x10 + n * 4), last: word(header, at + 0x12 + n * 4) });
+    const field = header.subarray(at, at + NAME_LENGTH);
+    const nul = field.indexOf(0);
     records.push({
       index,
-      name: String.fromCharCode(...header.subarray(at, at + NAME_LENGTH)).replace(/[\0 ]+$/, ""),
+      name: String.fromCharCode(...field).replace(/[\0 ]+$/, ""),
+      labelCodes: Array.from(nul < 0 ? field : field.subarray(0, nul)),
       sprites: pair(0),
       tiles: pair(1),
       descriptors: pair(2),
@@ -106,7 +122,7 @@ function readTiles(descriptors: Uint8Array, count: number, images: Uint8Array, b
     const offset = base + long(descriptors, i * 8 + 4);
     const size = rows * TILE_BYTES_PER_ROW * TILE_PLANES;
     if (offset + size > images.length) throw new Error(`readTiles: tile ${i} lies outside its image data`);
-    tiles.push({ rows, planes: images.slice(offset, offset + size) });
+    tiles.push({ rows, planes: images.slice(offset, offset + size), source: { image: images, offset } });
   }
   return tiles;
 }

@@ -52,6 +52,9 @@ export interface ScreenContext {
   objects?: ObjectLayer;
   // Extra unit classes for the overview map (ships, enemy ground units and aircraft).
   otherUnits?: () => Partial<OverviewUnits>;
+  // The map's press latch (`$156A9` bit 0, a scroll arrow pressed with the left button, held since): a window opened while it
+  // is set starts its `$50B2` poll with it, so a held left button repeats its press each pass (mouse-poll.ts). Absent = clear.
+  pressLatch?: () => boolean;
   // Sound hook (SFX id, see audio/sfx.ts). PanelScene and OverviewScreen call it once with SFX.CLICK when a
   // button is pressed ($5756/$5948 request id 4; release routines $57FA/$59C8 are silent). PanelScene stays silent while a
   // number entry is open ($5110 never reaches $5756). Absent = silent.

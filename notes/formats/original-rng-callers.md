@@ -75,9 +75,9 @@ Other (non-dispatched) enclosing routines and their single direct callers: birth
 |------|-----|-------------|--------------------------|-------|----|
 | `$9BCC` | C | `$145A2` byte (zero skips: `$9BB6`) | `moveq #0` then 0 / `$1E` / `$3C` (`$9BBA-$9BCA`); byte 1 = 0 | CLOSED | sim.ts:1132 |
 | `$9CB0` | A | | `moveq #8` (`$9C9C`) with `dbra` (`$9CCC`), untouched in the body: 0..8; byte 1 = 0 | CLOSED | sim.ts:1173 |
-| `$A3F8` | A | | `$143F2` long, low word -1 (`$A3EC-$A3F4`), `dbra` (`$A404`): count-1..0; byte 1 = 0 iff count <= 256 | FORMULA | sim.ts:1452 |
+| `$A3F8` | A | | `$143F2` long (mine count), low word -1 (`$A3EC-$A3F4`), `dbra` (`$A404`): count-1..0; byte 1 = 0 iff count <= 256; see 6.8 | FORMULA | sim.ts:1452 |
 | `$A7BA` | C | 4 | `movem.w (a0),d0-d4` (`$A7AE`): current market value, signed word; scenario-block bounds keep it 0..300, so byte 1 = 0 or 1 | CLOSED (Disk.2 table bounds) | sim.ts:1547 |
-| `$A7CC` | C | word `d5-d1` (max - min) | same current value as at `$A7BA`; `$2DCC` restores D0 and the update/clamp follows this second draw, so byte 1 = 0 or 1 | CLOSED (Disk.2 table bounds) | sim.ts:1550 |
+| `$A7CC` | C | word `d5-d1` (max - min) | same current value as at `$A7BA`; `$2DCC` restores D0 and the update/clamp follows this second draw, so byte 1 = 0 or 1. **Runs only when the `$A7BA` result is nonzero** (`$A7C0` `tst.b d2` / `beq $A800`; section 6.4) | CLOSED (Disk.2 table bounds) | sim.ts:1632 |
 | `$A84E` | A | | `moveq #5` (`$A814`), `dbra` (`$A864`), untouched: 5..0; byte 1 = 0 | CLOSED | sim.ts:1584 |
 | `$AE20` | A | | family E | CLOSED (ordinary-play invariant) | sim-aliens.ts:439 (stage 0) |
 | `$AE5E` | A | | family E (via `bmi $AE52`, D0 unchanged) | CLOSED (ordinary-play invariant) | :439 (stage 1) |
@@ -89,7 +89,7 @@ Other (non-dispatched) enclosing routines and their single direct callers: birth
 | `$AF8E` | A | | family E (`$AF84-$AF86`) | CLOSED (ordinary-play invariant) | :486 |
 | `$AFE2` | A | | family E (`$AFCE-$AFD0`) | CLOSED (ordinary-play invariant) | :480 |
 | `$B056` | A | | family E (`$B052-$B054`) | CLOSED (ordinary-play invariant) | :255 |
-| `$10BE8` | C | `$14` | `$144EC` (long) -> `q = trunc(x/100)` (sign handled), `d0 = (q+100) >> 1` (`asr.l`), fully inside `$10BC8` (no caller dependence). Byte 1 = 0 iff `d0` low word < 256; see 6.3 | FORMULA | sim.ts:1346 |
+| `$10BE8` | C | `$14` | `$144EC` (long) -> `q = trunc(x/100)` (sign handled), `d0 = (q+100) >> 1` (`asr.l`), fully inside `$10BC8` (no caller dependence). `$2DCC` uses only byte 1 of this D0. Byte 1 = 0 iff `$144EC` is in -10099..41199 (section 10, D3); see 6.3 | FORMULA (byte-1 bound on `$144EC` open; observed 0 at row 32) | sim.ts:1423 |
 | `$10CB8` | C | 6 | `$142CE` long (>= 0, `$10C72`), preserved by the `push/pop` in `$10CB4`; see 6.3 | FORMULA | sim.ts:862 |
 | `$10D1C` | A | | `$14472` long, bit 3 clear (`$10D08-$10D12`); see 6.2 | FORMULA | sim.ts:897 |
 | `$10D38` | A | | same (preserved across `$10D1C`) | FORMULA | sim.ts:901 |
@@ -116,14 +116,14 @@ Other (non-dispatched) enclosing routines and their single direct callers: birth
 | `$113A6` | A | | `$48` (k = 12); byte 1 = 0 | CLOSED (ordinary dispatch bound) | sim-ships.ts:405 |
 | `$11414` | A | | `$0000011E`: `move.w #$11E,d0` at `$113FA` on D0 = `$60`; the only way in is the fall-through from `$11408` (`bne` at `$11406` skips to `$1142A`). **Byte 1 = `$01`** | CLOSED (ordinary dispatch bound) | sim.ts:816 |
 | `$1146A` | A | | `$06` (k = 1); byte 1 = 0 | CLOSED (ordinary dispatch bound) | sim-aliens.ts:128 |
-| `$11484` | C | `$144A6` word (zero skips) | `$06`; byte 1 = 0 | CLOSED (ordinary dispatch bound) | sim-aliens.ts:132 |
+| `$11484` | C | `$144A6` word (zero skips) | Two callers reach it: event 1 (`$06`, the `$1146A` gate first) and the boot exit (`bsr.w $11476` at `$157B8`, which skips the gate). A game-over restart reaches the same call through the same `$157B4` return (game-proper.md, "Restart after game over"; its draw is not captured). The captured first draw is the **boot** call (section 10, D1, resolved). The boot caller's entry D0 is traced statically to `$00000022` (`$15EF0` → `$6B10` → `$6A22` twice; section 10, D1), so byte 1 = 0 on its only path. Event 1 closed as before | CLOSED (boot caller: section 10, D1; event 1 unchanged) | sim-aliens.ts:148 (boot), :138 (event 1) |
 | `$11566` | A | | `$66` (k = 17); byte 1 = 0 | CLOSED (ordinary dispatch bound) | sim-aliens.ts:212 |
 | `$1161A` | A | | `$142A6` long (`move.l` at `$1160E`; the `cmpi.w #3` gate is on its low word). Direct writer: `addq.l #1` at `$56E8`; image default 0 | FORMULA | sim-aliens.ts:164 |
 | `$11762` | A | | after `bsr $B018`; D0 byte 1 = `$FF` only when `$B018` reports successfully while SFX are disabled (`$1581` bit 2 clear); otherwise 0; see 6.5 | FORMULA | sim-aliens.ts:273 |
 | `$11786` | A | | family E (`move.b` + `ext.w` make byte 1 independent of the unresolved D0 from `$B018`) | CLOSED (ordinary-play invariant) | sim-aliens.ts:276 |
 | `$117F6` | C | `$10` | same conditional D0 byte 1 as `$11762` (reached by `bne.w` at `$11742`); see 6.5 | FORMULA | sim-aliens.ts:298 |
 | `$1182E` | C | 8 | `d0 = ((byte $13467 - 1) & $FF) << 6` as a word (`$11816-$1181E`, `moveq #0` first). Writer `$AF52` stores 1..5, image default 1: D0 in {`$00`,`$40`,`$80`,`$C0`,`$100`}; byte 1 = 1 only for 5 | FORMULA | sim-aliens.ts:304 |
-| `$11A74` | C | word `min($142C2, $FE)`, `ext.l` | callers: `$10D48` and `$1163E` pass D0 = `$14472` (6.2); `$119AC` enemy-update callers pass byte 1 = 0 in ordinary play because the ground/air loop counts are bounded to 60/30; see 6.6 | FORMULA | sim.ts:883 |
+| `$11A74` | C | word `min($142C2, $FE)`, `ext.l` | callers: `$10D48` and `$1163E` pass D0 = `$14472` (6.2); `$119AC` enemy-update callers pass byte 1 = 0 in ordinary play because the ground/air loop counts are bounded to 60/30; see 6.6 | FORMULA | sim.ts:946 |
 | `$11CB6` | A | | `1`: reached only by `bne` at `$11CAC` after `bsr $11AE6` returned with N=0, Z=0, which only `moveq #1,d0` at `$11C20` produces (other exits: `moveq #-1`, `moveq #0`) | CLOSED | enemies.ts:1158 |
 | `$11CF0` | A | | `1` (via `$11CB6`) or `0` (entering `$11CC2` from `$11D1C`); `$710A` saves/restores D0. Byte 1 = 0 | CLOSED | enemies.ts:1179 |
 | `$12772` | A | | `moveq #$2F,d0` (`$126A4`) with `dbra` (`$126CC`), untouched in the loop: 47..0; byte 1 = 0 | CLOSED | enemies.ts:948 |
@@ -154,11 +154,11 @@ The sixteen further direct sites that the RAM-staged Copperline invasion capture
 
 ### 6.3 `$142CE` and `$144EC`
 
-`$10BC8` (monthly) stores `d1` into `$142CE` (`$10C6A`; direct reads at `$A942`, `$B956`, `$10C72`). `d1 = 100 - ((q+100)>>1) - (rng-10) - ((5-$142A6)<<3 if > 0) - bonus`, with `q = trunc($144EC / 100)` (signed). `$144EC` starts at `$1388` (`$86BA`). `$A246` reads signed long `m=$144EC`, computes the signed-word factor `f = 100 - trunc(abs(m)/100)`, multiplies signed-word `d0` by signed-word `f`, performs signed-word division by 100 with truncation toward zero, sign-extends the quotient and adds it to `m`. These equations assume the `DIVS.W` quotients fit signed words; extreme values instead take the 68000 division-overflow path. The routine has no clamp. This describes a scaled change inside the nominal +/-10000 region, not a proven global bound: repeated large or sign-changing inputs can overshoot, and outside that region the factor changes sign. Ordinary-play bounds on the callers' changes and the resulting morale are not established. `$144EC` is also read as a long at `$11408` against `-3000` (`$FFFFF448`); therefore the upper bound on `$142CE` and the D0 at `$10BE8` remains FORMULA, not a verified small range.
+`$10BC8` (monthly) stores `d1` into `$142CE` (`$10C6A`; direct reads at `$A942`, `$B956`, `$10C72`). `d1 = 100 - ((q+100)>>1) - (rng-10) - ((5-$142A6)<<3 if > 0) - bonus`, with `q = trunc($144EC / 100)` (signed). `$144EC` starts at `$1388` (`$86BA`). `$A246` reads signed long `m=$144EC`, computes the signed-word factor `f = 100 - trunc(abs(m)/100)`, multiplies signed-word `d0` by signed-word `f`, performs signed-word division by 100 with truncation toward zero, sign-extends the quotient and adds it to `m`. These equations assume the `DIVS.W` quotients fit signed words; extreme values instead take the 68000 division-overflow path. The routine has no clamp. This describes a scaled change inside the nominal +/-10000 region, not a proven global bound: repeated large or sign-changing inputs can overshoot, and outside that region the factor changes sign. Ordinary-play bounds on the callers' changes and the resulting morale are not established. `$144EC` is also read as a long at `$11408` against `-3000` (`$FFFFF448`); therefore the upper bound on `$142CE` and the D0 at `$10BE8` remains FORMULA, not a verified small range. For the `$2DCC` draw at `$10BE8` the relevant quantity is narrower (2026-11-13 re-read of `$10BC8`-`$10BE2`): the call replaces only D0's low byte with TOD, so only byte 1 of `d0 = (q+100) >> 1` matters. That byte is 0 exactly when `q` is in -100..411, i.e. `$144EC` in -10099..41199 (no `divu.w` overflow in that range). Section 10, D3 has the details.
 
 ### 6.4 Market walk `$A7AE`
 
-`$8B02` loads each selected scenario's nine-sector parameter block to `$13034`; its market table at `$1316A` is offset `$136` into that block. Read-only parsing of all ten local WHDLoad 1.2 (0757) Disk.2 blocks found the same 12 signed-word entries (`value, min, max, step, countdown`): initial values are 1..50, minima are nonnegative (0 or 1), and maxima are at most 300. `$A7AE` loads those words with `movem.w (a0),d0-d4`; its two random calls are at `$A7BA` and `$A7CC`. After each walk it clamps the new value to `[min,max]` at `$A7EC-$A7FA` and writes all five words back, so the next monthly pass remains in bounds. Consequently both call sites see D0 in 0..300 and byte 1 is only `$00` or `$01`; their D2 ranges are 4 and `max-min` respectively. For `$A7CC`, the 12 `max-min` ranges are `19,19,9,290,29,29,100,200,100,4,60,100`. This closes the two ordinary scenario-table rows for the supported local Disk.2 data; it is not a bound for arbitrary modified or other-release tables.
+`$8B02` loads each selected scenario's nine-sector parameter block to `$13034`; its market table at `$1316A` is offset `$136` into that block. Read-only parsing of all ten local WHDLoad 1.2 (0757) Disk.2 blocks found the same 12 signed-word entries (`value, min, max, step, countdown`): initial values are 1..50, minima are nonnegative (0 or 1), and maxima are at most 300. `$A7AE` loads those words with `movem.w (a0),d0-d4`; its two random calls are at `$A7BA` and `$A7CC`. The second call is conditional (2026-11-13, static disassembly of Disk.1 `$A7AE-$A800`): `$A7BA` is followed by `tst.b d2` / `beq.b $A800` at `$A7C0`, so a first result of 0 skips the second draw and the update (`$A7CC` is not reached). The capture shows this once (section 10, row 18). After each walk it clamps the new value to `[min,max]` at `$A7EC-$A7FA` and writes all five words back, so the next monthly pass remains in bounds. Consequently both call sites see D0 in 0..300 and byte 1 is only `$00` or `$01`; their D2 ranges are 4 and `max-min` respectively. For `$A7CC`, the 12 `max-min` ranges are `19,19,9,290,29,29,100,200,100,4,60,100`. This closes the two ordinary scenario-table rows for the supported local Disk.2 data; it is not a bound for arbitrary modified or other-release tables.
 
 ### 6.5 `$B018` exit D0 (rows `$11762`, `$117F6`)
 
@@ -178,6 +178,10 @@ Overall, this row is **FORMULA**, not CLOSED: the enemy-update caller has byte 1
 
 `$127B4-$127E0` sums seven `$14274` counters with weights into D0 (`S`). `$1280E-$12822`: `d1 = ceil($14592 / 2)` (`$14592` = tech level, 1..10), `mulu.w d1,d0`, `lsr.w #1,d0`, then `sub.w d0,$14(a1)`. On the path to `$128AC` D0 = `((S.w * d1) & $FFFF) >> 1` in the low word (upper word = upper word of the product), and nothing from `$128AE` to `$12992` modifies it. The sum `S` is over the fleet counters at the front; its bound was not established, so byte 1 depends on `S * d1 >= 512` (FORMULA). The TypeScript `weeklyBattle()` reproduces this expression, which independently supports the trace.
 
+### 6.8 `$143F2` (mine count at `$A3F8`)
+
+`$A3F8` loads `D0 = $143F2 - 1` (mine count minus one) and calls `$2DCA` inside a `dbra` loop at `$A404`, so D0 byte 1 depends on the count. `$143F2` is written at mine completion (`$75D4` within the Disk.1-placed footprint loop) and at mine demolition (independent removal not traced); fresh-game initialization clears it at `$866E`. The exact upper bound on the count was not established from code analysis of all writers; the ordinary-play bound remains the byte 1 check: count <= 256 means byte 1 = 0. The one November production tape miner pass recorded 10 rolled miners at `$A3FE`, consistent with byte 1 = 0, but does not establish the general count ceiling. This row is **FORMULA**, dependent on the saved/imported `$143F2` value; verification of ordinary-play bounds requires further writer analysis or extended capture data.
+
 ## 7. TypeScript cross-reference (`Sim`, `SimAliens`, `SimShips`, `EnemySystem`)
 
 All `roll()` draws in `src/game` (54 call lines: `sim.ts` 32, `sim-aliens.ts` 18, `sim-ships.ts` 1, `enemies.ts` 3; `sim.ts:428` is the definition) were compared with the 62 sites. Each mapping below rests on the TS comment naming the original address/event AND the draw range and compare structure matching the traced code; it is a method mapping, not evidence that the draws occur in the same order or count. Mapping covers all 62 original sites: 52 TS lines map one-to-one, `sim-aliens.ts:439` is one loop line for five original sites, and `sim-aliens.ts:582` one loop line for five (52 + 2 = 54 lines, 52 + 5 + 5 = 62 sites).
@@ -188,7 +192,7 @@ The `TS` column of section 5 is the mapping. Points that needed checking:
 
 - `sim-aliens.ts:439` (loop over five one-shot stage tables `$13EE6/$13F10/$13F3A/$13F64/$13FB8`) matches `$AE20/$AE5E/$AE7C/$AE9A/$AEB6`: the first four bases advance by `$2A`; the fifth is reached by `$13F64 + $54` and stores its ticker at `$14486`.
 - `sim-aliens.ts:582` (`battle()` casualty loop) matches the five unrolled draws in order: `$12910` (index 3, `subq.w #2,d7`), `$12932` (4, `#3`), `$12952` (5, `#4`), `$12972` (6, `#3`), `$12992` (7, `#1`); the two unconditional steps (indices 0, 1; `$128DA`, `$128F2`) have no draw in either.
-- `$11A74` is one TS draw (`Sim.randomBuilding`, `sim.ts:883`) serving three TS callers that correspond to the three original callers: arson (`sim.ts:907`, original `$10D48`), meteor (`sim-aliens.ts:167`, `$1163E`), ground-unit target pick (`enemies.ts:1001`, the `$1193E` family; which original branch of `$119AC` it stands for is not matched).
+- `$11A74` is one TS draw (`Sim.randomBuilding`, `sim.ts:946`, returning `[x, y, tile]`; the only function that calls `roll` for this site, as the invasion comparator's binding requires) serving three TS callers that correspond to the three original callers: arson (`sim.ts:972`, original `$10D48`), meteor (`sim-aliens.ts:181`, `$1163E`), ground and air target pick (`enemies.ts:1015`, `pickTarget`, one draw per call). Its four original callers are traced: walker `beq $119AC` at `$11980`, crusher `bra` at `$11F1C`, bomber `bra` at `$11C8C`, kamikaze `bsr` at `$119C6`; each draws once whether or not a building is found (enemies.md section 3d).
 - `enemies.ts:948` is the bomb-chance draw behind the TOD gate (`$12694`); the gate itself is not a `$2DCx` call.
 
 ### 7.2 Fifth one-shot report: `$AEB6` (static trace; port updated)
@@ -206,10 +210,77 @@ None. Every one of the 54 TS lines maps to at least one original site above.
 | Arbitrary event-dispatch state | Ordinary new-game flow bounds `$144BF` to 0..27, with zero chance at 20..27; arbitrary imported/hand-edited values can still index beyond the dispatch table and need validation or a capture. |
 | Arbitrary `$144CA` state | Ordinary new-game writes are bounded to 0..4, closing family E for ordinary play. To claim it for arbitrary imported/hand-edited states, validate their `$144CA` bytes or capture a family-E call with an out-of-domain value. |
 | FORMULA, `$14472` (5 rows + `$11A74`) | A higher-tech original tape to validate the predicted invention-bit transitions dynamically; extending the fresh-game writer proof to imported Disk.4/native-save states needs validation of their restored `$14472` values. |
-| FORMULA, `$142CE` / `$144EC` (`$10BE8`, `$10CB8`, `$10DAC/C8/E6`) | A bound on `$144EC` from the `$A246` callers, or tapes at extreme morale. |
+| FORMULA, `$142CE` / `$144EC` (`$10BE8`, `$10CB8`, `$10DAC/C8/E6`) | A bound on `$144EC` from the `$A246` callers (for `$10BE8` it only has to lie in -10099..41199 for byte 1 = 0; the exact 5200..5399 band does not affect the draw), or tapes at extreme morale. |
 | FORMULA, `$A3F8`, market, `$1161A`, `$1182E`, `$1129C`, `$128AE..$12992` | The range of the named counter (`$143F2`, Disk.2 market table, `$142A6`, `$13467`, `$1429C`, fleet counters `$14274..`) from writers or play. |
 | `$AEB6` mapping | A tape or trace showing whether the fifth stage fires in the original; then decide on the TS side. |
 
 ## 9. What this does not establish
 
 No RNG integration, no ordering or count equivalence between `Sim` and the original beyond the per-site mapping above, no first-use seed (see sim-port.md "Seed initialisation `$2DA0`"), no reachability proof for any site, and no dynamic coverage beyond the seven tape sites. `Sim.roll(range)` still provides neither D0 nor CIA TOD, so nothing here justifies wiring `original-rng.ts` into the game-wide generator; the tables above only state what such wiring would have to feed per site.
+
+## 10. Captured-caller input audit (tutorial first pass, 2026-11-13)
+
+Scope: the 32 `$2DCC` entries of the 2026-11-11/12 tutorial first pass (one run each, same input). Sources: `UtopiaMoneyCap-20261112/out/route2-capture.json` (`rng_hits`: D0, D2 at entry, return address, seed before; `births_hits`) and `UtopiaTutorialCap-20261111/out/route-capture.json` (same 32 `d0`, `d2`, `return_addr`, `a7`, `frame`; no seed). The two agree on every field they share. Registers are read at the `$2DCC` breakpoint (entry), so D2 is the range word plus any high word the caller left. Call site = return address - 6. No emulator was run. Static checks: Disk.1 disassembly (`tools/game_dis.py`) and a text scan of the decoded image for references to `$1146A`/`$11484`/`$10E58`.
+
+Model replay: `originalRngStep` with each recorded D0 and range, the recorded seed, and the inferred TOD (`$DB` at frame 14321, `$E1` at frame 14327, as in section 2 of `game-proper.md`). All 31 links reproduce their next recorded seed.
+
+`roll(n)` cannot take D0 or TOD. Its results come from the remake generator, so it cannot reproduce any of these 32 draws. D0 byte 1 (bits 8..15) is the only D0 part that matters (`$2DCC`); the low byte is overwritten by TOD. All 32 captured D0 values are below `$100` (max 76), so byte 1 = 0 for every entry. D2 uses only its low word.
+
+| # | Frame | Site (ret) | Entry D0 | Entry D2 (full) | Range | Remake call (current line) | `roll(n)` supplies D0 byte 1? | Replay result (inferred TOD) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 14321 | `$11484` (`$1148A`), boot exit `$157B8` → `$11476` | `$22` | `$FFFF000A` | 10 | `sim-aliens.ts:148` (`initializeScenarioAppearance`, one `roll(n)`, via `Sim.leaveBootMenu`) | no (no D0 input) | 0 |
+| 2 | 14327 | `$A7BA` (`$A7C0`) | 5 | 4 | 4 | `sim.ts:1629` (`walkEntry`, `roll(4)`) | no | 1 |
+| 3 | 14327 | `$A7CC` (`$A7D2`) | 5 | 19 | 19 | `sim.ts:1632` (`walkEntry`, `roll(max-min)+min`) | no | 11 |
+| 4 | 14327 | `$A7BA` | 5 | 4 | 4 | `sim.ts:1629` | no | 3 |
+| 5 | 14327 | `$A7CC` | 5 | 19 | 19 | `sim.ts:1632` | no | 15 |
+| 6 | 14327 | `$A7BA` | 3 | 4 | 4 | `sim.ts:1629` | no | 1 |
+| 7 | 14327 | `$A7CC` | 3 | 9 | 9 | `sim.ts:1632` | no | 2 |
+| 8 | 14327 | `$A7BA` | 30 | 4 | 4 | `sim.ts:1629` | no | 3 |
+| 9 | 14327 | `$A7CC` | 30 | 290 | 290 | `sim.ts:1632` | no | 156 |
+| 10 | 14327 | `$A7BA` | 8 | 4 | 4 | `sim.ts:1629` | no | 1 |
+| 11 | 14327 | `$A7CC` | 8 | 29 | 29 | `sim.ts:1632` | no | 18 |
+| 12 | 14327 | `$A7BA` | 5 | 4 | 4 | `sim.ts:1629` | no | 3 |
+| 13 | 14327 | `$A7CC` | 5 | 29 | 29 | `sim.ts:1632` | no | 6 |
+| 14 | 14327 | `$A7BA` | 20 | 4 | 4 | `sim.ts:1629` | no | 3 |
+| 15 | 14327 | `$A7CC` | 20 | 100 | 100 | `sim.ts:1632` | no | 93 |
+| 16 | 14327 | `$A7BA` | 50 | 4 | 4 | `sim.ts:1629` | no | 1 |
+| 17 | 14327 | `$A7CC` | 50 | 200 | 200 | `sim.ts:1632` | no | 47 |
+| 18 | 14327 | `$A7BA` | 50 | 4 | 4 | `sim.ts:1629` | no | **0 (no second draw follows)** |
+| 19 | 14327 | `$A7BA` | 1 | 4 | 4 | `sim.ts:1629` | no | 2 |
+| 20 | 14327 | `$A7CC` | 1 | 4 | 4 | `sim.ts:1632` | no | 1 |
+| 21 | 14327 | `$A7BA` | 20 | 4 | 4 | `sim.ts:1629` | no | 1 |
+| 22 | 14327 | `$A7CC` | 20 | 60 | 60 | `sim.ts:1632` | no | 30 |
+| 23 | 14327 | `$A7BA` | 40 | 4 | 4 | `sim.ts:1629` | no | 2 |
+| 24 | 14327 | `$A7CC` | 40 | 100 | 100 | `sim.ts:1632` | no | 96 |
+| 25 | 14327 | `$A84E` (`$A854`) | 5 | 100 | 100 | `sim.ts:1666` (`marketWalk`) | no | 75 |
+| 26 | 14327 | `$A84E` | 4 | 100 | 100 | `sim.ts:1666` | no | 84 |
+| 27 | 14327 | `$A84E` | 3 | 100 | 100 | `sim.ts:1666` | no | 25 |
+| 28 | 14327 | `$A84E` | 2 | 100 | 100 | `sim.ts:1666` | no | 92 |
+| 29 | 14327 | `$A84E` | 1 | 100 | 100 | `sim.ts:1666` | no | 85 |
+| 30 | 14327 | `$A84E` | 0 | 100 | 100 | `sim.ts:1666` | no | 89 |
+| 31 | 14327 | `$9BCC` (`$9BD2`) | 30 | 30 | 30 | `sim.ts:1209` (`births`, `roll(difficulty)`) | no | 26 (matches `births_hits` `d2_result`) |
+| 32 | 14327 | `$10BE8` (`$10BEE`) | 76 | 20 | 20 | `sim.ts:1423` (`crimeMonthly`, `roll(20)`) | no | 12 |
+
+Notes on the rows:
+- Rows 2–24 are the market walk: 12 first draws (`$A7BA`) and 11 second draws (`$A7CC`). Each second draw's D0 equals the first draw's D0 (the same current value), and each second-draw range equals the Disk.2 `max-min` of the walked entry in table order (19, 19, 9, 290, 29, 29, 100, 200, [skipped], 4, 60, 100). Row 18's first draw returned 0, so its second draw did not run. The remake's `walkEntry` already has this branch (`if (d2 === 0) return`).
+- Rows 25–30 are the six `$A84E` draws (`$2DCA`, D2 = 100, D0 counts 5..0 as the `dbra` loop).
+- Row 31 (births) D2 is the difficulty byte `$145A2` = `$1E`; the replay result (26) equals the recorded `d2_result`.
+- Row 32 D0 = 76 (`$4C`) = `(q+100)>>1` with q = 52 or 53, i.e. `$144EC` in 5200..5399 (corrected from 5200..5299). `$144EC` is not in either capture, so q is not checked. The start value `$1388` (5000) would give q = 50 and D0 = 75; that is not the observed value, but it does not change the draw, which reads only byte 1 of D0 (section 10, D3).
+
+### Discrepancies and unresolved items
+
+- **D1 (row 1, `$11484`; RESOLVED 2026-11-13, boot caller, not event 1).** The first draw is the boot-exit call, not the event-1 path. Static: `$157B8` is `bsr.w $11476` (bytes `6100BCBC`, return `$157BC`, after `jsr $7E52` and `bsr $15EF0`; game-proper.md, boot tail). `$11476` starts with `clr.b $144A8`, so it skips the `$1146A` `jsr $2DCA` gate that event 1 runs first. The earlier open reading assumed event 1 and predicted a `$11470` hit. Evidence from the 2026-11-12 capture: (1) no `$2DCC` hit precedes row 1 after the click (the `$2DCA` gate would have produced one at `$2DCC`, D2 = 100, return `$11470`), and the seed before row 1 is the image default `$BFE0450D` (`$2EA0` bytes in Disk.1), so no draw changed the seed before it; (2) the retired-instruction counters in `route2-protocol.log` put the `$157BC` breakpoint 26 instructions after the row-1 `$2DCC` breakpoint, which is exactly the `$2DCC` body (17 instructions to `rts`) plus `$1148A`-`$114AA` (9 instructions to `rts`), so the routine returned straight to `$157BC`; an event-1 return would go to the dispatcher `$10E50`; (3) the range 10 is the `$144A6` word that the boot path reads at `$1147C`. The remake's `initializeScenarioAppearance()` (`sim-aliens.ts:148`, called by `Sim.leaveBootMenu`, `sim.ts:319`) is one `roll(n)` with no gate, which matches. The audit's earlier mapping of row 1 to `sim-aliens.ts:138` was wrong, and the missing `$2DCA` draw was a wrong expectation, not a probe artifact. **Boot caller's D0, traced (2026-11-13, static, same day):** `bsr.w $15EF0` at `$157B4` returns with D0 from its last callee. `$15EF0` runs `moveq #0,d0` at `$15F24` (no branch before it), then `jsr $6B10` with `d5` = `$39` (`moveq #$39,d5`, `$15F32`), so `$6B10`'s `tst.l d5` / `beq` falls through. `$6B10` sets `move.w #$110,d0`, saves D0/D1/D5 with `movem.l`, calls `$6A22` (`lsr.w #3,d0` gives `$0022`; `$69D8` saves and restores its registers and does not touch D0; the `cmpi.w #$48,d5` branch is fixed by `d5` = `$39`), restores D0 to `$00000110`, and calls `$6A22` again, which leaves **D0 = `$00000022`**. `$157B8` (`bsr.w $11476`), `clr.b $144A8`, `move.w $144A6,d2` and `beq` change no D0 before `$11484`. So the entry D0 is `$00000022` on the only path, byte 1 = 0, matching the capture (`d0` = 34). The boot caller is CLOSED. The D2 high word `$FFFF` is a caller leftover (`mulu.w` reads only the low word, and `$2DCC` leaves a zero high word). Event 1's own gate has no capture yet: a read-only breakpoint on `$1146A` in a run of an event-1 apparition would settle its draw order.
+- **D2 (market walk; FIXED in notes).** Sections 5 and 6.4 previously read the second draw as unconditional. The disassembly shows it is conditional on a nonzero first result. The remake already has the branch; the capture shows it once (row 18).
+- **D3 (`$10BE8`, row 32; band corrected, draw-relevant part closed for this entry, `$144EC` bound open).** Static trace of `$10BC8`-`$10BE8` (2026-11-13 re-read): `d1` = 100; `d0` = `$144EC`; for `d0` >= 0 `divu.w d1,d0` / `ext.l`, otherwise the same on the absolute value with a sign flip, so `q` = trunc(`$144EC`/100); `add.l d1,d0` and `asr.l #1,d0` give `d0` = (q+100) >> 1, which is the `$2DCC` caller's D0 at `$10BE8`. D0 = 76 needs q = 52 or 53, so `$144EC` is in **5200..5399**; the earlier note's 5200..5299 missed q = 53 (`(53+100)>>1` = 76 as well). The start value 5000 gives q = 50 and D0 = 75. The draw does not need the exact band: `$2DCC` replaces D0's low byte with TOD, so only byte 1 of D0 matters. Byte 1 is 0 for q in -100..411, i.e. `$144EC` in -10099..41199 (the `divu.w` path has no overflow there). Outside that range byte 1 is nonzero: a negative result below -10099, and from 41200 a result of 256 or more. Row 32's byte 1 is observed 0 (capture `d0` = 76 as a full register value). `$144EC` is still not captured, so its ordinary-play bound, and therefore byte 1 for other morale values, remains FORMULA.
+- **D4 (capture naming).** `route2-capture.json` (2026-11-12 probe, folder `UtopiaMoneyCap-20261112`) is the only file with seeds and births, so it is what `UTOPIA_TUTORIAL_CAPTURE_DIR` must point at (the folder or its `out/`). `route-capture.json` (2026-11-11, `UtopiaTutorialCap-20261111`) has no seed field and is not a substitute for the chain check.
+
+### Test added (narrow, model against capture)
+
+`test/original-rng-tutorial.mjs`, chain section (runs only with `UTOPIA_TUTORIAL_CAPTURE_DIR` set): the market walk's model results are checked against the traced branch. Every first `$A7BA` result is 0..3, every second `$A7CC` result is below its range, the second draw follows a nonzero first draw, and the capture has one zero first draw and eleven nonzero ones. This tests the model's output against the control flow. It is not a new TOD observation and not parity evidence for the walk.
+
+### Scope (what this does not establish)
+
+- No caller is wired to `OriginalRngModel`. `Sim` keeps `createRng`. The TOD byte is still an inferred input, and the engine has no CIA-A source.
+- The D0 values are observed for these 32 entries only. For other sites, D0 is still a traced formula (section 5).
+- D1 is resolved for the boot caller (above), and its entry D0 (`$00000022`) is traced statically. The event-1 draw order (`$1146A` gate, then `roll(n)`) is traced statically but not captured.
+- Interface check (2026-11-13): `OriginalRngModel.draw(d0, range, tod)` takes the full caller D0 and range, so the boot row (`d0` `$22`, range 10) and the morale row (`d0` 76, range 20) can be expressed without changes. The TOD byte is still inferred from the seed chain, so neither row is a standalone observed test. No new test was added: `test/original-rng.mjs` already checks that D0's upper word and low byte do not affect the draw, and that bits 8..15 do.

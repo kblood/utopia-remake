@@ -230,6 +230,10 @@ function stepsToArrive(sys, unit, limit = 5000) {
   cells[(by + 1) * MAP_WIDTH + bx - 1] |= BLOCKED;
   const third = sys.spawnAtYard(bx, by, false);
   check("blocked exits are skipped", third.x === bx - 1 && third.y === by, `${third.x - bx},${third.y - by}`);
+  const next = sys.yardExit(bx, by);
+  check("yardExit names the cell the next spawn uses (right of the building)", next !== null && next.x === bx + 1 && next.y === by, JSON.stringify(next));
+  const fourth = sys.spawnAt(next.x, next.y, false);
+  check("spawnAt places a unit on the exit it was given", fourth !== null && fourth.x === next.x && fourth.y === next.y);
   let full = 0;
   for (let i = 0; i < 120; i++) if (sys.spawn(UNIT_BASIC, 1 + (i % 90), 1 + Math.floor(i / 90), 0) === null) full++;
   check("the list holds at most 99 units", sys.units.length === 99 && full > 0, `${sys.units.length}`);

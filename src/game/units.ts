@@ -420,13 +420,26 @@ export class UnitSystem {
     [-1, -1],
   ];
 
-  spawnAtYard(bx: number, by: number, advanced: boolean): Unit | null {
+  // The first free exit of a tank yard at (bx, by) in the original's order, or null when all eight neighbours are
+  // blocked (original: message $95, the yard keeps its counter and tries again later). Checked BEFORE the unit-list
+  // test of $37CA, so a full list is only reported (message $8F) when an exit exists.
+  yardExit(bx: number, by: number): { x: number; y: number } | null {
     for (const [ox, oy] of UnitSystem.YARD_EXITS) {
       const x = bx + ox;
       const y = by + oy;
-      if (this.cellFree(x, y)) return this.spawn(advanced ? UNIT_ADVANCED : UNIT_BASIC, x, y, 0);
+      if (this.cellFree(x, y)) return { x, y };
     }
-    return null; // original: message $95, tries again later
+    return null;
+  }
+
+  // $37CA with a basic or advanced tank on (x, y). Null when the unit list is full.
+  spawnAt(x: number, y: number, advanced: boolean): Unit | null {
+    return this.spawn(advanced ? UNIT_ADVANCED : UNIT_BASIC, x, y, 0);
+  }
+
+  spawnAtYard(bx: number, by: number, advanced: boolean): Unit | null {
+    const exit = this.yardExit(bx, by);
+    return exit === null ? null : this.spawnAt(exit.x, exit.y, advanced);
   }
 
   // $C8B4: send a unit to a cell (the original takes the position of one of the eight marker pins).
@@ -442,6 +455,16 @@ export class UnitSystem {
     if (!inMap(unit.reserveX, unit.reserveY)) return;
     this.cells[mapIndex(unit.reserveX, unit.reserveY)] &= ~OCCUPIED;
     this.flags[cellFlagIndex(unit.reserveX, unit.reserveY)] &= ~OWN_UNIT_FLAG;
+  }
+
+  /**
+   * Frees the unit's slot and nothing else: no reservation, map bit or flag is released. Event 17 ($11566) clears
+   * only the record's type byte (`clr.b (a0)`), so the converted tank's reserved cell keeps its bit 14 and own-unit
+   * flag (enemies.md 7). The caller writes the cells it needs (`EnemySystem.defect`).
+   */
+  vacate(unit: Unit): void {
+    if (unit.slot < 0 || this.slots[unit.slot] !== unit) return;
+    this.slots[unit.slot] = null;
   }
 
   // One pass of the main loop ($333A). A unit is stepped on the move tick (every 9th pass) or whenever it is not

@@ -45,7 +45,7 @@ export const DISK4_LOAD_RESET: readonly Disk4ResetWrite[] = [
   { address: 0x15698, bytes: [0xff], at: "$87AE", model: "message list head: empty log (a fresh Messages)" },
   { address: 0x1568c, bytes: [0, 0], at: "$87B4", model: "message panel used-line count = 0 (a fresh Messages)" },
   { address: 0x156a8, bytes: [0x94], at: "$87BA", model: "bit 7 = a day change is queued (Sim.dayQueued = true); bit 4 (dialog busy) and bit 2 (screen active) are cleared/set again by the exit handler $802C, not modelled" },
-  { address: 0x156a9, bytes: [0x02], at: "$87C2", model: "pause bit 2 clear (Sim.paused = false); redraw-gate bit 3 clear" },
+  { address: 0x156a9, bytes: [0x02], at: "$87C2", model: "pause bit 2 clear (Sim.paused = false); redraw-gate bit 3 clear; blast mark bit 5 clear (Sim.blastMark = false)" },
   { address: 0x156aa, bytes: [0x01], at: "$87CA", model: "system flags: every flag cleared (game over, tutorial, no-unit-bonus, QoL, eclipse, attack pending); bit 0 is cleared again by $80A6 on game start, so Sim.sysFlags = 0" },
   { address: 0x156ab, bytes: [0x01], at: "$87D2", model: "draw-mode byte (unmodelled)" },
   { address: 0x39d4a, bytes: zeros(240), at: "$88DC-$88E6", model: "all 30 effect slots free (the effect pool of the scene starts empty)" },
@@ -105,7 +105,7 @@ export type Disk4ResetResult = { readonly ok: true } | { readonly ok: false; rea
 
 /**
  * Applies the part of `DISK4_LOAD_RESET` the engine models to a DETACHED prepared graph's Sim, before the scene is built:
- * `sysFlags = 0`, `paused = false`, `dayQueued = true` (`$156A8` bit 7), all four warning lights unlit. The message log, the
+ * `sysFlags = 0`, `paused = false`, `blastMark = false` (`$156A9` bit 5), `dayQueued = true` (`$156A8` bit 7), all four warning lights unlit. The message log, the
  * hover cell and the 30-slot effect pool belong to the scene and start empty / unset there (the traced values above). No saved
  * byte (area A/B image, map, flags, objects, enemy/ship/tank slots, pending period bits, gun/period state, alien and meteor
  * records, markers, view origin) is read or written, no RNG is drawn, no hook runs. Refuses a Sim that is not a snapshot
@@ -119,6 +119,7 @@ export function applyDisk4LoadReset(graph: { readonly sim: Sim }): Disk4ResetRes
   }
   sim.sysFlags = 0;
   sim.paused = false;
+  sim.blastMark = false;
   sim.dayQueued = true;
   sim.alerts.flags.fill(0);
   return { ok: true };

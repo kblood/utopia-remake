@@ -35,6 +35,13 @@ const TILE_MINE = 0x60;
 const TILE_FUEL = 0x3e;
 const TILE_MARKER = 0x7f;
 
+/**
+ * Solar-phase stream state of a world that has no saved stream (World.fromSnapshot, and a restored save without
+ * `world.solarPhaseRng`: versions 2-3 and version-less slots). Fixed, never host-random, so loading the same slot always
+ * continues the same stream.
+ */
+export const FIXED_SOLAR_PHASE_STATE = 0;
+
 /** Word in the variable block: number of used object records ("saved count"). */
 export const OBJECT_COUNT_ADDRESS = 0x142c2;
 
@@ -100,7 +107,7 @@ export class World {
       throw new RangeError("World: solarPhaseSeed must be an unsigned 32-bit integer");
     }
     // A snapshot/restored world must not consume host randomness while a load is being prepared.
-    this.solarPhaseRng = createRng(marker === FROM_SNAPSHOT ? 0 : seed ?? Math.floor(Math.random() * 0x1_0000_0000));
+    this.solarPhaseRng = createRng(marker === FROM_SNAPSHOT ? FIXED_SOLAR_PHASE_STATE : seed ?? Math.floor(Math.random() * 0x1_0000_0000));
     this.startupSolarPhase = options?.startupSolarPhase;
     this.cells = cells.slice();
     if (marker === FROM_SNAPSHOT && saved) {

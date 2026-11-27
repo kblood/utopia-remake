@@ -137,8 +137,6 @@ export class IntelScreen extends PanelScene {
     if (entry.done !== null) {
       fundIntelligence(this.state, entry.done);
       this.entry = null;
-    } else if (entry.cancelled) {
-      this.entry = null;
     }
     return true;
   }

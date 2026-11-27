@@ -196,8 +196,10 @@ export interface MenuView {
   researchBits: number;
   selected: number | null; // the pending selection (`$142AA`), previewed at the right
   detail: MenuDetail | null;
-  // The command button held down by `$5756` and not yet released (`$5DD4`); shown flipped until `$57FA` flips it back.
-  pressed?: number;
+  // Per command button (index = `$5E06` order): whether its image is flipped. `$5756` and `$57FA` each flip it (XOR), so a
+  // button pressed again while held, or released after a repeated press, can stay flipped; the column is drawn fresh only
+  // when the menu opens.
+  flipped?: readonly boolean[];
 }
 
 export class BuildMenuRenderer {
@@ -225,7 +227,9 @@ export class BuildMenuRenderer {
   draw(screen: Screen, view: MenuView): void {
     this.ui.frame(screen, this.window);
     this.ui.drawButtons(screen, this.buttons);
-    if (view.pressed !== undefined && view.pressed >= 0) this.ui.invertButton(screen, view.pressed);
+    view.flipped?.forEach((on, i) => {
+      if (on) this.ui.invertButton(screen, i);
+    });
     for (const item of menuItems(view.page, view.researchBits)) {
       for (const p of itemPlacements(item)) blitTile(screen, this.tiles[p.tile - 1], p.x, p.bottomRow);
     }
